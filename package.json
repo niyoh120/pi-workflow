@@ -1,0 +1,9 @@
+{
+  "name": "pi-workflow",
+  "version": "0.1.0",
+  "description": "Lightweight software development workflow extension for pi-coding-agent: planning, review, implementation, code review, and commit orchestration",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extensions/workflow/index.ts"]
+  }
+}
