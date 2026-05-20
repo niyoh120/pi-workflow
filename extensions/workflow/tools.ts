@@ -202,7 +202,7 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
           content: [
             {
               type: "text",
-              text: "Plan approved. Worker handoff will start after this turn.",
+              text: "Plan approved. Work Mode will start after this turn.",
             },
           ],
           details: { state },

@@ -1,7 +1,7 @@
 /**
  * Pi Workflow Extension
  *
- * A lightweight software development workflow that layers planning,
+ * A lightweight software development workflow that layers plan,
  * plan review, implementation, code review, and commit phases on top
  * of pi-coding-agent. Supports pi install, global config merge, and
  * multi-plan document management under .pi/workflow/plan/.

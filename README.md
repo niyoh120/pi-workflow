@@ -1,6 +1,6 @@
 # pi-workflow
 
-Lightweight software development workflow extension for pi-coding-agent: planning, plan review, implementation, code review, and commit orchestration.
+Lightweight software development workflow extension for pi-coding-agent: plan, plan review, implementation, code review, and commit orchestration.
 
 ## Installation
 
@@ -20,12 +20,12 @@ After installation, the extension auto-loads on every pi session.
 
 | Mode | Command | Description |
 |------|---------|-------------|
-| Planning | `/plan` | Brainstorm and produce an implementation plan |
-| Plan Review | (auto) | Review the plan before execution |
-| Work | `/work` | Implement the approved plan |
+| Plan Mode | `/plan` | Brainstorm and produce an implementation plan |
+| Plan Review Mode | (auto) | Review the plan before execution |
+| Work Mode | `/work` | Implement the approved plan |
 | Fix | (auto) | Fix critical/important issues from code review |
-| Code Review | `/review` | Review the current git diff |
-| Commit | `/commit` | Generate and execute a conventional commit |
+| Code Review Mode | `/review` | Review the current git diff |
+| Commit Mode | `/commit` | Generate and execute a conventional commit |
 
 ## Configuration
 
@@ -106,9 +106,9 @@ Each plan automatically gets a corresponding review file (`<plan-basename>.revie
 
 | Command | Description |
 |---------|-------------|
-| `/plan` | Enter planning mode |
-| `/go [--force]` | Approve current plan and hand off to worker |
-| `/work [task]` | Skip planning, go straight to implementation |
+| `/plan` | Enter Plan Mode |
+| `/go [--force]` | Approve current plan and hand off to Work Mode |
+| `/work [task]` | Skip Plan Mode, go straight to implementation |
 | `/review` | Manual code review on current diff |
 | `/commit [notes]` | Generate commit message and commit |
 | `/wf-status` | Show current workflow state |

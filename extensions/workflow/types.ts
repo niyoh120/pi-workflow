@@ -4,7 +4,7 @@ export type Role = "plan" | "planReview" | "work" | "review" | "commit";
 
 export type Mode =
   | "idle"
-  | "planning"
+  | "plan"
   | "planReview"
   | "work"
   | "review"

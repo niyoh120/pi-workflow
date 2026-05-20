@@ -2,7 +2,7 @@ import type { Mode, WorkflowState } from "./types.js";
 
 /** Returns true if the given mode does not allow local file mutations. */
 export function isReadonlyMode(mode: Mode): boolean {
-  return mode === "planning" || mode === "planReview" || mode === "review";
+  return mode === "plan" || mode === "planReview" || mode === "review";
 }
 
 /** Check whether a shell command would modify local files. */

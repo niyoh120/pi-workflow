@@ -12,6 +12,19 @@ export function todoText(s: WorkflowState): string {
     .join("\n");
 }
 
+/** Map internal mode to user-visible label for TUI status. */
+export function modeLabel(mode: string): string {
+  const labels: Record<string, string> = {
+    plan: "Plan Mode",
+    planReview: "Plan Review Mode",
+    work: "Work Mode",
+    fix: "Fix Mode",
+    review: "Code Review Mode",
+    commit: "Commit Mode",
+  };
+  return labels[mode] ?? mode;
+}
+
 /** Build the current workflow status text block to inject into the system prompt. */
 export function currentStatusText(
   config: { planReview: { enabled: boolean; maxLoops: number }; codeReview: { enabled: boolean; maxLoops: number } },

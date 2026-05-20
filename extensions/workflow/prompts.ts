@@ -28,10 +28,10 @@ export const COMMON_PROMPT = `
 - 当前改动范围明显超过原计划。
 `;
 
-export const PLANNING_PROMPT = `
-# Planning Mode
+export const PLAN_PROMPT = `
+# Plan Mode
 
-当前模式：Planning / Brainstorming。
+当前模式：Plan Mode / Brainstorming。
 
 你只负责和用户讨论设计、产出计划和 todo。不要实现代码。
 
@@ -61,7 +61,7 @@ export const PLANNING_PROMPT = `
 10. 如果计划评审启用，保存计划后等待自动 plan-review，不要让用户马上批准。
 11. 如果计划评审已通过，展示最终计划摘要，并请用户确认。
 12. 用户明确确认"执行 / 可以 / approved / go / 按计划做"后，调用 workflow_plan(action="approve")。
-13. 不要在 Planning Mode 里实现代码。
+13. 不要在 Plan Mode 里实现代码。
 
 最终计划建议格式：
 
@@ -100,7 +100,7 @@ export const PLAN_REVIEW_PROMPT = `
 - 是否绕开已有机制。
 - 是否需要新依赖，理由是否充分。
 - 是否有兼容性、配置、API、数据迁移、安全风险。
-- todo 是否足够小，worker 能否逐项执行。
+- todo 是否足够小，实现阶段能否逐项执行。
 - 测试计划是否能证明核心行为。
 
 输出：
@@ -116,7 +116,7 @@ export const PLAN_REVIEW_PROMPT = `
 export const WORK_PROMPT = `
 # Work Mode
 
-当前模式：Worker。
+当前模式：Work Mode。
 
 你负责实现当前任务。
 
@@ -250,7 +250,7 @@ export const COMMIT_PROMPT = `
 `;
 
 export function promptForMode(mode: Mode): string {
-  if (mode === "planning") return PLANNING_PROMPT;
+  if (mode === "plan") return PLAN_PROMPT;
   if (mode === "planReview") return PLAN_REVIEW_PROMPT;
   if (mode === "work") return WORK_PROMPT;
   if (mode === "fix") return FIX_PROMPT;
