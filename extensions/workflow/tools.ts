@@ -4,7 +4,9 @@ import { Type } from "typebox";
 import { loadState, saveState, writeNewPlan, readPlan, writePlanReview } from "./state.js";
 import { loadConfig } from "./config.js";
 import { todoText } from "./helpers.js";
-import type { WorkflowState } from "./types.js";
+import type { WorkflowState, SubagentRole, ModelSpec } from "./types.js";
+import { runSubagent } from "./subagent.js";
+import { promptForSubagentRole } from "./prompts.js";
 
 const TodoStatusSchema = StringEnum([
   "pending",
@@ -277,5 +279,222 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
         details: { state },
       };
     },
+  });
+}
+
+// ── workflow_subagent tool ─────────────────────
+
+const SubagentRoleSchema = StringEnum([
+  "planReview",
+  "review",
+  "explore",
+] as const);
+
+export function registerSubagentTool(pi: ExtensionAPI, getAgentDir: () => string): void {
+  pi.registerTool({
+    name: "workflow_subagent",
+    label: "Workflow Subagent",
+    description:
+      "Spawn a role-shaped, read-only child Pi process with no parent session history. Supported roles: planReview (isolated plan review), review (isolated code review), explore (fast read-only codebase exploration). Child returns a structured result with text, status marker, exit code, and usage.",
+    promptSnippet:
+      "workflow_subagent: spawn a read-only child Pi process to handle review or exploration with a clean session. The child has no parent context — pass everything it needs explicitly.",
+    promptGuidelines: [
+      "Use workflow_subagent to get an objective review or explore the codebase without parent session history.",
+      "Provide role (planReview, review, or explore), task, and relevant context.",
+      "Use instructions for extra preferences (depth, format, focus).",
+    ],
+    parameters: Type.Object({
+      role: SubagentRoleSchema,
+      task: Type.String({
+        description: "The focused task for the subagent.",
+      }),
+      context: Type.Optional(Type.String()),
+      instructions: Type.Optional(Type.String()),
+      modelRole: Type.Optional(
+        StringEnum(["planReview", "review", "explore"] as const)
+      ),
+    }),
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const config = loadConfig(ctx.cwd, getAgentDir());
+
+      if (!config.subagent.enabled) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: "workflow_subagent is disabled in configuration. Set subagent.enabled to true.",
+            },
+          ],
+        };
+      }
+
+      const role = params.role as SubagentRole;
+      const task = params.task as string;
+      const rawContext = (params.context as string | undefined) ?? "";
+      const instructions = (params.instructions as string | undefined) ?? "";
+      const modelRole = (params.modelRole as SubagentRole | undefined) ?? role;
+
+      // Build full task text: context + task
+      let fullTask = task;
+      if (rawContext.trim()) {
+        fullTask = `Context provided by parent:\n${rawContext.trim()}\n\nTask:\n${task}`;
+      }
+
+      // Resolve model spec
+      const modelSpec: ModelSpec | undefined =
+        config.models[modelRole as keyof typeof config.models];
+
+      // Get isolated system prompt
+      const systemPrompt = promptForSubagentRole(role);
+      if (!systemPrompt) {
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: `Unknown subagent role: ${role}` },
+          ],
+        };
+      }
+
+      // Set env for child-safe mode: PI_WORKFLOW_SUBAGENT=<role>
+      const env: Record<string, string | undefined> = {
+        PI_WORKFLOW_SUBAGENT: role,
+      };
+
+      const result = await runSubagent({
+        cwd: ctx.cwd,
+        role,
+        task: fullTask,
+        systemPrompt,
+        modelSpec,
+        subagentConfig: config.subagent,
+        instructions,
+        env,
+        signal,
+      });
+
+      if (result.exitCode !== 0 && !result.text) {
+        const text =
+          `Subagent "${role}" failed (exit ${result.exitCode}).` +
+          (result.stderr
+            ? `\n\nstderr:\n${result.stderr.trim().slice(-2000)}`
+            : "");
+        return {
+          content: [{ type: "text", text }],
+          details: { result },
+          isError: true,
+        };
+      }
+
+      return {
+        content: [
+          { type: "text", text: result.text || "(empty response)" },
+        ],
+        details: { result },
+      };
+    },
+  });
+}
+
+// ── Child-safe readonly guard (registered in child-safe mode) ──
+
+/**
+ * Register a minimal readonly guard for child-safe mode.
+ * This is the ONLY hook registered when PI_WORKFLOW_SUBAGENT is set.
+ * It blocks write/edit/mutating bash, allowing only reads and analysis.
+ */
+export function registerReadonlyGuard(pi: ExtensionAPI): void {
+  pi.on("tool_call", async (event, _ctx) => {
+    // Block write and edit
+    if (event.toolName === "write" || event.toolName === "edit") {
+      return {
+        block: true,
+        reason:
+          "Read-only subagent mode: write and edit are disabled. Use read-only tools only (read, search, glob, grep, etc.).",
+      };
+    }
+
+    // Block mutating bash commands
+    if (event.toolName === "bash") {
+      const command = String(event.input?.command ?? "");
+
+      // Patterns that modify files
+      const mutatingPatterns = [
+        /^rm\b/,
+        /^mv\b/,
+        /^cp\b/,
+        /^touch\b/,
+        /^mkdir\b/,
+        /^rmdir\b/,
+        /^chmod\b/,
+        /^chown\b/,
+        /^ln\b/,
+        /^truncate\b/,
+        /\bprettier\b.*\s--write\b/,
+        /\beslint\b.*\s--fix\b/,
+        /\bruff\b.*\s--fix\b/,
+        /\bblack\b/,
+        /\bgofmt\b.*\s-w\b/,
+        /\brustfmt\b/,
+        /^npm\s+(install|i|add|update|dedupe|link|uninstall|remove|rm)\b/,
+        /^pnpm\s+(install|add|update|link|remove|rm)\b/,
+        /^yarn\s+(install|add|upgrade|link|remove)\b/,
+        /^bun\s+(install|add|update|remove|rm)\b/,
+        /^pip\s+install\b/,
+        /^uv\s+add\b/,
+        /^poetry\s+add\b/,
+        /^cargo\s+add\b/,
+        /^go\s+get\b/,
+        /^git\s+(add|commit|checkout|switch|reset|clean|apply|restore|merge|rebase|cherry-pick|stash|tag|push)\b/,
+        /^git\s+branch\s+(-d|-D|-m)\b/,
+      ];
+
+      // Shell redirection and heredoc
+      if (/(^|[^<])>\s*[^&]/.test(command)) {
+        return {
+          block: true,
+          reason:
+            "Read-only subagent mode: shell redirection (>) is disabled. Use grep, cat, find, etc. for reading only.",
+        };
+      }
+      if (/>>\s*/.test(command)) {
+        return {
+          block: true,
+          reason:
+            "Read-only subagent mode: shell append (>>) is disabled.",
+        };
+      }
+      if (/<<-?\s*\w/.test(command)) {
+        return {
+          block: true,
+          reason:
+            "Read-only subagent mode: heredoc (<<) is disabled.",
+        };
+      }
+      if (/\bapply_patch\b/.test(command)) {
+        return {
+          block: true,
+          reason:
+            "Read-only subagent mode: apply_patch is disabled.",
+        };
+      }
+      if (/\|\s*tee\b/.test(command)) {
+        return {
+          block: true,
+          reason:
+            "Read-only subagent mode: tee is disabled.",
+        };
+      }
+
+      const isMutating = mutatingPatterns.some((re) => re.test(command));
+      if (isMutating) {
+        return {
+          block: true,
+          reason: `Read-only subagent mode: mutating command blocked: ${command}`,
+        };
+      }
+    }
+
+    // Allow all other tools through (read, search, glob, grep, etc.)
   });
 }

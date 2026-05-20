@@ -5,12 +5,21 @@
  * plan review, implementation, code review, and commit phases on top
  * of pi-coding-agent. Supports pi install, global config merge, and
  * multi-plan document management under .pi/workflow/plan/.
+ *
+ * When PI_WORKFLOW_SUBAGENT is set, enters child-safe mode:
+ * only registers a minimal readonly guard, skipping all workflow
+ * tools, commands, state machine, and prompt injection.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-import { registerTodoTool, registerPlanTool } from "./tools.js";
+import {
+  registerTodoTool,
+  registerPlanTool,
+  registerSubagentTool,
+  registerReadonlyGuard,
+} from "./tools.js";
 import {
   registerPlanCommand,
   registerGoCommand,
@@ -26,9 +35,27 @@ import {
 } from "./commands.js";
 
 export default function (pi: ExtensionAPI) {
+  // ═══════════════════════════════════════════════════
+  // Child-safe mode: PI_WORKFLOW_SUBAGENT is set.
+  // Only register the minimal readonly guard.
+  // Do NOT register workflow tools, commands, hooks,
+  //   agent_end state machine, prompt injection, or
+  //   the workflow_subagent tool itself.
+  // ═══════════════════════════════════════════════════
+  const subagentEnv = process.env.PI_WORKFLOW_SUBAGENT;
+  if (subagentEnv) {
+    registerReadonlyGuard(pi);
+    return;
+  }
+
+  // ═══════════════════════════════════════════════════
+  // Normal (parent) mode: full workflow
+  // ═══════════════════════════════════════════════════
+
   // ── Tools ──────────────────────────────────
   registerTodoTool(pi, getAgentDir);
   registerPlanTool(pi, getAgentDir);
+  registerSubagentTool(pi, getAgentDir);
 
   // ── Commands ───────────────────────────────
   registerPlanCommand(pi, getAgentDir);

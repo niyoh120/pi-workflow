@@ -1,6 +1,10 @@
 export type Thinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
-export type Role = "plan" | "planReview" | "work" | "review" | "commit";
+export type Role = "plan" | "planReview" | "work" | "review" | "commit" | "explore";
+
+export type SubagentRole = "planReview" | "review" | "explore";
+
+export type SubagentExtensionMode = "inherit" | "curated";
 
 export type Mode =
   | "idle"
@@ -26,6 +30,14 @@ export interface ModelSpec {
   thinking?: Thinking;
 }
 
+export interface SubagentConfig {
+  enabled: boolean;
+  timeoutMs: number;
+  extensionMode: SubagentExtensionMode;
+  extensions: string[];
+  fallbackToInlineReview: boolean;
+}
+
 export interface WorkflowConfig {
   models: Record<Role, ModelSpec>;
   planReview: {
@@ -36,6 +48,7 @@ export interface WorkflowConfig {
     enabled: boolean;
     maxLoops: number;
   };
+  subagent: SubagentConfig;
 }
 
 export type PlanReviewStatus = "none" | "pending" | "pass" | "fail";

@@ -27,6 +27,11 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
       model: "gpt-5.1-mini",
       thinking: "low",
     },
+    explore: {
+      provider: "openai",
+      model: "gpt-5.1",
+      thinking: "high",
+    },
   },
   planReview: {
     enabled: true,
@@ -35,6 +40,13 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
   codeReview: {
     enabled: true,
     maxLoops: 3,
+  },
+  subagent: {
+    enabled: true,
+    timeoutMs: 300_000,
+    extensionMode: "inherit",
+    extensions: [],
+    fallbackToInlineReview: false,
   },
 };
 
