@@ -183,7 +183,13 @@ export const CODE_REVIEW_PROMPT = `
 - 禁止修改业务代码和项目文件。
 - 禁止 git commit / push。
 
-必须执行：
+前置条件：
+- 如果当前目录不是 git 仓库，或 git 仓库中没有 HEAD commit：
+  - 不要 git init，不要自动创建 commit。
+  - 直接输出 REVIEW_STATUS: FAIL。
+  - 在 Assessment 中说明：当前目录不是 git 仓库或没有 baseline commit，无法执行相对 HEAD 的 code review。
+
+必须执行（仅当 git repo 且 HEAD 存在时）：
 1. git status --short
 2. git diff --stat
 3. git diff
@@ -212,6 +218,7 @@ REVIEW_STATUS: PASS
 REVIEW_STATUS: FAIL
 
 判定：
+- 非 git 仓库或无 HEAD commit，必须 FAIL（禁止自动初始化）。
 - 有 Critical 或 Important，必须 FAIL。
 - 只有 Minor，可以 PASS。
 - 没读 diff，不能 PASS。

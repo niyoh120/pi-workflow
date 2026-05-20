@@ -8,6 +8,7 @@ import type { Mode, WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
 import { planDir } from "./paths.js";
 import fs from "node:fs";
+import { execSync } from "node:child_process";
 import path from "node:path";
 
 /**
@@ -138,6 +139,35 @@ async function startPlanReview(
   );
 }
 
+/**
+ * Check that the working directory is a git repo with a reachable HEAD.
+ * Returns true if preflight passes; otherwise prints a warning and returns false.
+ * Does NOT auto-initialize git or create commits.
+ */
+function gitRepoPreflight(cwd: string, ctx: any): boolean {
+  try {
+    execSync("git rev-parse --is-inside-work-tree", { cwd, stdio: "pipe" });
+  } catch {
+    ctx.ui.notify(
+      "无法执行 code review：当前目录不是 git 仓库。请先 git init 并创建 baseline commit，或在已有 git 仓库根目录运行 pi。",
+      "error"
+    );
+    return false;
+  }
+
+  try {
+    execSync("git rev-parse --verify HEAD", { cwd, stdio: "pipe" });
+  } catch {
+    ctx.ui.notify(
+      "无法执行 code review：git 仓库中没有 HEAD commit。请先创建 baseline commit（git add -A && git commit）。",
+      "error"
+    );
+    return false;
+  }
+
+  return true;
+}
+
 /** Follow-up that starts code review on the current diff. */
 async function startCodeReview(
   pi: ExtensionAPI,
@@ -145,6 +175,14 @@ async function startCodeReview(
   getAgentDir: () => string
 ): Promise<void> {
   const state = loadState(ctx.cwd);
+
+  if (!gitRepoPreflight(ctx.cwd, ctx)) {
+    // Stop the auto-review loop; do NOT auto-init git.
+    state.autoCodeReview = false;
+    saveState(ctx.cwd, state);
+    return;
+  }
+
   state.mode = "review";
   saveState(ctx.cwd, state);
 
@@ -515,6 +553,8 @@ export function registerReviewCommand(
     description: "手动切到 code-review 模型检查当前 diff",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
+
+      if (!gitRepoPreflight(ctx.cwd, ctx)) return;
 
       const state = { ...loadState(ctx.cwd), mode: "review" as const, autoCodeReview: false };
       saveState(ctx.cwd, state);
