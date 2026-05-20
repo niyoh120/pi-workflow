@@ -1,4 +1,5 @@
 import type { Mode } from "./types.js";
+import { tmpdir } from "node:os";
 
 export const COMMON_PROMPT = `
 # Workflow Common Rules
@@ -38,6 +39,8 @@ export const PLAN_PROMPT = `
 权限：
 - 可以读取文件、搜索代码、联网搜索、查询文档、使用 MCP / web / package 查询等辅助工具。
 - 禁止修改业务代码和项目文件。
+- 允许在系统临时目录下写入临时 scratch 脚本，用于 API/SDK 探测、测试最小示例以辅助方案确定。只允许写绝对路径到 ${tmpdir()}/pi-workflow-plan-scratch/ 下的普通文件。
+  约束：不能写项目文件、不能写配置、不能安装依赖、不能 git 写操作、不能执行会修改项目文件的 shell 命令。临时脚本只能帮助制定计划，不能替代实现。
 - 允许通过 workflow_plan 保存计划。
 - 允许通过 workflow_todo 维护计划 todo。
 - 禁止 git commit / push。

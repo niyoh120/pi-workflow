@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadState, saveState, readPlan, writePlanReview } from "./state.js";
 import { loadConfig } from "./config.js";
 import { COMMON_PROMPT, promptForMode, promptForSubagentRole } from "./prompts.js";
-import { isReadonlyMode, isLocalFileMutatingShell, isCommitAllowedShell, extractAssistantText } from "./guards.js";
+import { isReadonlyMode, isLocalFileMutatingShell, isCommitAllowedShell, extractAssistantText, isAllowedPlanScratchPath } from "./guards.js";
 import { currentStatusText, modeLabel, todoText } from "./helpers.js";
 import type { Mode, WorkflowState, ModelSpec } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
@@ -534,6 +534,24 @@ export function registerToolCallGuard(
     // Read-only modes: block local file mutations.
     if (isReadonlyMode(state.mode)) {
       if (event.toolName === "write" || event.toolName === "edit") {
+        // Plan Mode: allow writes/edits to safe scratch paths only.
+        if (state.mode === "plan") {
+          const targetPath: string | undefined =
+            (event.input as any)?.path ?? (event.input as any)?.filePath;
+          if (!targetPath) {
+            return {
+              block: true,
+              reason: "Plan Mode: write/edit requires an absolute path under the scratch root.",
+            };
+          }
+          const denial = isAllowedPlanScratchPath(ctx.cwd, targetPath);
+          if (denial) {
+            return { block: true, reason: `Plan Mode: ${denial}` };
+          }
+          return; // allowed scratch write
+        }
+
+        // Plan Review / Code Review: fully block write/edit.
         return {
           block: true,
           reason: `当前是 ${state.mode}，禁止修改本地文件。联网搜索、读取、分析工具仍可使用。`,
