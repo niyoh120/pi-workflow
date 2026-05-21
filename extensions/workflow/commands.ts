@@ -278,6 +278,57 @@ function gitRepoPreflight(cwd: string, ctx: any): boolean {
   return true;
 }
 
+// ──────────────────────────────────────────────
+// /wf-init helpers
+// ──────────────────────────────────────────────
+
+/** Check if the given directory is inside a git work tree. */
+function isGitRepo(cwd: string): boolean {
+  try {
+    execSync("git rev-parse --is-inside-work-tree", { cwd, stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Get the absolute git repository root for the given directory.
+ *  Returns the original cwd if the command fails. */
+function getGitRoot(cwd: string): string {
+  try {
+    const root = execSync("git rev-parse --show-toplevel", {
+      cwd,
+      stdio: "pipe",
+      encoding: "utf8",
+    })
+      .toString()
+      .trim();
+    return root;
+  } catch {
+    return cwd;
+  }
+}
+
+/** Find an existing AGENTS.md or agents.md in the given directory.
+ *  Returns the found filename (AGENTS.md or agents.md) or null.
+ *  Prefers AGENTS.md over agents.md if both exist. */
+function findExistingAgentsFile(root: string): string | null {
+  const agMd = path.join(root, "AGENTS.md");
+  const agMdLower = path.join(root, "agents.md");
+  if (fs.existsSync(agMd)) return "AGENTS.md";
+  if (fs.existsSync(agMdLower)) return "agents.md";
+  return null;
+}
+
+/** Check if the project directory is empty (no meaningful source/config/doc files).
+ *  Excludes .git, .pi, AGENTS.md, agents.md and other dotfiles/dotdirs.
+ *  Returns true if only metadata/hidden files are present. */
+function isProjectEmpty(root: string): boolean {
+  const entries = fs.readdirSync(root, { withFileTypes: true });
+  const meaningful = entries.filter((e) => !e.name.startsWith("."));
+  return meaningful.length === 0;
+}
+
 /** Inline code-review fallback (old behavior). */
 async function startCodeReviewInline(
   pi: ExtensionAPI,
@@ -961,6 +1012,87 @@ export function registerWfResetCommand(pi: ExtensionAPI): void {
 
       ctx.ui.setStatus("lite-sp", undefined);
       ctx.ui.notify("已清空 workflow 状态。", "info");
+    },
+  });
+}
+
+/** Register the /wf-init command.
+ *  Ensures the cwd is a git repo (git init if not),
+ *  then guides the agent to create or update AGENTS.md. */
+export function registerWfInitCommand(pi: ExtensionAPI): void {
+  pi.registerCommand("wf-init", {
+    description:
+      "初始化 agent 工作区：确保 git 仓库存在，生成/更新 AGENTS.md",
+    handler: async (_args, ctx) => {
+      await ctx.waitForIdle();
+
+      // Step 1: check / init git repo
+      if (!isGitRepo(ctx.cwd)) {
+        ctx.ui.notify("当前目录不是 git 仓库，正在执行 git init...", "info");
+        try {
+          execSync("git init", { cwd: ctx.cwd, stdio: "pipe" });
+          ctx.ui.notify("git init 完成。", "info");
+        } catch (err: any) {
+          ctx.ui.notify(
+            `git init 失败：${err?.stderr ?? err?.message ?? String(err)}`,
+            "error"
+          );
+          return;
+        }
+      }
+
+      // Step 2: determine target root (repo root if inside a repo)
+      const root = getGitRoot(ctx.cwd);
+
+      // Step 3: check existing AGENTS files
+      const existingFile = findExistingAgentsFile(root);
+
+      if (existingFile) {
+        // Existing file found — ask user if they want to update
+        const filePath = path.join(root, existingFile);
+        pi.sendUserMessage(
+          `当前仓库已存在 ${existingFile} (${filePath})。\n\n` +
+            `是否需要更新 AGENTS.md？如果需要，请回复确认，` +
+            `我会读取当前的 ${existingFile} 内容和项目上下文，帮你更新内容。\n\n` +
+            `确认前不会修改已有文件。`,
+          { deliverAs: "followUp" }
+        );
+        return;
+      }
+
+      // Step 4: no AGENTS file — check if project is empty
+      if (isProjectEmpty(root)) {
+        // Empty project: ask user for project info first
+        pi.sendUserMessage(
+          `当前仓库还没有实质项目文件。在生成 AGENTS.md 之前，请先回答以下问题：\n\n` +
+            `1. 项目使用的编程语言/框架是什么？\n` +
+            `2. 项目的代码风格/规范（例如 eslint、prettier、rustfmt 等）？\n` +
+            `3. 如何构建和运行测试（例如 npm test、cargo test、pytest 等）？\n` +
+            `4. 提交信息需要遵循什么规范（例如 conventional commits）？\n` +
+            `5. 其他需要 agent 遵守的约定或限制？\n\n` +
+            `了解这些信息后，我会在仓库根目录生成 AGENTS.md。`,
+          { deliverAs: "followUp" }
+        );
+        return;
+      }
+
+      // Non-empty project: let agent analyze and generate AGENTS.md
+      const rootRel =
+        root === ctx.cwd ? "仓库根目录" : `仓库根目录 (${root})`;
+      pi.sendUserMessage(
+        `请在 ${rootRel} 生成 AGENTS.md。\n\n` +
+          `请先探索项目上下文：README、docs、package/build/test 配置、目录结构、相关源码等，` +
+          `然后生成一份适合该项目的 AGENTS.md，内容至少包含：\n` +
+          `- 项目概述\n` +
+          `- 构建/测试命令\n` +
+          `- 代码风格/规范\n` +
+          `- 目录约定\n` +
+          `- 工作流规则\n` +
+          `- 提交规范\n` +
+          `- 安全/禁止事项\n\n` +
+          `使用 write 工具将内容写入 ${path.join(root, "AGENTS.md")}。`,
+        { deliverAs: "followUp" }
+      );
     },
   });
 }

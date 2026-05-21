@@ -126,6 +126,17 @@ Each plan automatically gets a corresponding review file (`<plan-basename>.revie
 | `/wf-status` | Show current workflow state |
 | `/wf-exit` | Exit workflow mode |
 | `/wf-reset` | Clear workflow state and plan directory |
+| `/wf-init` | Initialize agent workspace: ensure git repo, generate/update AGENTS.md |
+
+### /wf-init
+
+The `/wf-init` command initializes the current project for agent workflows:
+
+- If the directory is not a git repo, `git init` is executed automatically.
+- If the directory is inside a git repo, operations target the repository root.
+- If `AGENTS.md` or `agents.md` already exists, the command asks whether you want to update it (does **not** overwrite without confirmation).
+- If the project has no source/config/doc files (empty repo), the agent first asks about your language, framework, coding standards, build/test commands, and commit conventions before generating `AGENTS.md`.
+- If the project has existing files, the agent analyzes them (README, configs, directory structure, build/test scripts) and generates a suitable `AGENTS.md`.
 
 ## Isolated Review Subagents
 

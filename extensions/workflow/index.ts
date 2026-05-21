@@ -29,6 +29,7 @@ import {
   registerWfStatusCommand,
   registerWfExitCommand,
   registerWfResetCommand,
+  registerWfInitCommand,
   registerBeforeAgentStart,
   registerToolCallGuard,
   registerAgentEnd,
@@ -66,6 +67,7 @@ export default function (pi: ExtensionAPI) {
   registerWfStatusCommand(pi, getAgentDir);
   registerWfExitCommand(pi);
   registerWfResetCommand(pi);
+  registerWfInitCommand(pi);
 
   // ── Lifecycle events ───────────────────────
   registerBeforeAgentStart(pi, getAgentDir);
