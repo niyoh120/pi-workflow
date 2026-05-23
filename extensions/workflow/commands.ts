@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { getSessionKey, loadState, saveState, readPlan, writePlanReview } from "./state.js";
 import { loadConfig } from "./config.js";
 import { COMMON_PROMPT, promptForMode, promptForSubagentRole } from "./prompts.js";
-import { isReadonlyMode, isLocalFileMutatingShell, isCommitAllowedShell, isAllowedPlanScratchPath } from "./guards.js";
+import { isReadonlyMode, isLocalFileMutatingShell, isAllowedPlanScratchPath } from "./guards.js";
 import { currentStatusText, modeLabel, todoText } from "./helpers.js";
 import type { Mode, WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
@@ -607,26 +607,15 @@ export function registerToolCallGuard(
       return;
     }
 
-    // Commit mode: only git status/diff/add/commit allowed.
+    // Commit mode: prevent direct code file edits. Other tools (bash, RTK git
+    // wrappers, etc.) are allowed — git command restrictions are guided by the
+    // mode prompt (no push, no code edits, no formatting).
     if (state.mode === "commit") {
       if (event.toolName === "write" || event.toolName === "edit") {
         return {
           block: true,
           reason: "Commit Mode 禁止修改代码文件。",
         };
-      }
-
-      if (event.toolName === "bash") {
-        const command = String(event.input?.command ?? "");
-
-        if (!isCommitAllowedShell(command)) {
-          return {
-            block: true,
-            reason:
-              `Commit Mode 只允许 git status/diff/add/commit/log/show。` +
-              `被拦截：${command}`,
-          };
-        }
       }
 
       return;

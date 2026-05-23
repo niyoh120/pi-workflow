@@ -191,21 +191,6 @@ export function isLocalFileMutatingShell(command: string): boolean {
   return mutatingPatterns.some((re) => re.test(cmd));
 }
 
-/** Check whether a shell command is allowed in Commit mode (git read/write only). */
-export function isCommitAllowedShell(command: string): boolean {
-  const cmd = command.trim();
-
-  return [
-    /^git\s+status\b/,
-    /^git\s+diff\b/,
-    /^git\s+add\b/,
-    /^git\s+commit\b/,
-    /^git\s+rev-parse\b/,
-    /^git\s+log\b/,
-    /^git\s+show\b/,
-  ].some((re) => re.test(cmd));
-}
-
 /** Extract all assistant message text from an agent_end event. */
 export function extractAssistantText(event: any): string {
   return (event.messages ?? [])

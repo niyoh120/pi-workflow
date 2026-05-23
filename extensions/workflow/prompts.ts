@@ -364,10 +364,10 @@ export const COMMIT_PROMPT = `
 你只负责生成并执行 git commit。
 
 权限：
-- 只允许 git status、git diff、git add、git commit、git log、git show。
-- 禁止修改代码。
+- 禁止修改代码（write/edit 工具已由系统拦截）。
 - 禁止格式化。
 - 禁止 push。
+- git 命令和 shell 工具可用，请专注于生成 commit message 并执行 git add / git commit。
 
 规则：
 1. 查看 git status --short。
