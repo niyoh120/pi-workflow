@@ -48,6 +48,16 @@ export interface SubagentConfig {
   };
 }
 
+/** Optional integration with @juicesharp/rpiv-ask-user-question. */
+export interface AskUserQuestionConfig {
+  /** Enable auto-activation of ask_user_question in Plan/approval contexts. */
+  enabled: boolean;
+  /** Tool name to look for (must match the registered tool). */
+  toolName: string;
+  /** Source for pi install hint, e.g. "npm:@juicesharp/rpiv-ask-user-question". */
+  installSource: string;
+}
+
 export interface WorkflowConfig {
   models: Record<Role, ModelSpec>;
   planReview: {
@@ -59,6 +69,7 @@ export interface WorkflowConfig {
     maxLoops: number;
   };
   subagent: SubagentConfig;
+  askUserQuestion: AskUserQuestionConfig;
 }
 
 export type PlanReviewStatus = "none" | "pending" | "pass" | "fail";

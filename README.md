@@ -10,13 +10,18 @@ Lightweight software development workflow extension for pi-coding-agent: plan, i
 # 1. Install required dependency
 pi install npm:@tintinweb/pi-subagents
 
-# 2. Install pi-workflow globally
+# 2. (Optional) Structured user-question dialog — enables tabbed option selectors in plan/approval flows
+pi install npm:@juicesharp/rpiv-ask-user-question
+
+# 3. Install pi-workflow globally
 pi install .
 
-# 3. Inside Pi, sync bundled review agents and reload
+# 4. Inside Pi, sync bundled review agents and reload
 /wf-install-subagents
 /reload
 ```
+
+> **Note:** `@juicesharp/rpiv-ask-user-question` is optional. Without it, Plan Mode uses normal chat for clarifying questions and approval confirmation. Install it for a richer tabbed-dialog experience (multi-select, side-by-side previews, typed notes). As with any third-party Pi package, review the source before installing.
 
 ## Modes
 
@@ -91,6 +96,11 @@ pi install .
       "review": "pi-workflow-code-review",
       "explore": "Explore"
     }
+  },
+  "askUserQuestion": {
+    "enabled": true,
+    "toolName": "ask_user_question",
+    "installSource": "npm:@juicesharp/rpiv-ask-user-question"
   }
 }
 ```
@@ -246,6 +256,28 @@ Report completion status of Work/Fix mode. Must be called to trigger auto code r
 - `summary` (optional): short summary of what was done
 - `tests` (optional): test results
 - `error` (optional): reason if blocked
+
+## Structured User Questions
+
+When `@juicesharp/rpiv-ask-user-question` is installed, Plan Mode uses tabbed dialog boxes for structured interaction:
+
+- **Clarifying questions** — decisions with clear trade-offs are presented as option sheets (2-4 options, optional markdown previews) instead of plain text.
+- **Approval confirmation** — after plan review passes, the agent presents a structured confirmation: "Execute plan / Revise plan / Discuss more".
+- **Graceful fallback** — without the package, workflow uses normal chat and works identically to previous versions.
+
+### Configuring
+
+```json
+{
+  "askUserQuestion": {
+    "enabled": true,
+    "toolName": "ask_user_question",
+    "installSource": "npm:@juicesharp/rpiv-ask-user-question"
+  }
+}
+```
+
+Disable `enabled` to prevent activation even when the package is installed. Change `toolName` if a different question tool is registered under another name.
 
 ## Storage
 

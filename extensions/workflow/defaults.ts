@@ -52,6 +52,11 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
       explore: "Explore",
     },
   },
+  askUserQuestion: {
+    enabled: true,
+    toolName: "ask_user_question",
+    installSource: "npm:@juicesharp/rpiv-ask-user-question",
+  },
 };
 
 export const DEFAULT_STATE: WorkflowState = {

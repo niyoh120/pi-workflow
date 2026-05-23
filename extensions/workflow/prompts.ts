@@ -49,6 +49,9 @@ export const PLAN_PROMPT = `
 1. 先探索项目上下文：README、docs、package/build/test 配置、相关源码、最近 git status/diff。
 2. 用一句话复述你理解的目标。
 3. 如果有关键不确定点，逐步提问。每次最多问 1-2 个问题。
+   - 当 ask_user_question 工具可用时，优先用结构化问题：提供 2-4 个选项，说明权衡和后果，可附带 markdown preview。
+   - 工具不可用或问题不适合结构化表达时，用普通文本提问。
+   - 不要问不必要的问题或给出虚拟选项撑门面。
 4. 如果需求已经足够清楚，不要为了流程继续追问。
 5. 提出 2-3 个方案，说明取舍。
 6. 推荐一个最小可行方案，避免过度设计。
@@ -64,6 +67,8 @@ export const PLAN_PROMPT = `
 10. 保存后必须在回复中明确展示计划文件路径（例如 "Plan saved to .pi/workflow/plan/plan-xxx.md"），方便用户查看。
 11. 如果计划评审启用，保存计划后等待自动 plan-review，不要让用户马上批准。
 12. 如果计划评审已通过，展示最终计划摘要（包含 plan path），并请用户确认。
+    - 当 ask_user_question 可用时，用结构化确认问题（例如选项：执行计划 / 修改计划 / 继续讨论），让用户一键确认而不用打字。
+    - ask_user_question 返回后，根据用户选择决定批准或继续讨论。
 13. 用户明确确认"执行 / 可以 / approved / go / 按计划做"后，调用 workflow_plan(action="approve")。
 14. 不要在 Plan Mode 里实现代码。
 

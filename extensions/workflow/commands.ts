@@ -60,8 +60,8 @@ async function setRole(
   return true;
 }
 
-/** Ensure workflow tools are active. */
-function ensureWorkflowToolsActive(pi: ExtensionAPI): void {
+/** Ensure workflow tools are active, including optional ask_user_question when available. */
+function ensureWorkflowToolsActive(pi: ExtensionAPI, cwd: string, getAgentDir: () => string): void {
   const active = pi.getActiveTools().map((tool: any) => {
     if (typeof tool === "string") return tool;
     return tool.name;
@@ -71,6 +71,20 @@ function ensureWorkflowToolsActive(pi: ExtensionAPI): void {
   next.add("workflow_plan");
   next.add("workflow_subagent");
   next.add("workflow_status");
+
+  // Optionally activate ask_user_question when installed by another package.
+  try {
+    const config = loadConfig(cwd, getAgentDir());
+    if (config.askUserQuestion.enabled) {
+      const allTools = pi.getAllTools();
+      if (allTools.some((t: any) => t.name === config.askUserQuestion.toolName)) {
+        next.add(config.askUserQuestion.toolName);
+      }
+    }
+  } catch {
+    // If config load or getAllTools fails, skip silently — workflow still works.
+  }
+
   pi.setActiveTools([...next]);
 }
 
@@ -97,7 +111,7 @@ async function switchMode(
   const role = roleMap[mode];
   if (role && !(await setRole(pi, ctx, role, getAgentDir))) return false;
 
-  ensureWorkflowToolsActive(pi);
+  ensureWorkflowToolsActive(pi, ctx.cwd, getAgentDir);
   ctx.ui.setStatus("lite-sp", modeLabel(mode));
 
   return true;
@@ -206,7 +220,11 @@ async function runPlanReviewSubagent(
       await switchMode(pi, ctx, "plan", getAgentDir);
 
       pi.sendUserMessage(
-        `计划评审已通过。请向用户展示最终计划摘要（包含 plan path: ${planPathText}），并等待用户确认。用户确认后调用 workflow_plan(action="approve")。`,
+        `计划评审已通过。请向用户展示最终计划摘要（包含 plan path: ${planPathText}），并等待用户确认。` +
+        (config.askUserQuestion.enabled
+          ? `如果 ask_user_question 工具可用，建议用结构化选项让用户一键确认（如：执行计划 / 修改计划 / 继续讨论），减少打字摩擦。`
+          : ``) +
+        `用户确认后调用 workflow_plan(action="approve")。`,
         { deliverAs: "followUp" }
       );
       return;
@@ -511,7 +529,7 @@ export function registerBeforeAgentStart(
     const state = loadState(ctx.cwd, sessionKey);
     const config = loadConfig(ctx.cwd, getAgentDir());
 
-    ensureWorkflowToolsActive(pi);
+    ensureWorkflowToolsActive(pi, ctx.cwd, getAgentDir);
 
     if (state.mode === "idle") return;
 
@@ -962,6 +980,12 @@ export function registerWfInstallSubagentsCommand(
       // 3. Prompt reload
       ctx.ui.notify(
         "Custom review agents 已同步。请执行 /reload 或重启 Pi 使 pi-subagents 加载新 agents。",
+        "info"
+      );
+
+      // 4. Hint about optional ask-user-question
+      ctx.ui.notify(
+        "可选：安装 @juicesharp/rpiv-ask-user-question 可在 Plan Mode 中获得结构化确认对话框。执行 pi install npm:@juicesharp/rpiv-ask-user-question 然后 /reload。",
         "info"
       );
     },
