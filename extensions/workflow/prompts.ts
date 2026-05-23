@@ -61,10 +61,11 @@ export const PLAN_PROMPT = `
    - 测试计划
    - 风险和回滚点
 9. 最终计划产出后，必须调用 workflow_plan(action="save") 保存计划，并调用 workflow_todo(action="reset") 写入 todo。
-10. 如果计划评审启用，保存计划后等待自动 plan-review，不要让用户马上批准。
-11. 如果计划评审已通过，展示最终计划摘要，并请用户确认。
-12. 用户明确确认"执行 / 可以 / approved / go / 按计划做"后，调用 workflow_plan(action="approve")。
-13. 不要在 Plan Mode 里实现代码。
+10. 保存后必须在回复中明确展示计划文件路径（例如 "Plan saved to .pi/workflow/plan/plan-xxx.md"），方便用户查看。
+11. 如果计划评审启用，保存计划后等待自动 plan-review，不要让用户马上批准。
+12. 如果计划评审已通过，展示最终计划摘要（包含 plan path），并请用户确认。
+13. 用户明确确认"执行 / 可以 / approved / go / 按计划做"后，调用 workflow_plan(action="approve")。
+14. 不要在 Plan Mode 里实现代码。
 
 最终计划建议格式：
 
@@ -138,14 +139,13 @@ export const WORK_PROMPT = `
 6. 不要重新设计方案。发现计划明显不合理时停止并说明。
 7. 修改后运行最相关测试。
 8. 如果测试命令不明确，从项目配置中寻找：package.json、pyproject.toml、Cargo.toml、go.mod、Makefile、README/docs。
-9. 完成时必须输出修改摘要和验证证据。
+9. 完成时必须调用 workflow_status 工具报告状态。
 
-最后一行必须严格是：
-WORK_STATUS: READY_FOR_REVIEW
-或：
-WORK_STATUS: BLOCKED
+必须调用的工具：
+- 全部任务完成 → workflow_status({ status: "ready_for_review", runId: currentRunId, summary: "...", tests: "..." })
+- 阻塞无法继续 → workflow_status({ status: "blocked", runId: currentRunId, error: "..." })
 
-只有在已经完成当前实现并准备让 reviewer 看 diff 时，才能输出 READY_FOR_REVIEW。
+不要输出 WORK_STATUS 文本标记。workflow_status 工具是触发自动 code review 的唯一方式。
 `;
 
 export const FIX_PROMPT = `
@@ -168,10 +168,11 @@ export const FIX_PROMPT = `
 - 修完运行相关测试。
 - 更新 workflow_todo，如果某个 todo 因 reviewer 问题需要返工，标记并处理。
 
-最后一行必须严格是：
-WORK_STATUS: READY_FOR_REVIEW
-或：
-WORK_STATUS: BLOCKED
+必须调用的工具：
+- 全部修复完成 → workflow_status({ status: "ready_for_review", runId: currentRunId, summary: "...", tests: "..." })
+- 阻塞无法继续 → workflow_status({ status: "blocked", runId: currentRunId, error: "..." })
+
+不要输出 WORK_STATUS 文本标记。workflow_status 工具是触发自动 code review 的唯一方式。
 `;
 
 export const CODE_REVIEW_PROMPT = `

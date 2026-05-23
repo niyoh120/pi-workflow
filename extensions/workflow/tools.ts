@@ -1,11 +1,11 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { loadState, saveState, writeNewPlan, readPlan, writePlanReview } from "./state.js";
+import { getSessionKey, loadState, saveState, writeNewPlan, readPlan, writePlanReview } from "./state.js";
 import { loadConfig } from "./config.js";
 import { todoText } from "./helpers.js";
-import type { WorkflowState, SubagentRole, ModelSpec } from "./types.js";
-import { runSubagent } from "./subagent.js";
+import type { WorkflowState, SubagentRole, WorkStatus } from "./types.js";
+import type { SubagentsClient } from "./subagent.js";
 import { promptForSubagentRole } from "./prompts.js";
 
 const TodoStatusSchema = StringEnum([
@@ -45,7 +45,8 @@ export function registerTodoTool(pi: ExtensionAPI, getAgentDir: () => string): v
       notes: Type.Optional(Type.String()),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const state = loadState(ctx.cwd);
+      const sessionKey = getSessionKey(ctx.sessionManager);
+      const state = loadState(ctx.cwd, sessionKey);
       const agentDir = getAgentDir();
 
       if (params.action === "reset") {
@@ -89,7 +90,7 @@ export function registerTodoTool(pi: ExtensionAPI, getAgentDir: () => string): v
         if (params.notes !== undefined) item.notes = params.notes;
       }
 
-      saveState(ctx.cwd, state);
+      saveState(ctx.cwd, sessionKey, state);
 
       return {
         content: [{ type: "text", text: todoText(state) }],
@@ -133,7 +134,8 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
       reviewNotes: Type.Optional(Type.String()),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const state = loadState(ctx.cwd);
+      const sessionKey = getSessionKey(ctx.sessionManager);
+      const state = loadState(ctx.cwd, sessionKey);
       const config = loadConfig(ctx.cwd, getAgentDir());
       const { action } = params as WorkflowPlanParams;
 
@@ -160,7 +162,7 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
         state.planReviewNotes = undefined;
         state.planPath = planPath;
         state.planReviewPath = planReviewPath;
-        saveState(ctx.cwd, state);
+        saveState(ctx.cwd, sessionKey, state);
 
         return {
           content: [
@@ -198,7 +200,7 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
         }
 
         state.planApproved = true;
-        saveState(ctx.cwd, state);
+        saveState(ctx.cwd, sessionKey, state);
 
         return {
           content: [
@@ -217,7 +219,7 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
         if (state.planReviewPath) {
           writePlanReview(ctx.cwd, state.planReviewPath, state.planReviewNotes);
         }
-        saveState(ctx.cwd, state);
+        saveState(ctx.cwd, sessionKey, state);
 
         return {
           content: [{ type: "text", text: "Plan review recorded: PASS." }],
@@ -232,7 +234,7 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
         if (state.planReviewPath) {
           writePlanReview(ctx.cwd, state.planReviewPath, state.planReviewNotes);
         }
-        saveState(ctx.cwd, state);
+        saveState(ctx.cwd, sessionKey, state);
 
         return {
           content: [{ type: "text", text: "Plan review recorded: FAIL." }],
@@ -243,7 +245,7 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
       if (action === "read") {
         if (!state.planPath) {
           return {
-            content: [{ type: "text", text: "No active plan." }],
+            content: [{ type: "text", text: "No active plan. Path: none." }],
             details: { state },
           };
         }
@@ -251,7 +253,12 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
         const text = readPlan(ctx.cwd, state.planPath);
 
         return {
-          content: [{ type: "text", text }],
+          content: [
+            {
+              type: "text",
+              text: `Plan path: ${state.planPath}\n\n${text}`,
+            },
+          ],
           details: { state },
         };
       }
@@ -266,7 +273,7 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
           autoCodeReview: false,
           todos: [],
         };
-        saveState(ctx.cwd, cleared);
+        saveState(ctx.cwd, sessionKey, cleared);
 
         return {
           content: [{ type: "text", text: "Workflow state cleared." }],
@@ -290,7 +297,11 @@ const SubagentRoleSchema = StringEnum([
   "explore",
 ] as const);
 
-export function registerSubagentTool(pi: ExtensionAPI, getAgentDir: () => string): void {
+export function registerSubagentTool(
+  pi: ExtensionAPI,
+  getAgentDir: () => string,
+  getSubagentsClient: () => SubagentsClient
+): void {
   pi.registerTool({
     name: "workflow_subagent",
     label: "Workflow Subagent",
@@ -316,24 +327,14 @@ export function registerSubagentTool(pi: ExtensionAPI, getAgentDir: () => string
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const config = loadConfig(ctx.cwd, getAgentDir());
+      const client = getSubagentsClient();
 
-      if (!config.subagent.enabled) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: "workflow_subagent is disabled in configuration. Set subagent.enabled to true.",
-            },
-          ],
-        };
-      }
+      // Client is always non-null after init. Detection happens inside run().
 
       const role = params.role as SubagentRole;
       const task = params.task as string;
       const rawContext = (params.context as string | undefined) ?? "";
       const instructions = (params.instructions as string | undefined) ?? "";
-      const modelRole = (params.modelRole as SubagentRole | undefined) ?? role;
 
       // Build full task text: context + task
       let fullTask = task;
@@ -341,160 +342,169 @@ export function registerSubagentTool(pi: ExtensionAPI, getAgentDir: () => string
         fullTask = `Context provided by parent:\n${rawContext.trim()}\n\nTask:\n${task}`;
       }
 
-      // Resolve model spec
-      const modelSpec: ModelSpec | undefined =
-        config.models[modelRole as keyof typeof config.models];
-
       // Get isolated system prompt
       const systemPrompt = promptForSubagentRole(role);
       if (!systemPrompt) {
         return {
           isError: true,
+          content: [{ type: "text", text: `Unknown subagent role: ${role}` }],
+        };
+      }
+
+      try {
+        const result = await client.run({
+          role,
+          task: fullTask,
+          systemPrompt,
+          instructions,
+          subagentConfig: config.subagent,
+          signal,
+          cwd: ctx.cwd,
+          agentDir: getAgentDir(),
+        });
+
+        if (result.exitCode !== 0 && !result.text) {
+          const text =
+            `Subagent "${role}" failed (exit ${result.exitCode}).` +
+            (result.stderr
+              ? `\n\nstderr:\n${result.stderr.trim().slice(-2000)}`
+              : "");
+          return {
+            content: [{ type: "text", text }],
+            details: { result },
+            isError: true,
+          };
+        }
+
+        return {
+          content: [{ type: "text", text: result.text || "(empty response)" }],
+          details: { result },
+        };
+      } catch (err: any) {
+        return {
+          isError: true,
           content: [
-            { type: "text", text: `Unknown subagent role: ${role}` },
+            {
+              type: "text",
+              text: `Subagent execution error: ${err.message ?? String(err)}`,
+            },
           ],
         };
       }
-
-      // Set env for child-safe mode: PI_WORKFLOW_SUBAGENT=<role>
-      const env: Record<string, string | undefined> = {
-        PI_WORKFLOW_SUBAGENT: role,
-      };
-
-      const result = await runSubagent({
-        cwd: ctx.cwd,
-        role,
-        task: fullTask,
-        systemPrompt,
-        modelSpec,
-        subagentConfig: config.subagent,
-        instructions,
-        env,
-        signal,
-      });
-
-      if (result.exitCode !== 0 && !result.text) {
-        const text =
-          `Subagent "${role}" failed (exit ${result.exitCode}).` +
-          (result.stderr
-            ? `\n\nstderr:\n${result.stderr.trim().slice(-2000)}`
-            : "");
-        return {
-          content: [{ type: "text", text }],
-          details: { result },
-          isError: true,
-        };
-      }
-
-      return {
-        content: [
-          { type: "text", text: result.text || "(empty response)" },
-        ],
-        details: { result },
-      };
     },
   });
 }
 
-// ── Child-safe readonly guard (registered in child-safe mode) ──
+// ── workflow_status tool ────────────────────────
 
-/**
- * Register a minimal readonly guard for child-safe mode.
- * This is the ONLY hook registered when PI_WORKFLOW_SUBAGENT is set.
- * It blocks write/edit/mutating bash, allowing only reads and analysis.
- */
-export function registerReadonlyGuard(pi: ExtensionAPI): void {
-  pi.on("tool_call", async (event, _ctx) => {
-    // Block write and edit
-    if (event.toolName === "write" || event.toolName === "edit") {
+const WorkStatusSchema = StringEnum(["ready_for_review", "blocked"] as const);
+
+export function registerWorkflowStatusTool(
+  pi: ExtensionAPI,
+  getAgentDir: () => string
+): void {
+  pi.registerTool({
+    name: "workflow_status",
+    label: "Workflow Status",
+    description:
+      "Report the completion status of the current Work/Fix run. Must be called at the end of Work/Fix mode to trigger automatic code review. Status: ready_for_review (all tasks done) or blocked (needs user intervention).",
+    promptSnippet:
+      "workflow_status: report work completion status — ready_for_review or blocked.",
+    promptGuidelines: [
+      "You MUST call workflow_status at the end of Work/Fix mode with either ready_for_review or blocked.",
+      "Call workflow_status({ status: 'ready_for_review', runId: currentRunId, summary: '...', tests: '...' }) when all planned tasks are complete.",
+      "Call workflow_status({ status: 'blocked', runId: currentRunId, error: '...' }) when blocked by missing info, dependencies, or unresolvable issues.",
+      "The runId parameter MUST match the current state.workRunId displayed in the workflow state.",
+      "Do NOT print WORK_STATUS: ... in text — this tool is the only trigger for auto review.",
+    ],
+    parameters: Type.Object({
+      status: WorkStatusSchema,
+      runId: Type.String({ description: "The current workRunId from the workflow state. Must match exactly." }),
+      summary: Type.Optional(Type.String()),
+      tests: Type.Optional(Type.String()),
+      error: Type.Optional(Type.String()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const sessionKey = getSessionKey(ctx.sessionManager);
+      const state = loadState(ctx.cwd, sessionKey);
+      const config = loadConfig(ctx.cwd, getAgentDir());
+      const runId = params.runId as string;
+
+      // Only valid in work or fix mode.
+      if (state.mode !== "work" && state.mode !== "fix") {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text:
+                `workflow_status is only valid in Work or Fix mode (current: ${state.mode}). ` +
+                `Report completion directly if in another mode.`,
+            },
+          ],
+          details: { state },
+        };
+      }
+
+      // Validate run id: the tool must be called for the current work run.
+      if (!state.workRunId) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text:
+                "No active work run. workflow_status requires a current workRunId. " +
+                "Enter Work/Fix mode first.",
+            },
+          ],
+          details: { state },
+        };
+      }
+
+      // Reject stale run IDs
+      if (runId !== state.workRunId) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text:
+                `Stale run ID rejected. Provided: ${runId.slice(-8)}…, current: ${state.workRunId.slice(-8)}…. ` +
+                `This workflow_status call belongs to a previous Work/Fix run and has been ignored. ` +
+                `Re-call with the current run ID from the workflow state.`,
+            },
+          ],
+          details: { state },
+        };
+      }
+
+      const status = params.status as WorkStatus;
+
+      state.workStatus = status;
+      state.workStatusRunId = state.workRunId;
+      state.workStatusSummary = (params.summary as string | undefined) ?? "";
+      state.workStatusTests = (params.tests as string | undefined) ?? "";
+      state.workStatusError = (params.error as string | undefined) ?? "";
+      state.workStatusUpdatedAt = new Date().toISOString();
+      saveState(ctx.cwd, sessionKey, state);
+
+      const modeLabel = state.mode === "fix" ? "Fix Mode" : "Work Mode";
+
       return {
-        block: true,
-        reason:
-          "Read-only subagent mode: write and edit are disabled. Use read-only tools only (read, search, glob, grep, etc.).",
+        content: [
+          {
+            type: "text",
+            text:
+              `${modeLabel} status recorded: ${status.toUpperCase()}.\n` +
+              `Run: ${state.workRunId.slice(-8)}.\n` +
+              (state.workStatusSummary ? `Summary: ${state.workStatusSummary}\n` : "") +
+              (state.workStatusTests ? `Tests: ${state.workStatusTests}\n` : "") +
+              (state.workStatusError ? `Error: ${state.workStatusError}\n` : ""),
+          },
+        ],
+        details: { state },
       };
-    }
-
-    // Block mutating bash commands
-    if (event.toolName === "bash") {
-      const command = String(event.input?.command ?? "");
-
-      // Patterns that modify files
-      const mutatingPatterns = [
-        /^rm\b/,
-        /^mv\b/,
-        /^cp\b/,
-        /^touch\b/,
-        /^mkdir\b/,
-        /^rmdir\b/,
-        /^chmod\b/,
-        /^chown\b/,
-        /^ln\b/,
-        /^truncate\b/,
-        /\bprettier\b.*\s--write\b/,
-        /\beslint\b.*\s--fix\b/,
-        /\bruff\b.*\s--fix\b/,
-        /\bblack\b/,
-        /\bgofmt\b.*\s-w\b/,
-        /\brustfmt\b/,
-        /^npm\s+(install|i|add|update|dedupe|link|uninstall|remove|rm)\b/,
-        /^pnpm\s+(install|add|update|link|remove|rm)\b/,
-        /^yarn\s+(install|add|upgrade|link|remove)\b/,
-        /^bun\s+(install|add|update|remove|rm)\b/,
-        /^pip\s+install\b/,
-        /^uv\s+add\b/,
-        /^poetry\s+add\b/,
-        /^cargo\s+add\b/,
-        /^go\s+get\b/,
-        /^git\s+(add|commit|checkout|switch|reset|clean|apply|restore|merge|rebase|cherry-pick|stash|tag|push)\b/,
-        /^git\s+branch\s+(-d|-D|-m)\b/,
-      ];
-
-      // Shell redirection and heredoc
-      if (/(^|[^<])>\s*[^&]/.test(command)) {
-        return {
-          block: true,
-          reason:
-            "Read-only subagent mode: shell redirection (>) is disabled. Use grep, cat, find, etc. for reading only.",
-        };
-      }
-      if (/>>\s*/.test(command)) {
-        return {
-          block: true,
-          reason:
-            "Read-only subagent mode: shell append (>>) is disabled.",
-        };
-      }
-      if (/<<-?\s*\w/.test(command)) {
-        return {
-          block: true,
-          reason:
-            "Read-only subagent mode: heredoc (<<) is disabled.",
-        };
-      }
-      if (/\bapply_patch\b/.test(command)) {
-        return {
-          block: true,
-          reason:
-            "Read-only subagent mode: apply_patch is disabled.",
-        };
-      }
-      if (/\|\s*tee\b/.test(command)) {
-        return {
-          block: true,
-          reason:
-            "Read-only subagent mode: tee is disabled.",
-        };
-      }
-
-      const isMutating = mutatingPatterns.some((re) => re.test(command));
-      if (isMutating) {
-        return {
-          block: true,
-          reason: `Read-only subagent mode: mutating command blocked: ${command}`,
-        };
-      }
-    }
-
-    // Allow all other tools through (read, search, glob, grep, etc.)
+    },
   });
 }

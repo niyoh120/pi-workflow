@@ -2,19 +2,21 @@
 
 Lightweight software development workflow extension for pi-coding-agent: plan, isolated plan review, implementation, isolated code review, codebase exploration subagents, and commit orchestration.
 
+**Requirements:** `@tintinweb/pi-subagents` must be installed and loaded before pi-workflow. Without it, subagent-backed features (plan review, code review, `workflow_subagent`) will fail with an install/reload hint.
+
 ## Installation
 
-From the package root directory:
-
 ```bash
-# Install globally (available across all projects)
+# 1. Install required dependency
+pi install npm:@tintinweb/pi-subagents
+
+# 2. Install pi-workflow globally
 pi install .
 
-# Install per-project (stored in .pi/settings.json)
-pi install -l .
+# 3. Inside Pi, sync bundled review agents and reload
+/wf-install-subagents
+/reload
 ```
-
-After installation, the extension auto-loads on every pi session.
 
 ## Modes
 
@@ -80,14 +82,20 @@ After installation, the extension auto-loads on every pi session.
     "maxLoops": 3
   },
   "subagent": {
-    "enabled": true,
-    "timeoutMs": 300000,
-    "extensionMode": "inherit",
-    "extensions": [],
-    "fallbackToInlineReview": false
+    "installSource": "npm:@tintinweb/pi-subagents",
+    "rpcTimeoutMs": 5000,
+    "resultTimeoutMs": 300000,
+    "autoInstall": false,
+    "agentTypes": {
+      "planReview": "pi-workflow-plan-review",
+      "review": "pi-workflow-code-review",
+      "explore": "Explore"
+    }
   }
 }
 ```
+
+**Legacy config fields:** Old `subagent` fields (`enabled`, `timeoutMs`, `extensionMode`, `extensions`, `fallbackToInlineReview`) are silently ignored. They do not cause errors.
 
 ### Project config
 
@@ -108,11 +116,11 @@ Each `workflow_plan save` creates a new plan file with a random name:
 .pi/workflow/plan/plan-a3b9f2c1.review.md   ← plan review notes
 ```
 
-This allows multiple plans to coexist in the same project without conflicts. The current active plan is tracked in `state.planPath` within `.pi/workflow/state.json`.
+This allows multiple plans to coexist in the same project without conflicts.
 
-### Review Files
+### Plan Path Visibility
 
-Each plan automatically gets a corresponding review file (`<plan-basename>.review.md`) when review notes are recorded via `workflow_plan review_pass` or `workflow_plan review_fail`.
+Every plan save, read, review, and `/wf-status` explicitly shows the plan file path (e.g., `.pi/workflow/plan/plan-a3b9f2c1.md`) so you can easily find and inspect the document.
 
 ## Commands
 
@@ -123,73 +131,127 @@ Each plan automatically gets a corresponding review file (`<plan-basename>.revie
 | `/work [task]` | Skip Plan Mode, go straight to implementation |
 | `/review` | Manual code review on current diff |
 | `/commit [notes]` | Generate commit message and commit |
-| `/wf-status` | Show current workflow state |
+| `/wf-status` | Show current workflow state (includes plan path and run IDs) |
 | `/wf-exit` | Exit workflow mode |
 | `/wf-reset` | Clear workflow state and plan directory |
 | `/wf-init` | Initialize agent workspace: ensure git repo, generate/update AGENTS.md |
+| `/wf-install-subagents` | Install @tintinweb/pi-subagents and sync bundled review agents |
 
-### /wf-init
+## Subagents
 
-The `/wf-init` command initializes the current project for agent workflows:
+Plan review, code review, and exploration run as **fresh-context subagents via @tintinweb/pi-subagents**. This provides:
 
-- If the directory is not a git repo, `git init` is executed automatically.
-- If the directory is inside a git repo, operations target the repository root.
-- If `AGENTS.md` or `agents.md` already exists, the command asks whether you want to update it (does **not** overwrite without confirmation).
-- If the project has no source/config/doc files (empty repo), the agent first asks about your language, framework, coding standards, build/test commands, and commit conventions before generating `AGENTS.md`.
-- If the project has existing files, the agent analyzes them (README, configs, directory structure, build/test scripts) and generates a suitable `AGENTS.md`.
+- **Clean context** — the reviewer sees only the plan or diff, not your full conversation.
+- **Parallel execution** — multiple subagents can run concurrently.
+- **Live widget UI** — see agent progress, tool usage, and token counts.
+- **Custom agent types** — `planReview` and `review` use pi-workflow custom agents for workflow-specific output protocols.
+- **Exploration** — `explore` uses the built-in `Explore` agent type.
 
-## Isolated Review Subagents
+Review agents are **not a hard OS/tool sandbox** — they disable `write` / `edit` but retain `bash` and extension/MCP tools (web search etc.) to maximize review quality. They run as fresh sessions without parent conversation history.
 
-Plan review and code review now run as **isolated child Pi processes** — not in the parent session. This means:
+### Agent Types
 
-- **Clean context**: the reviewer sees only the plan or diff, not your full work/plan conversation.
-- **No workflow recursion**: the child Pi sets `PI_WORKFLOW_SUBAGENT`, which tells `pi-workflow` to enter child-safe mode (readonly guard only — no workflow tools, commands, or state machine).
-- **Automatic extensions**: by default, the child inherits your installed extensions (web/search/doc tools). No manual allowlist needed.
-- **Readonly safety**: the child-safe mode blocks `write`, `edit`, and mutating bash commands.
+| Role | Agent Type | Source |
+|------|-----------|--------|
+| `planReview` | `pi-workflow-plan-review` | Custom — bundled and synced via `/wf-install-subagents` |
+| `review` | `pi-workflow-code-review` | Custom — bundled and synced via `/wf-install-subagents` |
+| `explore` | `Explore` | Built-in (from `@tintinweb/pi-subagents`) |
 
-To revert to the old inline (in-session) review flow, set `subagent.enabled` to `false` and `subagent.fallbackToInlineReview` to `true`.
+Custom review agents are defined under `extensions/workflow/agents/` in the pi-workflow package. `/wf-install-subagents` syncs them to the global agents directory (`~/.pi/agent/agents/`) so pi-subagents discovers them in any project.
 
-For stricter isolation, use `extensionMode: "curated"` and specify an explicit extension allowlist.
+If custom review agents are missing from both project (`.pi/agents/`) and global paths, review operations will fail with a clear error and install instructions — there is no silent fallback.
+
+Custom review agent frontmatter:
+
+```yaml
+tools: read, bash, grep, find, ls
+disallowed_tools: write, edit
+extensions: true
+```
+
+## Workflow Status (auto review trigger)
+
+Work/Fix mode no longer uses text markers (`WORK_STATUS: READY_FOR_REVIEW`). Instead, the agent must call:
+
+```
+workflow_status({ status: "ready_for_review", runId: currentRunId, summary: "...", tests: "..." })
+```
+
+or:
+
+```
+workflow_status({ status: "blocked", runId: currentRunId, error: "..." })
+```
+
+This is the **only** way to trigger automatic code review. The tool validates the current mode and run ID. If not called, or called with a stale run ID, auto review does not start and a diagnostic is shown.
+
+## Run-Scoped Counters
+
+Plan review and code review loop counters are scoped to each plan/work run:
+
+- Starting a new `/plan` creates a fresh `planRunId` and resets `planReviewLoops`.
+- Revising the same plan keeps the same run and increments the counter.
+- Starting a new `/work` creates a fresh `workRunId` and resets `codeReviewLoops`.
+- Fix mode keeps the same work run and increments the counter.
+- A prior plan/work run's review failures never affect a new run.
+
+## Session-Scoped Runtime State
+
+Runtime workflow state is scoped to the current Pi session:
+
+```
+.pi/workflow/sessions/<safeSessionKey>/state.json
+```
+
+The session key is derived by hashing the Pi session ID or session file path — raw IDs are never used directly as path segments.
+
+This means two Pi processes in the same project directory can run independent workflow state machines without overwriting each other. Plan files remain in the shared `.pi/workflow/plan/` directory with randomized names.
+
+Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) are directory/global scoped and shared intentionally.
+
+**Legacy migration:** If a session has no state but the old `.pi/workflow/state.json` exists, it is imported once into the session-scoped path. The legacy file is not deleted.
 
 ## Tools
 
 | Tool | Purpose |
 |------|---------|
 | `workflow_todo` | Maintain the todo list (reset, add, set, list) |
-| `workflow_plan` | Manage plans (save, approve, review, read, clear) |
-| `workflow_subagent` | Spawn a read-only child Pi process with a clean session for review or exploration |
+| `workflow_plan` | Manage plans (save, approve, review, read, clear) — responses include plan path |
+| `workflow_subagent` | Spawn a read-only subagent via pi-subagents for review or exploration |
+| `workflow_status` | Report Work/Fix completion status — triggers auto code review |
 
 ### workflow_subagent
 
-Spawn a role-shaped, read-only child Pi process with no parent session history.
+Spawn a role-shaped, read-only subagent via @tintinweb/pi-subagents.
 
 **Parameters:**
 - `role` (required): `planReview` | `review` | `explore`
 - `task` (required): the focused task for the subagent
-- `context` (optional): explicit context for the child (parent session history is NOT available)
+- `context` (optional): explicit context for the subagent (parent session history is NOT available)
 - `instructions` (optional): additional preferences — depth, format, focus, search strategy
 - `modelRole` (optional): override the model to use; defaults to the role's configured model
 
 **Roles:**
-- `planReview`: Isolated plan review. Child outputs `PLAN_REVIEW_STATUS: PASS|FAIL`.
-- `review`: Isolated code diff review. Child outputs `REVIEW_STATUS: PASS|FAIL`.
-- `explore`: Fast read-only codebase exploration (inspired by Claude Code Explore agent). Find files, search code, answer "where/how" questions. Returns findings — no status marker required.
+- `planReview`: Isolated plan review using pi-workflow custom agent. Subagent outputs `PLAN_REVIEW_STATUS: PASS|FAIL`.
+- `review`: Isolated code diff review using pi-workflow custom agent. Subagent outputs `REVIEW_STATUS: PASS|FAIL`.
+- `explore`: Fast read-only codebase exploration using built-in `Explore` agent. Returns findings — no status marker required.
 
-**Example (explore):**
-```json
-{
-  "role": "explore",
-  "task": "Find all API endpoint handlers and their middleware",
-  "instructions": "very thorough, include file paths and line numbers",
-  "context": "Project is an Express.js backend under src/server/"
-}
-```
+### workflow_status
+
+Report completion status of Work/Fix mode. Must be called to trigger auto code review.
+
+**Parameters:**
+- `status` (required): `ready_for_review` | `blocked`
+- `runId` (required): the current `workRunId` from the workflow state — must match exactly
+- `summary` (optional): short summary of what was done
+- `tests` (optional): test results
+- `error` (optional): reason if blocked
 
 ## Storage
 
 | Path | Purpose |
 |------|---------|
-| `.pi/workflow/state.json` | Current workflow state |
 | `.pi/workflow/config.json` | Project-level config |
-| `.pi/workflow/plan/` | Plan documents and review notes |
+| `.pi/workflow/plan/` | Plan documents and review notes (shared, randomized filenames) |
+| `.pi/workflow/sessions/<key>/state.json` | Session-scoped runtime state |
 | `~/.pi/agent/workflow/config.json` | Global config |

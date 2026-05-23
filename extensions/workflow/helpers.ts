@@ -30,15 +30,22 @@ export function currentStatusText(
   config: { planReview: { enabled: boolean; maxLoops: number }; codeReview: { enabled: boolean; maxLoops: number } },
   s: WorkflowState
 ): string {
+  const workStatusText = s.workStatus
+    ? `${s.workStatus}${s.workStatusError ? ` | error: ${s.workStatusError}` : ""}${s.workStatusSummary ? ` | summary: ${s.workStatusSummary}` : ""}`
+    : "none";
+
   return [
     `mode: ${s.mode}`,
     `planPath: ${s.planPath ?? "none"}`,
+    `planRunId: ${s.planRunId ?? "none"}`,
     `planApproved: ${s.planApproved}`,
     `planReviewEnabled: ${config.planReview.enabled}`,
     `planReviewStatus: ${s.planReviewStatus}`,
     `planReviewLoops: ${s.planReviewLoops}/${config.planReview.maxLoops}`,
     `autoCodeReview: ${s.autoCodeReview}`,
+    `workRunId: ${s.workRunId ?? "none"}`,
     `codeReviewLoops: ${s.codeReviewLoops}/${config.codeReview.maxLoops}`,
+    `workStatus: ${workStatusText}`,
     "",
     "todos:",
     todoText(s),

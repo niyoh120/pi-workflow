@@ -6,19 +6,18 @@
  * of pi-coding-agent. Supports pi install, global config merge, and
  * multi-plan document management under .pi/workflow/plan/.
  *
- * When PI_WORKFLOW_SUBAGENT is set, enters child-safe mode:
- * only registers a minimal readonly guard, skipping all workflow
- * tools, commands, state machine, and prompt injection.
+ * Subagents are powered by @tintinweb/pi-subagents (required).
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { createSubagentsClient, type SubagentsClient } from "./subagent.js";
 
 import {
   registerTodoTool,
   registerPlanTool,
   registerSubagentTool,
-  registerReadonlyGuard,
+  registerWorkflowStatusTool,
 } from "./tools.js";
 import {
   registerPlanCommand,
@@ -30,33 +29,26 @@ import {
   registerWfExitCommand,
   registerWfResetCommand,
   registerWfInitCommand,
+  registerWfInstallSubagentsCommand,
   registerBeforeAgentStart,
   registerToolCallGuard,
   registerAgentEnd,
+  setSubagentsClient,
 } from "./commands.js";
 
 export default function (pi: ExtensionAPI) {
   // ═══════════════════════════════════════════════════
-  // Child-safe mode: PI_WORKFLOW_SUBAGENT is set.
-  // Only register the minimal readonly guard.
-  // Do NOT register workflow tools, commands, hooks,
-  //   agent_end state machine, prompt injection, or
-  //   the workflow_subagent tool itself.
+  // Try to detect pi-subagents. It must be loaded as a
+  // separate extension before pi-workflow.
   // ═══════════════════════════════════════════════════
-  const subagentEnv = process.env.PI_WORKFLOW_SUBAGENT;
-  if (subagentEnv) {
-    registerReadonlyGuard(pi);
-    return;
-  }
-
-  // ═══════════════════════════════════════════════════
-  // Normal (parent) mode: full workflow
-  // ═══════════════════════════════════════════════════
+  let subagentsClient: SubagentsClient = createSubagentsClient(pi);
+  setSubagentsClient(subagentsClient);
 
   // ── Tools ──────────────────────────────────
   registerTodoTool(pi, getAgentDir);
   registerPlanTool(pi, getAgentDir);
-  registerSubagentTool(pi, getAgentDir);
+  registerSubagentTool(pi, getAgentDir, () => subagentsClient);
+  registerWorkflowStatusTool(pi, getAgentDir);
 
   // ── Commands ───────────────────────────────
   registerPlanCommand(pi, getAgentDir);
@@ -68,6 +60,7 @@ export default function (pi: ExtensionAPI) {
   registerWfExitCommand(pi);
   registerWfResetCommand(pi);
   registerWfInitCommand(pi);
+  registerWfInstallSubagentsCommand(pi, getAgentDir);
 
   // ── Lifecycle events ───────────────────────
   registerBeforeAgentStart(pi, getAgentDir);

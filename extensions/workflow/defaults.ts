@@ -42,11 +42,15 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
     maxLoops: 3,
   },
   subagent: {
-    enabled: true,
-    timeoutMs: 300_000,
-    extensionMode: "inherit",
-    extensions: [],
-    fallbackToInlineReview: false,
+    installSource: "npm:@tintinweb/pi-subagents",
+    rpcTimeoutMs: 5000,
+    resultTimeoutMs: 300_000,
+    autoInstall: false,
+    agentTypes: {
+      planReview: "pi-workflow-plan-review",
+      review: "pi-workflow-code-review",
+      explore: "Explore",
+    },
   },
 };
 
