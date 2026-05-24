@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { getSessionKey, loadState, saveState, writeNewPlan, readPlan, writePlanReview } from "./state.js";
 import { loadConfig } from "./config.js";
 import { todoText } from "./helpers.js";
+import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState, SubagentRole, WorkStatus } from "./types.js";
 import type { SubagentsClient } from "./subagent.js";
 import { promptForSubagentRole } from "./prompts.js";
@@ -91,6 +92,9 @@ export function registerTodoTool(pi: ExtensionAPI, getAgentDir: () => string): v
       }
 
       saveState(ctx.cwd, sessionKey, state);
+
+      const overlay = getWorkflowOverlay();
+      if (overlay) overlay.update(state.todos);
 
       return {
         content: [{ type: "text", text: todoText(state) }],
@@ -274,6 +278,9 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
           todos: [],
         };
         saveState(ctx.cwd, sessionKey, cleared);
+
+        const overlay = getWorkflowOverlay();
+        if (overlay) overlay.dispose();
 
         return {
           content: [{ type: "text", text: "Workflow state cleared." }],

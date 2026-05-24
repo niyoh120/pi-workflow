@@ -48,6 +48,12 @@ export interface SubagentConfig {
   };
 }
 
+/** Built-in workflow todo overlay config. Displayed above the editor in non-idle workflow modes. */
+export interface TodoOverlayConfig {
+  /** Enable the workflow todo progress overlay. */
+  enabled: boolean;
+}
+
 /** Optional integration with @juicesharp/rpiv-ask-user-question. */
 export interface AskUserQuestionConfig {
   /** Enable auto-activation of ask_user_question in Plan/approval contexts. */
@@ -69,6 +75,7 @@ export interface WorkflowConfig {
     maxLoops: number;
   };
   subagent: SubagentConfig;
+  todoOverlay: TodoOverlayConfig;
   askUserQuestion: AskUserQuestionConfig;
 }
 

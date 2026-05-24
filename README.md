@@ -101,6 +101,9 @@ pi install .
     "enabled": true,
     "toolName": "ask_user_question",
     "installSource": "npm:@juicesharp/rpiv-ask-user-question"
+  },
+  "todoOverlay": {
+    "enabled": true
   }
 }
 ```
@@ -278,6 +281,26 @@ When `@juicesharp/rpiv-ask-user-question` is installed, Plan Mode uses tabbed di
 ```
 
 Disable `enabled` to prevent activation even when the package is installed. Change `toolName` if a different question tool is registered under another name.
+
+## Built-in Todo Overlay
+
+pi-workflow includes a built-in progress overlay displayed above the editor in non-idle workflow modes (plan, work, fix, review). It does **not** require `@juicesharp/rpiv-todo` — the overlay reads `workflow_todo` state directly through extension code, so there is no manual sync step and no risk of two todo lists drifting apart.
+
+**Behavior:**
+- Shows pending, in-progress, done, and blocked tasks with status symbols (○ ◐ ✓ ⊘).
+- Done items stay visible for the remainder of the current agent turn, then hide when the next turn starts.
+- Auto-hides when the workflow mode is idle (`/wf-exit`) or the todo list is empty.
+- Truncates to at most 12 lines to stay unobtrusive.
+
+**Disabling:**
+
+```json
+{
+  "todoOverlay": { "enabled": false }
+}
+```
+
+Set `todoOverlay.enabled` to `false` in the global or project config to hide the overlay.
 
 ## Storage
 

@@ -41,6 +41,9 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
     enabled: true,
     maxLoops: 3,
   },
+  todoOverlay: {
+    enabled: true,
+  },
   subagent: {
     installSource: "npm:@tintinweb/pi-subagents",
     rpcTimeoutMs: 5000,

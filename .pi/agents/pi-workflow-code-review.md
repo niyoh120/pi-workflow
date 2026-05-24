@@ -4,7 +4,6 @@ tools: read, bash, grep, find, ls
 disallowed_tools: write, edit
 skills: false
 extensions: true
-model: openai-codex/gpt-5.1
 thinking: high
 max_turns: 30
 ---

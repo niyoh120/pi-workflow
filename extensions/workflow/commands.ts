@@ -5,6 +5,7 @@ import { loadConfig } from "./config.js";
 import { COMMON_PROMPT, promptForMode, promptForSubagentRole } from "./prompts.js";
 import { isReadonlyMode, isLocalFileMutatingShell, isAllowedPlanScratchPath } from "./guards.js";
 import { currentStatusText, modeLabel, todoText } from "./helpers.js";
+import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { Mode, WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
 import { planDir } from "./paths.js";
@@ -549,6 +550,17 @@ export function registerBeforeAgentStart(
 
     ensureWorkflowToolsActive(pi, ctx.cwd, getAgentDir);
 
+    // Hide done items at the start of each new turn.
+    const overlay = getWorkflowOverlay();
+    if (overlay) {
+      overlay.hideDoneFromLastTurn();
+      if (state.mode === "idle") {
+        overlay.dispose();
+        return;
+      }
+      overlay.update(state.todos);
+    }
+
     if (state.mode === "idle") return;
 
     const modePrompt = promptForMode(state.mode);
@@ -902,6 +914,9 @@ export function registerWfExitCommand(pi: ExtensionAPI): void {
       state.autoCodeReview = false;
       saveState(ctx.cwd, sessionKey, state);
 
+      const overlay = getWorkflowOverlay();
+      if (overlay) overlay.dispose();
+
       ctx.ui.setStatus("lite-sp", undefined);
       ctx.ui.notify("已退出 workflow mode。", "info");
     },
@@ -917,6 +932,9 @@ export function registerWfResetCommand(pi: ExtensionAPI): void {
 
       const state: WorkflowState = { ...DEFAULT_STATE };
       saveState(ctx.cwd, sessionKey, state);
+
+      const overlay = getWorkflowOverlay();
+      if (overlay) overlay.dispose();
 
       const pdir = planDir(ctx.cwd);
       if (fs.existsSync(pdir)) {
