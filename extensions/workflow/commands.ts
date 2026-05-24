@@ -117,6 +117,22 @@ async function switchMode(
   return true;
 }
 
+/** Send a handoff user message: direct delivery when idle, followUp when busy.
+ *  Always triggers a turn. When idle, sends directly to avoid missing the
+ *  followUp drain window (especially in agent_end callbacks).  When busy or
+ *  isIdle unavailable, falls back to queued followUp to stay streaming-safe. */
+function sendHandoffUserMessage(
+  pi: ExtensionAPI,
+  ctx: any,
+  message: string
+): void {
+  if (ctx.isIdle?.()) {
+    pi.sendUserMessage(message);
+  } else {
+    pi.sendUserMessage(message, { deliverAs: "followUp" });
+  }
+}
+
 /** Follow-up that transitions from plan to work based on current plan. */
 async function startWorkFromPlan(
   pi: ExtensionAPI,
@@ -142,9 +158,10 @@ async function startWorkFromPlan(
 
   const planPathText = state.planPath ?? "当前计划文件";
 
-  pi.sendUserMessage(
-    `按已确认计划实现。计划文件：${planPathText}。请先读取计划和 workflow_todo，然后按 todo 顺序执行。`,
-    { deliverAs: "followUp" }
+  sendHandoffUserMessage(
+    pi,
+    ctx,
+    `按已确认计划实现。计划文件：${planPathText}。请先读取计划和 workflow_todo，然后按 todo 顺序执行。`
   );
 }
 
@@ -498,9 +515,10 @@ async function runCodeReviewSubagent(
 
     await switchMode(pi, ctx, "fix", getAgentDir);
 
-    pi.sendUserMessage(
-      `请修复上一轮 reviewer 指出的 Critical / Important 问题。修复后调用 workflow_status 工具。\n\n评审意见：\n${result.text.slice(-4000)}`,
-      { deliverAs: "followUp" }
+    sendHandoffUserMessage(
+      pi,
+      ctx,
+      `请修复上一轮 reviewer 指出的 Critical / Important 问题。修复后调用 workflow_status 工具。\n\n评审意见：\n${result.text.slice(-4000)}`
     );
     return true;
   } catch (err: any) {
