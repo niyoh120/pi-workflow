@@ -16,7 +16,7 @@ pi install npm:@juicesharp/rpiv-ask-user-question
 # 3. Install pi-workflow globally
 pi install .
 
-# 4. Inside Pi, sync bundled review agents and reload
+# 4. Inside Pi, sync minimal review containers and reload
 /wf-install-subagents
 /reload
 ```
@@ -95,6 +95,11 @@ pi install .
       "planReview": "pi-workflow-plan-review",
       "review": "pi-workflow-code-review",
       "explore": "Explore"
+    },
+    "maxTurns": {
+      "planReview": 30,
+      "review": 30,
+      "explore": 30
     }
   },
   "askUserQuestion": {
@@ -148,7 +153,7 @@ Every plan save, read, review, and `/wf-status` explicitly shows the plan file p
 | `/wf-exit` | Exit workflow mode |
 | `/wf-reset` | Clear workflow state and plan directory |
 | `/wf-init` | Initialize agent workspace: ensure git repo, generate/update AGENTS.md |
-| `/wf-install-subagents` | Install @tintinweb/pi-subagents and sync bundled review agents |
+| `/wf-install-subagents` | Install @tintinweb/pi-subagents and sync minimal review containers |
 
 ## Subagents
 
@@ -157,29 +162,35 @@ Plan review, code review, and exploration run as **fresh-context subagents via @
 - **Clean context** — the reviewer sees only the plan or diff, not your full conversation.
 - **Parallel execution** — multiple subagents can run concurrently.
 - **Live widget UI** — see agent progress, tool usage, and token counts.
-- **Custom agent types** — `planReview` and `review` use pi-workflow custom agents for workflow-specific output protocols.
+- **Minimal containers** — `planReview` and `review` use lightweight pi-workflow custom agent files that only declare tool permissions; the actual review rules come from workflow-injected prompts.
 - **Exploration** — `explore` uses the built-in `Explore` agent type.
 
-Review agents are **not a hard OS/tool sandbox** — they disable `write` / `edit` but retain `bash` and extension/MCP tools (web search etc.) to maximize review quality. They run as fresh sessions without parent conversation history.
+Review agents are **not a hard OS/tool sandbox** — they disable `write` / `edit` but retain `bash` for read-only operations. They run as fresh sessions without parent conversation history. (`extensions: false` limits them to built-in tools only; if web search or MCP tools are desired for review, set `extensions: true` in the agent `.md` frontmatter.)
 
 ### Agent Types
 
 | Role | Agent Type | Source |
 |------|-----------|--------|
-| `planReview` | `pi-workflow-plan-review` | Custom — bundled and synced via `/wf-install-subagents` |
-| `review` | `pi-workflow-code-review` | Custom — bundled and synced via `/wf-install-subagents` |
+| `planReview` | `pi-workflow-plan-review` | Minimal container — bundled and synced via `/wf-install-subagents` |
+| `review` | `pi-workflow-code-review` | Minimal container — bundled and synced via `/wf-install-subagents` |
 | `explore` | `Explore` | Built-in (from `@tintinweb/pi-subagents`) |
 
 Custom review agents are defined under `extensions/workflow/agents/` in the pi-workflow package. `/wf-install-subagents` syncs them to the global agents directory (`~/.pi/agent/agents/`) so pi-subagents discovers them in any project.
 
 If custom review agents are missing from both project (`.pi/agents/`) and global paths, review operations will fail with a clear error and install instructions — there is no silent fallback.
 
+Custom review agent files are **minimal containers** — they only declare tool permissions and a short neutral prompt. The complete review rules and output format requirements come from pi-workflow's isolated review prompts, which are injected at runtime. This means:
+
+- **Model, thinking level, and turn limits are controlled exclusively by your workflow config** (`config.json`), not by the agent `.md` file.
+- The `.md` files contain no model configuration — there is no conflict between frontmatter and workflow config.
+
 Custom review agent frontmatter:
 
 ```yaml
 tools: read, bash, grep, find, ls
 disallowed_tools: write, edit
-extensions: true
+extensions: false
+skills: false
 ```
 
 ## Workflow Status (auto review trigger)
@@ -242,7 +253,6 @@ Spawn a role-shaped, read-only subagent via @tintinweb/pi-subagents.
 - `task` (required): the focused task for the subagent
 - `context` (optional): explicit context for the subagent (parent session history is NOT available)
 - `instructions` (optional): additional preferences — depth, format, focus, search strategy
-- `modelRole` (optional): override the model to use; defaults to the role's configured model
 
 **Roles:**
 - `planReview`: Isolated plan review using pi-workflow custom agent. Subagent outputs `PLAN_REVIEW_STATUS: PASS|FAIL`.

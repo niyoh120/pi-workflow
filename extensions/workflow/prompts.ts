@@ -259,7 +259,9 @@ Output format:
 ### Critical
 ### Important
 ### Minor
-### Assessment
+## Assessment
+
+You MUST include the marker [pi-workflow-plan-review/v1] in your Assessment section for identity verification.
 
 Final line MUST be exactly:
 PLAN_REVIEW_STATUS: PASS
@@ -304,7 +306,9 @@ Output format:
 #### Critical
 #### Important
 #### Minor
-### Assessment
+## Assessment
+
+You MUST include the marker [pi-workflow-code-review/v1] in your Assessment section for identity verification.
 
 Final line MUST be exactly:
 REVIEW_STATUS: PASS

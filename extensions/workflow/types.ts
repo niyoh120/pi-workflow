@@ -46,6 +46,8 @@ export interface SubagentConfig {
     review?: string;
     explore?: string;
   };
+  /** Max turn limits per subagent role. Undefined or 0 = unlimited. */
+  maxTurns?: Partial<Record<SubagentRole, number>>;
 }
 
 /** Built-in workflow todo overlay config. Displayed above the editor in non-idle workflow modes. */

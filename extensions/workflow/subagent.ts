@@ -1,6 +1,6 @@
 import * as crypto from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { SubagentConfig, SubagentRole } from "./types.js";
+import type { ModelSpec, SubagentConfig, SubagentRole } from "./types.js";
 import { isReviewAgentAvailable, reviewAgentMissingHint } from "./agents.js";
 
 // ── Public result type (backward-compatible shape) ──
@@ -89,6 +89,7 @@ export interface SubagentsClient {
     systemPrompt: string;
     instructions?: string;
     subagentConfig?: SubagentConfig;
+    modelSpec: ModelSpec;
     signal?: AbortSignal;
     /** Working directory for preflight agent availability checks. */
     cwd?: string;
@@ -156,9 +157,14 @@ export function createSubagentsClient(pi: ExtensionAPI): SubagentsClient {
     type: string;
     prompt: string;
     description: string;
-    runInBackground: boolean;
     signal?: AbortSignal;
     subagentConfig?: SubagentConfig;
+    /** Additional runtime options to forward to pi-subagents RPC. */
+    rpcOptions?: {
+      model?: string;
+      thinkingLevel?: string;
+      maxTurns?: number;
+    };
   }): Promise<{ agentId: string; result: CompletionEvent }> {
     return new Promise((resolve, reject) => {
       const requestId = crypto.randomUUID();
@@ -239,6 +245,9 @@ export function createSubagentsClient(pi: ExtensionAPI): SubagentsClient {
         options: {
           description: opts.description,
           isBackground: true,
+          model: opts.rpcOptions?.model,
+          thinkingLevel: opts.rpcOptions?.thinkingLevel,
+          maxTurns: opts.rpcOptions?.maxTurns,
         },
       });
     });
@@ -251,12 +260,20 @@ export function createSubagentsClient(pi: ExtensionAPI): SubagentsClient {
     review: "[pi-workflow-code-review/v1]",
   };
 
+  /** Normalize a configured maxTurns value for RPC. */
+  function normalizeConfiguredMaxTurns(n: number | undefined): number | undefined {
+    if (n == null || n === 0) return undefined;
+    if (!Number.isFinite(n) || n < 0) return undefined;
+    return Math.max(1, Math.floor(n));
+  }
+
   async function run(opts: {
     role: SubagentRole;
     task: string;
     systemPrompt: string;
     instructions?: string;
     subagentConfig?: SubagentConfig;
+    modelSpec: ModelSpec;
     signal?: AbortSignal;
     cwd?: string;
     agentDir?: string;
@@ -267,10 +284,10 @@ export function createSubagentsClient(pi: ExtensionAPI): SubagentsClient {
 
     const subagentConfig = opts.subagentConfig;
 
-    // Resolve agent type name: config override → built-in fallback
+    // Resolve agent type name: config override → default matching DEFAULT_CONFIG.
     const roleToType: Record<SubagentRole, string> = {
-      planReview: subagentConfig?.agentTypes?.planReview ?? "Plan",
-      review: subagentConfig?.agentTypes?.review ?? "Explore",
+      planReview: subagentConfig?.agentTypes?.planReview ?? "pi-workflow-plan-review",
+      review: subagentConfig?.agentTypes?.review ?? "pi-workflow-code-review",
       explore: subagentConfig?.agentTypes?.explore ?? "Explore",
     };
     const agentType = roleToType[opts.role];
@@ -306,9 +323,13 @@ export function createSubagentsClient(pi: ExtensionAPI): SubagentsClient {
       type: agentType,
       prompt,
       description,
-      runInBackground: true,
       signal: opts.signal,
       subagentConfig,
+      rpcOptions: {
+        model: `${opts.modelSpec.provider}/${opts.modelSpec.model}`,
+        thinkingLevel: opts.modelSpec.thinking,
+        maxTurns: normalizeConfiguredMaxTurns(subagentConfig?.maxTurns?.[opts.role]),
+      },
     });
 
     const isError = event.status === "error" || event.status === "stopped" || event.status === "aborted";
@@ -317,14 +338,15 @@ export function createSubagentsClient(pi: ExtensionAPI): SubagentsClient {
     // ── Identity marker validation for custom review agents ──
     const expectedMarker = IDENTITY_MARKERS[opts.role];
     if (expectedMarker && !text.includes(expectedMarker)) {
-      // Agent may have fallen back to general-purpose — reject the result
+      // Agent output missing pi-workflow identity marker — reject the result
       const subagentResult: SubagentResult = {
         role: opts.role,
         model: event.type ? `${agentType}(${event.type})` : agentType,
-        text: `Identity validation failed. The custom review agent "${agentType}" was not correctly loaded. ` +
-          `The agent output did not contain the required identity marker "${expectedMarker}". ` +
-          `This may happen if pi-subagents has not loaded the custom agent type (run /wf-install-subagents then /reload). ` +
-          `Refusing to accept potential general-purpose fallback results.`,
+        text: `Review result validation failed. The subagent output did not contain the ` +
+          `required pi-workflow identity marker "${expectedMarker}". ` +
+          `This may mean the review agent was not correctly loaded or the review prompt was not applied. ` +
+          `Try running /wf-install-subagents then /reload, and verify the review agent file includes the managed marker (<!-- managed-by: pi-workflow -->). ` +
+          `Refusing to accept an untrusted or incorrectly prompted review result.`,
         stopReason: "identity_marker_missing",
         exitCode: 2,
         usage: { input: 0, output: 0, turns: 0 },

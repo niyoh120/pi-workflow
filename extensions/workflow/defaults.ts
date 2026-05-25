@@ -54,6 +54,11 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
       review: "pi-workflow-code-review",
       explore: "Explore",
     },
+    maxTurns: {
+      planReview: 30,
+      review: 30,
+      explore: 30,
+    },
   },
   askUserQuestion: {
     enabled: true,

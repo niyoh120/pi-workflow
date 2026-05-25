@@ -201,6 +201,7 @@ async function runPlanReviewSubagent(
       task: `Review the plan below thoroughly. Check coverage, scope creep, dependencies, compatibility, risks, and todo granularity.\n\n${context}`,
       systemPrompt,
       subagentConfig: config.subagent,
+      modelSpec: config.models.planReview,
       cwd: ctx.cwd,
       agentDir: getAgentDir(),
     });
@@ -447,6 +448,7 @@ async function runCodeReviewSubagent(
       task: `Review the current working tree changes (git diff) provided below. Check the diff against the plan and todo context.\n\n${context}`,
       systemPrompt,
       subagentConfig: config.subagent,
+      modelSpec: config.models.review,
       cwd: ctx.cwd,
       agentDir: getAgentDir(),
     });
@@ -955,7 +957,7 @@ export function registerWfInstallSubagentsCommand(
   getAgentDir: () => string,
 ): void {
   pi.registerCommand("wf-install-subagents", {
-    description: "安装 @tintinweb/pi-subagents 并同步 workflow review agents",
+    description: "安装 @tintinweb/pi-subagents 并同步最小 review containers（不包含模型配置）",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
 
@@ -983,9 +985,9 @@ export function registerWfInstallSubagentsCommand(
         return;
       }
 
-      // 2. Sync bundled review agents to global agents directory
+      // 2. Sync minimal review containers to global agents directory
       const targetDir = getGlobalAgentsDir(agentDir);
-      ctx.ui.notify(`正在同步 review agents 到 ${targetDir}...`, "info");
+      ctx.ui.notify(`正在同步最小 review containers 到 ${targetDir}...`, "info");
 
       const syncResult = syncReviewAgentsToGlobal(agentDir);
 
@@ -1004,7 +1006,7 @@ export function registerWfInstallSubagentsCommand(
 
       // 3. Prompt reload
       ctx.ui.notify(
-        "Custom review agents 已同步。请执行 /reload 或重启 Pi 使 pi-subagents 加载新 agents。",
+        "Minimal review containers 已同步。请执行 /reload 或重启 Pi 使 pi-subagents 加载新 containers。",
         "info"
       );
 

@@ -328,9 +328,6 @@ export function registerSubagentTool(
       }),
       context: Type.Optional(Type.String()),
       instructions: Type.Optional(Type.String()),
-      modelRole: Type.Optional(
-        StringEnum(["planReview", "review", "explore"] as const)
-      ),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const config = loadConfig(ctx.cwd, getAgentDir());
@@ -365,6 +362,7 @@ export function registerSubagentTool(
           systemPrompt,
           instructions,
           subagentConfig: config.subagent,
+          modelSpec: config.models[role],
           signal,
           cwd: ctx.cwd,
           agentDir: getAgentDir(),
