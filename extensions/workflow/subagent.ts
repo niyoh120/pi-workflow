@@ -14,6 +14,12 @@ export interface SubagentResult {
   usage: { input: number; output: number; turns: number };
   stderr: string;
   statusMarker?: "PASS" | "FAIL" | null;
+  /** Child agent id when known (populated after successful spawn). */
+  agentId?: string;
+  /** Subagent wall-clock duration in ms (derived from pi-subagents event). */
+  durationMs?: number;
+  /** Raw terminal status string from the pi-subagents completion/failure event. */
+  eventStatus?: string;
 }
 
 // ── RPC reply shape (from pi-subagents cross-extension RPC) ──
@@ -75,6 +81,42 @@ export class SubagentTimeoutError extends Error {
     this.name = "SubagentTimeoutError";
     this.agentId = agentId;
   }
+}
+
+// ── Internal diagnostic formatter (not a public API contract) ──
+
+/**
+ * Build a human-readable failure summary from a SubagentResult.
+ *
+ * This is an internal helper — the string it produces is used in UI
+ * notifications, plan review notes, and workflow_subagent tool error
+ * content.  It must always return a string and must tolerate missing
+ * optional fields.
+ */
+export function formatSubagentFailure(result: SubagentResult): string {
+  const parts: string[] = [];
+
+  // Header
+  parts.push(`Subagent "${result.role}" failed (exit ${result.exitCode}).`);
+
+  // Optional metadata (additive-only — consumers of details.result are unaffected)
+  if (result.agentId) parts.push(`Agent ID: ${result.agentId}.`);
+  if (result.model) parts.push(`Model: ${result.model}.`);
+  if (result.eventStatus) parts.push(`Status: ${result.eventStatus}.`);
+  if (result.durationMs != null) parts.push(`Duration: ${result.durationMs}ms.`);
+
+  // stderr carries raw error detail
+  const stderrTrimmed = (result.stderr ?? "").trim().slice(0, 500);
+  if (stderrTrimmed) parts.push(`stderr: ${stderrTrimmed}`);
+
+  // text for exitCode != 0 is usually an explanation (identity-marker validation, etc.)
+  const textTrimmed = (result.text ?? "").trim().slice(0, 1000);
+  if (result.exitCode !== 0 && textTrimmed) {
+    const prefix = result.exitCode === 2 ? "Validation result: " : "Result: ";
+    parts.push(`${prefix}${textTrimmed}`);
+  }
+
+  return parts.join("\n");
 }
 
 // ── Subagents client ────────────────────────────
@@ -174,13 +216,16 @@ export function createSubagentsClient(pi: ExtensionAPI): SubagentsClient {
       let unsubFailed: () => void = () => {};
       let unsubSpawnReply: () => void = () => {};
 
+      // Track the real agent id so timeout errors include it when spawn already succeeded.
+      let spawnedAgentId = "(unknown)";
+
       // Timeout
-      const resultTimeoutMs = opts.subagentConfig?.resultTimeoutMs ?? 300_000;
+      const resultTimeoutMs = opts.subagentConfig?.resultTimeoutMs ?? 600_000;
       let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
       if (resultTimeoutMs > 0) {
         timeoutTimer = setTimeout(() => {
           cleanup();
-          reject(new SubagentTimeoutError("(unknown)", resultTimeoutMs));
+          reject(new SubagentTimeoutError(spawnedAgentId, resultTimeoutMs));
         }, resultTimeoutMs);
       }
 
@@ -219,6 +264,7 @@ export function createSubagentsClient(pi: ExtensionAPI): SubagentsClient {
           }
 
           const agentId = reply.data.id;
+          spawnedAgentId = agentId;
 
           // Step 2: Listen for completion/failure of this specific agentId
           unsubCompleted = pi.events.on("subagents:completed", (raw: unknown) => {
@@ -335,7 +381,29 @@ export function createSubagentsClient(pi: ExtensionAPI): SubagentsClient {
     const isError = event.status === "error" || event.status === "stopped" || event.status === "aborted";
     const text = event.result ?? "";
 
-    // ── Identity marker validation for custom review agents ──
+    // ── Terminal error events: surface immediately, skip identity-marker validation ──
+    if (isError) {
+      const subagentResult: SubagentResult = {
+        role: opts.role,
+        model: event.type ? `${agentType}(${event.type})` : agentType,
+        text,
+        stopReason: event.status,
+        exitCode: 1,
+        usage: {
+          input: event.tokens?.input ?? 0,
+          output: event.tokens?.output ?? 0,
+          turns: event.toolUses ?? 0,
+        },
+        stderr: event.error ?? `status: ${event.status}`,
+        statusMarker: null,
+        agentId,
+        durationMs: event.durationMs,
+        eventStatus: event.status,
+      };
+      return subagentResult;
+    }
+
+    // ── Identity marker validation for custom review agents (successful completions only) ──
     const expectedMarker = IDENTITY_MARKERS[opts.role];
     if (expectedMarker && !text.includes(expectedMarker)) {
       // Agent output missing pi-workflow identity marker — reject the result
@@ -352,6 +420,9 @@ export function createSubagentsClient(pi: ExtensionAPI): SubagentsClient {
         usage: { input: 0, output: 0, turns: 0 },
         stderr: `Identity marker "${expectedMarker}" not found in agent output.`,
         statusMarker: null,
+        agentId,
+        durationMs: event.durationMs,
+        eventStatus: event.status,
       };
       return subagentResult;
     }
@@ -361,14 +432,17 @@ export function createSubagentsClient(pi: ExtensionAPI): SubagentsClient {
       model: event.type ? `${agentType}(${event.type})` : agentType,
       text,
       stopReason: null,
-      exitCode: isError ? 1 : 0,
+      exitCode: 0,
       usage: {
         input: event.tokens?.input ?? 0,
         output: event.tokens?.output ?? 0,
         turns: event.toolUses ?? 0,
       },
-      stderr: isError ? (event.error ?? `status: ${event.status}`) : "",
+      stderr: "",
       statusMarker: extractStatusMarker(text),
+      agentId,
+      durationMs: event.durationMs,
+      eventStatus: event.status,
     };
 
     return subagentResult;

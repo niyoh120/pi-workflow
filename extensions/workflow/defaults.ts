@@ -47,7 +47,7 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
   subagent: {
     installSource: "npm:@tintinweb/pi-subagents",
     rpcTimeoutMs: 5000,
-    resultTimeoutMs: 300_000,
+    resultTimeoutMs: 600_000,
     autoInstall: false,
     agentTypes: {
       planReview: "pi-workflow-plan-review",

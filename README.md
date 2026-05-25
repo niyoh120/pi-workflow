@@ -89,7 +89,7 @@ pi install .
   "subagent": {
     "installSource": "npm:@tintinweb/pi-subagents",
     "rpcTimeoutMs": 5000,
-    "resultTimeoutMs": 300000,
+    "resultTimeoutMs": 600000,
     "autoInstall": false,
     "agentTypes": {
       "planReview": "pi-workflow-plan-review",
@@ -112,6 +112,13 @@ pi install .
   }
 }
 ```
+
+### Subagent timeout configuration
+
+- `rpcTimeoutMs` — Timeout for the initial RPC ping that detects whether `@tintinweb/pi-subagents` is loaded (default 5 s).
+- `resultTimeoutMs` — Maximum total time to wait for a spawned subagent to complete, measured from the spawn request (default 10 min).
+  - Set to `0` to disable the result timeout entirely (the parent will wait indefinitely).
+  - Override in global (`~/.pi/agent/workflow/config.json`) or project (`.pi/workflow/config.json`) config; the project value takes precedence.
 
 **Legacy config fields:** Old `subagent` fields (`enabled`, `timeoutMs`, `extensionMode`, `extensions`, `fallbackToInlineReview`) are silently ignored. They do not cause errors.
 

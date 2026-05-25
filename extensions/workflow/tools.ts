@@ -7,6 +7,7 @@ import { todoText } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState, SubagentRole, WorkStatus } from "./types.js";
 import type { SubagentsClient } from "./subagent.js";
+import { formatSubagentFailure } from "./subagent.js";
 import { promptForSubagentRole } from "./prompts.js";
 
 const TodoStatusSchema = StringEnum([
@@ -369,14 +370,10 @@ export function registerSubagentTool(
           agentDir: getAgentDir(),
         });
 
-        if (result.exitCode !== 0 && !result.text) {
-          const text =
-            `Subagent "${role}" failed (exit ${result.exitCode}).` +
-            (result.stderr
-              ? `\n\nstderr:\n${result.stderr.trim().slice(-2000)}`
-              : "");
+        if (result.exitCode !== 0) {
+          const diag = formatSubagentFailure(result);
           return {
-            content: [{ type: "text", text }],
+            content: [{ type: "text", text: diag }],
             details: { result },
             isError: true,
           };

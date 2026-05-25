@@ -10,6 +10,7 @@ import type { Mode, WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
 import { planDir } from "./paths.js";
 import type { SubagentsClient } from "./subagent.js";
+import { formatSubagentFailure } from "./subagent.js";
 import fs from "node:fs";
 import { execSync } from "node:child_process";
 import path from "node:path";
@@ -207,19 +208,20 @@ async function runPlanReviewSubagent(
     });
 
     if (result.exitCode !== 0) {
+      const diag = formatSubagentFailure(result);
       ctx.ui.notify(
-        `Plan review subagent failed (exit ${result.exitCode}). stderr: ${result.stderr.slice(-300)}`,
+        `Plan review subagent failed. ${diag}`,
         "error"
       );
       state.planReviewStatus = "fail";
       state.planReviewLoops += 1;
-      state.planReviewNotes = `Subagent error (exit ${result.exitCode}): ${result.stderr.slice(-500)}`;
+      state.planReviewNotes = diag;
       if (state.planReviewPath) writePlanReview(ctx.cwd, state.planReviewPath, state.planReviewNotes);
       state.mode = "plan";
       saveState(ctx.cwd, sessionKey, state);
       await switchMode(pi, ctx, "plan", getAgentDir);
       pi.sendUserMessage(
-        `计划评审子代理执行失败 (exit ${result.exitCode})。请手动检查或重试。`,
+        `计划评审子代理执行失败。${diag}`,
         { deliverAs: "followUp" }
       );
       return;
@@ -270,19 +272,20 @@ async function runPlanReviewSubagent(
       { deliverAs: "followUp" }
     );
   } catch (err: any) {
+    const errMsg = err?.message ?? String(err);
     ctx.ui.notify(
-      `Plan review subagent error: ${err.message ?? String(err)}`,
+      `Plan review subagent error: ${errMsg}`,
       "error"
     );
     state.planReviewStatus = "fail";
     state.planReviewLoops += 1;
-    state.planReviewNotes = `Subagent exception: ${err.message ?? String(err)}`;
+    state.planReviewNotes = `Subagent exception: ${errMsg}`;
     if (state.planReviewPath) writePlanReview(ctx.cwd, state.planReviewPath, state.planReviewNotes);
     state.mode = "plan";
     saveState(ctx.cwd, sessionKey, state);
     await switchMode(pi, ctx, "plan", getAgentDir);
     pi.sendUserMessage(
-      `计划评审子代理异常：${err.message ?? String(err)}。请手动检查或重试。`,
+      `计划评审子代理异常：${errMsg}`,
       { deliverAs: "followUp" }
     );
     return;
@@ -454,8 +457,9 @@ async function runCodeReviewSubagent(
     });
 
     if (result.exitCode !== 0) {
+      const diag = formatSubagentFailure(result);
       ctx.ui.notify(
-        `Code review subagent failed (exit ${result.exitCode}). stderr: ${result.stderr.slice(-300)}`,
+        `Code review subagent failed. ${diag}`,
         "error"
       );
       if (autoFix) {
