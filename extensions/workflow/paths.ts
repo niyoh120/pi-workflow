@@ -14,9 +14,14 @@ export function configPath(cwd: string): string {
   return path.join(workflowDir(cwd), "config.json");
 }
 
-/** Legacy directory-wide state path (no longer used for runtime state since session-scoped migration). */
+/** Directory-wide state path (imported once into first session via one-shot migration). */
 export function legacyStatePath(cwd: string): string {
   return path.join(workflowDir(cwd), "state.json");
+}
+
+/** Marker that prevents re-importing legacy state after the first migration. */
+export function legacyMigrationMarkerPath(cwd: string): string {
+  return path.join(workflowDir(cwd), ".legacy-imported");
 }
 
 /** Directory for all plan documents (shared across sessions, randomized filenames). */

@@ -76,7 +76,14 @@ export class WorkflowTodoOverlay {
     this.todos = todos;
 
     if (todos.length === 0) {
-      this.dispose();
+      // Remove the widget without losing UI context, so a later
+      // update() with a non-empty list can re-register in the same session.
+      this.clearBookkeeping();
+      if (this.widgetRegistered && this.uiCtx) {
+        this.uiCtx.setWidget(WIDGET_KEY, undefined);
+        this.widgetRegistered = false;
+        this.tui = undefined;
+      }
       return;
     }
 
@@ -109,6 +116,16 @@ export class WorkflowTodoOverlay {
     }
     this.doneIdsPendingHide.clear();
     this.tui?.requestRender();
+  }
+
+  /**
+   * Clear done/hidden bookkeeping without losing UI context.
+   * Call before replacing the todo list (e.g. new plan, workflow_todo reset)
+   * so the next update() can register a fresh widget in the same turn.
+   */
+  clearBookkeeping(): void {
+    this.doneIdsPendingHide.clear();
+    this.hiddenDoneIds.clear();
   }
 
   /** Remove the widget and clear UI state. */
@@ -148,9 +165,17 @@ export class WorkflowTodoOverlay {
   private renderWidget(theme: Theme, width: number): string[] {
     const visible = this.getVisibleTodos();
     if (visible.length === 0) {
-      // All visible tasks gone; hide the widget.
-      // Use setTimeout so dispose() runs outside the render phase.
-      setTimeout(() => this.dispose(), 0);
+      // All visible tasks gone; remove the widget without losing UI context.
+      // Do NOT clear bookkeeping here — hidden/done state must be preserved
+      // for the current todo list. Only lifecycle resets clear bookkeeping.
+      // Use setTimeout so the cleanup runs outside the render phase.
+      setTimeout(() => {
+        if (this.widgetRegistered && this.uiCtx) {
+          this.uiCtx.setWidget(WIDGET_KEY, undefined);
+          this.widgetRegistered = false;
+          this.tui = undefined;
+        }
+      }, 0);
       return [];
     }
 

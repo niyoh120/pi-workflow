@@ -761,6 +761,12 @@ export function registerPlanCommand(
       };
       saveState(ctx.cwd, sessionKey, state);
 
+      const overlay = getWorkflowOverlay();
+      if (overlay) {
+        overlay.clearBookkeeping();
+        overlay.update(state.todos);
+      }
+
       const ok = await switchMode(pi, ctx, "plan", getAgentDir);
       if (!ok) return;
 
@@ -830,6 +836,12 @@ export function registerWorkCommand(
         workRunId: crypto.randomUUID(),
       };
       saveState(ctx.cwd, sessionKey, state);
+
+      const overlay = getWorkflowOverlay();
+      if (overlay) {
+        overlay.clearBookkeeping();
+        overlay.update(state.todos);
+      }
 
       const ok = await switchMode(pi, ctx, "work", getAgentDir);
       if (!ok) return;

@@ -52,6 +52,9 @@ export function registerTodoTool(pi: ExtensionAPI, getAgentDir: () => string): v
       const agentDir = getAgentDir();
 
       if (params.action === "reset") {
+        const overlay = getWorkflowOverlay();
+        if (overlay) overlay.clearBookkeeping();
+
         state.todos = (params.items ?? []).map((item: any, index: number) => ({
           id: item.id || `T${index + 1}`,
           title: item.title,
@@ -168,7 +171,14 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
         state.planReviewNotes = undefined;
         state.planPath = planPath;
         state.planReviewPath = planReviewPath;
+        state.todos = [];
         saveState(ctx.cwd, sessionKey, state);
+
+        const overlay = getWorkflowOverlay();
+        if (overlay) {
+          overlay.clearBookkeeping();
+          overlay.update(state.todos);
+        }
 
         return {
           content: [

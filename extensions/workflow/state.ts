@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
-import { sessionStatePath, legacyStatePath, deriveSessionKey, ensureWorkflowDir, planDir, generatePlanFilename, deriveReviewFilename } from "./paths.js";
+import { sessionStatePath, legacyStatePath, legacyMigrationMarkerPath, deriveSessionKey, ensureWorkflowDir, planDir, generatePlanFilename, deriveReviewFilename } from "./paths.js";
 import { deepMerge } from "./config.js";
 
 /** Minimal session manager interface needed to derive the session key. */
@@ -19,29 +19,36 @@ export function getSessionKey(ctx: { sessionManager?: SessionKeySource } | Sessi
 
 /**
  * Load runtime state from the session-scoped path.
- * If session state does not exist but the legacy directory-wide state.json does,
- * import it once deterministically into the session path.
+ * On first access, imports legacy .pi/workflow/state.json once,
+ * then writes a marker so subsequent sessions start fresh.
  */
 export function loadState(cwd: string, sessionKey: string): WorkflowState {
   ensureWorkflowDir(cwd);
   const spath = sessionStatePath(cwd, sessionKey);
 
   if (!fs.existsSync(spath)) {
-    // Attempt legacy import for migration.
-    const lpath = legacyStatePath(cwd);
-    if (fs.existsSync(lpath)) {
-      try {
-        const legacy = deepMerge(
-          DEFAULT_STATE,
-          JSON.parse(fs.readFileSync(lpath, "utf8"))
-        );
-        // Write it into the session-scoped path so it only imports once.
-        fs.mkdirSync(path.dirname(spath), { recursive: true });
-        fs.writeFileSync(spath, JSON.stringify(legacy, null, 2), "utf8");
-        return legacy;
-      } catch {
-        return { ...DEFAULT_STATE };
+    // One-shot legacy migration: import directory-wide state.json once.
+    const markerPath = legacyMigrationMarkerPath(cwd);
+    if (!fs.existsSync(markerPath)) {
+      const lpath = legacyStatePath(cwd);
+      if (fs.existsSync(lpath)) {
+        try {
+          const legacy = deepMerge(
+            DEFAULT_STATE,
+            JSON.parse(fs.readFileSync(lpath, "utf8"))
+          );
+          fs.mkdirSync(path.dirname(spath), { recursive: true });
+          fs.writeFileSync(spath, JSON.stringify(legacy, null, 2), "utf8");
+          fs.writeFileSync(markerPath, "", "utf8");
+          return legacy;
+        } catch {
+          // Corrupt legacy JSON — write marker to prevent repeated import attempts.
+          fs.writeFileSync(markerPath, "", "utf8");
+          return { ...DEFAULT_STATE };
+        }
       }
+      // No legacy state to import. Write marker so later sessions skip the check.
+      fs.writeFileSync(markerPath, "", "utf8");
     }
     return { ...DEFAULT_STATE };
   }
