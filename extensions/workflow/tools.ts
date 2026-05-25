@@ -9,6 +9,7 @@ import type { WorkflowState, SubagentRole, WorkStatus } from "./types.js";
 import type { SubagentsClient } from "./subagent.js";
 import { formatSubagentFailure } from "./subagent.js";
 import { promptForSubagentRole } from "./prompts.js";
+import { queueApprovedWorkFromTool, clearPendingWorkHandoff } from "./work-handoff.js";
 
 const TodoStatusSchema = StringEnum([
   "pending",
@@ -172,6 +173,12 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
         state.planPath = planPath;
         state.planReviewPath = planReviewPath;
         state.todos = [];
+        clearPendingWorkHandoff(state);
+        // If we were in workPending (stale handoff), revert to plan.
+        if (state.mode === "workPending") {
+          state.mode = "plan";
+          state.planApproved = false;
+        }
         saveState(ctx.cwd, sessionKey, state);
 
         const overlay = getWorkflowOverlay();
@@ -200,6 +207,14 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
           };
         }
 
+        if (state.mode === "workPending" || state.pendingWorkHandoff) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: "Work handoff is already pending." }],
+            details: { state },
+          };
+        }
+
         if (config.planReview.enabled && state.planReviewStatus !== "pass") {
           return {
             isError: true,
@@ -215,17 +230,29 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
           };
         }
 
-        state.planApproved = true;
-        saveState(ctx.cwd, sessionKey, state);
+        const result = await queueApprovedWorkFromTool(pi, ctx, getAgentDir);
+
+        if (!result.success) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: `Approve failed: ${result.error}` }],
+            details: { state },
+          };
+        }
+
+        // Reload state so details reflects the saved workPending + pendingWorkHandoff.
+        const updatedState = loadState(ctx.cwd, sessionKey);
 
         return {
           content: [
             {
               type: "text",
-              text: "Plan approved. Work Mode will start after this turn.",
+              text:
+                `Plan approved. Work Mode kickoff queued. ` +
+                `Handoff: ${result.handoffId?.slice(-8)}, Work: ${result.workRunId?.slice(-8)}.`,
             },
           ],
-          details: { state },
+          details: { state: updatedState },
         };
       }
 
@@ -250,6 +277,9 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
         if (state.planReviewPath) {
           writePlanReview(ctx.cwd, state.planReviewPath, state.planReviewNotes);
         }
+        // Plan review failure invalidates any pending handoff.
+        clearPendingWorkHandoff(state);
+        state.planApproved = false;
         saveState(ctx.cwd, sessionKey, state);
 
         return {

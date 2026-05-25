@@ -4,13 +4,26 @@ import { getSessionKey, loadState, saveState, readPlan, writePlanReview } from "
 import { loadConfig } from "./config.js";
 import { COMMON_PROMPT, promptForMode, promptForSubagentRole } from "./prompts.js";
 import { isReadonlyMode, isLocalFileMutatingShell, isAllowedPlanScratchPath } from "./guards.js";
-import { currentStatusText, modeLabel, todoText } from "./helpers.js";
+import { currentStatusText, todoText } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
-import type { Mode, WorkflowState } from "./types.js";
+import type { WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
 import { planDir } from "./paths.js";
 import type { SubagentsClient } from "./subagent.js";
 import { formatSubagentFailure } from "./subagent.js";
+import {
+  ensureWorkflowToolsActive,
+  applyModeRuntime,
+  getCurrentTurnGuardMode,
+  clearCurrentTurnGuardMode,
+  isInvalidHandoffTurn,
+  clearInvalidHandoffTurn,
+} from "./mode.js";
+import {
+  handleWorkPendingBeforeAgentStart,
+  startApprovedWorkFromCommand,
+  clearPendingWorkHandoff,
+} from "./work-handoff.js";
 import fs from "node:fs";
 import { execSync } from "node:child_process";
 import path from "node:path";
@@ -20,151 +33,6 @@ import { syncReviewAgentsToGlobal, getGlobalAgentsDir } from "./agents.js";
 let _subagentsClient: SubagentsClient;
 export function setSubagentsClient(c: SubagentsClient): void {
   _subagentsClient = c;
-}
-
-/**
- * Switch the model to the one configured for the given role,
- * ensure workflow tools are active, and update status line.
- */
-async function setRole(
-  pi: ExtensionAPI,
-  ctx: any,
-  role: string,
-  getAgentDir: () => string
-): Promise<boolean> {
-  const config = loadConfig(ctx.cwd, getAgentDir());
-  const spec = config.models[role];
-
-  if (!spec) {
-    ctx.ui.notify(`找不到 role 配置：${role}`, "error");
-    return false;
-  }
-
-  const model = ctx.modelRegistry.find(spec.provider, spec.model);
-  if (!model) {
-    ctx.ui.notify(`找不到模型：${spec.provider}/${spec.model}`, "error");
-    return false;
-  }
-
-  const ok = await pi.setModel(model);
-  if (!ok) {
-    ctx.ui.notify(
-      `模型不可用或缺少 API key：${spec.provider}/${spec.model}`,
-      "error"
-    );
-    return false;
-  }
-
-  if (spec.thinking) {
-    pi.setThinkingLevel(spec.thinking);
-  }
-
-  return true;
-}
-
-/** Ensure workflow tools are active, including optional ask_user_question when available. */
-function ensureWorkflowToolsActive(pi: ExtensionAPI, cwd: string, getAgentDir: () => string): void {
-  const active = pi.getActiveTools().map((tool: any) => {
-    if (typeof tool === "string") return tool;
-    return tool.name;
-  });
-  const next = new Set(active);
-  next.add("workflow_todo");
-  next.add("workflow_plan");
-  next.add("workflow_subagent");
-  next.add("workflow_status");
-
-  // Optionally activate ask_user_question when installed by another package.
-  try {
-    const config = loadConfig(cwd, getAgentDir());
-    if (config.askUserQuestion.enabled) {
-      const allTools = pi.getAllTools();
-      if (allTools.some((t: any) => t.name === config.askUserQuestion.toolName)) {
-        next.add(config.askUserQuestion.toolName);
-      }
-    }
-  } catch {
-    // If config load or getAllTools fails, skip silently — workflow still works.
-  }
-
-  pi.setActiveTools([...next]);
-}
-
-/** Switch to a new mode, update state, set role & tools. */
-async function switchMode(
-  pi: ExtensionAPI,
-  ctx: any,
-  mode: Mode,
-  getAgentDir: () => string
-): Promise<boolean> {
-  const sessionKey = getSessionKey(ctx.sessionManager);
-  const state = loadState(ctx.cwd, sessionKey);
-  state.mode = mode;
-  saveState(ctx.cwd, sessionKey, state);
-
-  const roleMap: Record<string, string> = {
-    plan: "plan",
-    planReview: "planReview",
-    work: "work",
-    fix: "work",
-    review: "review",
-    commit: "commit",
-  };
-  const role = roleMap[mode];
-  if (role && !(await setRole(pi, ctx, role, getAgentDir))) return false;
-
-  ensureWorkflowToolsActive(pi, ctx.cwd, getAgentDir);
-  ctx.ui.setStatus("lite-sp", modeLabel(mode));
-
-  return true;
-}
-
-/** Send a handoff user message: direct delivery when idle, followUp when busy.
- *  Always triggers a turn. When idle, sends directly to avoid missing the
- *  followUp drain window (especially in agent_end callbacks).  When busy or
- *  isIdle unavailable, falls back to queued followUp to stay streaming-safe. */
-function sendHandoffUserMessage(
-  pi: ExtensionAPI,
-  ctx: any,
-  message: string
-): void {
-  if (ctx.isIdle?.()) {
-    pi.sendUserMessage(message);
-  } else {
-    pi.sendUserMessage(message, { deliverAs: "followUp" });
-  }
-}
-
-/** Follow-up that transitions from plan to work based on current plan. */
-async function startWorkFromPlan(
-  pi: ExtensionAPI,
-  ctx: any,
-  getAgentDir: () => string
-): Promise<void> {
-  const sessionKey = getSessionKey(ctx.sessionManager);
-  const state = loadState(ctx.cwd, sessionKey);
-
-  state.mode = "work";
-  state.autoCodeReview = true;
-  state.codeReviewLoops = 0;
-  state.workRunId = crypto.randomUUID();
-  state.workStatus = undefined;
-  state.workStatusRunId = undefined;
-  state.workStatusSummary = undefined;
-  state.workStatusTests = undefined;
-  state.workStatusError = undefined;
-  state.workStatusUpdatedAt = undefined;
-  saveState(ctx.cwd, sessionKey, state);
-
-  await switchMode(pi, ctx, "work", getAgentDir);
-
-  const planPathText = state.planPath ?? "当前计划文件";
-
-  sendHandoffUserMessage(
-    pi,
-    ctx,
-    `按已确认计划实现。计划文件：${planPathText}。请先读取计划和 workflow_todo，然后按 todo 顺序执行。`
-  );
 }
 
 /** Run isolated plan-review via pi-subagents. */
@@ -219,7 +87,7 @@ async function runPlanReviewSubagent(
       if (state.planReviewPath) writePlanReview(ctx.cwd, state.planReviewPath, state.planReviewNotes);
       state.mode = "plan";
       saveState(ctx.cwd, sessionKey, state);
-      await switchMode(pi, ctx, "plan", getAgentDir);
+      await applyModeRuntime(pi, ctx, "plan", getAgentDir);
       pi.sendUserMessage(
         `计划评审子代理执行失败。${diag}`,
         { deliverAs: "followUp" }
@@ -238,7 +106,7 @@ async function runPlanReviewSubagent(
       state.mode = "plan";
       saveState(ctx.cwd, sessionKey, state);
 
-      await switchMode(pi, ctx, "plan", getAgentDir);
+      await applyModeRuntime(pi, ctx, "plan", getAgentDir);
 
       pi.sendUserMessage(
         `计划评审已通过。请向用户展示最终计划摘要（包含 plan path: ${planPathText}），并等待用户确认。` +
@@ -257,7 +125,7 @@ async function runPlanReviewSubagent(
     state.mode = "plan";
     saveState(ctx.cwd, sessionKey, state);
 
-    await switchMode(pi, ctx, "plan", getAgentDir);
+    await applyModeRuntime(pi, ctx, "plan", getAgentDir);
 
     if (state.planReviewLoops >= config.planReview.maxLoops) {
       pi.sendUserMessage(
@@ -283,7 +151,7 @@ async function runPlanReviewSubagent(
     if (state.planReviewPath) writePlanReview(ctx.cwd, state.planReviewPath, state.planReviewNotes);
     state.mode = "plan";
     saveState(ctx.cwd, sessionKey, state);
-    await switchMode(pi, ctx, "plan", getAgentDir);
+    await applyModeRuntime(pi, ctx, "plan", getAgentDir);
     pi.sendUserMessage(
       `计划评审子代理异常：${errMsg}`,
       { deliverAs: "followUp" }
@@ -521,13 +389,18 @@ async function runCodeReviewSubagent(
     state.workStatusUpdatedAt = undefined;
     saveState(ctx.cwd, sessionKey, state);
 
-    await switchMode(pi, ctx, "fix", getAgentDir);
+    await applyModeRuntime(pi, ctx, "fix", getAgentDir);
 
-    sendHandoffUserMessage(
-      pi,
-      ctx,
-      `请修复上一轮 reviewer 指出的 Critical / Important 问题。修复后调用 workflow_status 工具。\n\n评审意见：\n${result.text.slice(-4000)}`
-    );
+    if (ctx.isIdle?.()) {
+      pi.sendUserMessage(
+        `请修复上一轮 reviewer 指出的 Critical / Important 问题。修复后调用 workflow_status 工具。\n\n评审意见：\n${result.text.slice(-4000)}`
+      );
+    } else {
+      pi.sendUserMessage(
+        `请修复上一轮 reviewer 指出的 Critical / Important 问题。修复后调用 workflow_status 工具。\n\n评审意见：\n${result.text.slice(-4000)}`,
+        { deliverAs: "followUp" }
+      );
+    }
     return true;
   } catch (err: any) {
     ctx.ui.notify(
@@ -552,7 +425,6 @@ export function registerBeforeAgentStart(
 ): void {
   pi.on("before_agent_start", async (event, ctx) => {
     const sessionKey = getSessionKey(ctx.sessionManager);
-    const state = loadState(ctx.cwd, sessionKey);
     const config = loadConfig(ctx.cwd, getAgentDir());
 
     ensureWorkflowToolsActive(pi, ctx.cwd, getAgentDir);
@@ -561,16 +433,48 @@ export function registerBeforeAgentStart(
     const overlay = getWorkflowOverlay();
     if (overlay) {
       overlay.hideDoneFromLastTurn();
-      if (state.mode === "idle") {
+    }
+
+    // ── Handoff detection / finalize ──
+    const handoffResult = await handleWorkPendingBeforeAgentStart(
+      pi,
+      ctx,
+      getAgentDir,
+      event
+    );
+
+    // Refresh state after handoff may have mutated it.
+    const currentState = loadState(ctx.cwd, sessionKey);
+
+    // Overlay setup.
+    if (overlay) {
+      if (currentState.mode === "idle") {
         overlay.dispose();
         return;
       }
-      overlay.update(state.todos);
+      overlay.update(currentState.todos);
     }
 
-    if (state.mode === "idle") return;
+    // If handoff returned a safety system prompt, inject it and stop.
+    if (handoffResult.systemPrompt) {
+      return {
+        systemPrompt:
+          event.systemPrompt +
+          "\n\n" +
+          COMMON_PROMPT +
+          "\n\n" +
+          handoffResult.systemPrompt +
+          "\n\n" +
+          `# Current Workflow State\n` +
+          currentStatusText(config, currentState) +
+          "\n",
+      };
+    }
 
-    const modePrompt = promptForMode(state.mode);
+    if (currentState.mode === "idle") return;
+
+    // Normal mode prompt.
+    const modePrompt = promptForMode(currentState.mode);
 
     return {
       systemPrompt:
@@ -581,8 +485,7 @@ export function registerBeforeAgentStart(
         modePrompt +
         "\n\n" +
         `# Current Workflow State\n` +
-        `mode: ${state.mode}\n` +
-        currentStatusText(config, state) +
+        currentStatusText(config, currentState) +
         "\n",
     };
   });
@@ -602,13 +505,29 @@ export function registerToolCallGuard(
       event.toolName === "workflow_todo" ||
       event.toolName === "workflow_status"
     ) {
+      // Block approve in invalid handoff turns.
+      if (
+        event.toolName === "workflow_plan" &&
+        isInvalidHandoffTurn(sessionKey)
+      ) {
+        const params = (event.input as any) ?? {};
+        if (params.action === "approve") {
+          return {
+            block: true,
+            reason: "Handoff 已失效，在当前 turn 中不能再次批准计划。请检查 /wf-status 状态，或 /wf-reset 重新开始。",
+          };
+        }
+      }
       return;
     }
 
+    // Use per-turn effective guard mode; fall back to state mode.
+    const effectiveMode = getCurrentTurnGuardMode(sessionKey) ?? state.mode;
+
     // Read-only modes: block local file mutations.
-    if (isReadonlyMode(state.mode)) {
+    if (isReadonlyMode(effectiveMode)) {
       if (event.toolName === "write" || event.toolName === "edit") {
-        if (state.mode === "plan") {
+        if (effectiveMode === "plan") {
           const targetPath: string | undefined =
             (event.input as any)?.path ?? (event.input as any)?.filePath;
           if (!targetPath) {
@@ -626,7 +545,7 @@ export function registerToolCallGuard(
 
         return {
           block: true,
-          reason: `当前是 ${state.mode}，禁止修改本地文件。联网搜索、读取、分析工具仍可使用。`,
+          reason: `当前是 ${effectiveMode}，禁止修改本地文件。联网搜索、读取、分析工具仍可使用。`,
         };
       }
 
@@ -636,7 +555,7 @@ export function registerToolCallGuard(
         if (isLocalFileMutatingShell(command)) {
           return {
             block: true,
-            reason: `当前是 ${state.mode}，禁止执行会修改本地文件的 shell 命令：${command}`,
+            reason: `当前是 ${effectiveMode}，禁止执行会修改本地文件的 shell 命令：${command}`,
           };
         }
       }
@@ -677,14 +596,14 @@ export function registerAgentEnd(
         state.planReviewLoops < config.planReview.maxLoops
       ) {
         await runPlanReviewSubagent(pi, ctx, getAgentDir);
-        return;
       }
-
-      if (state.planApproved) {
-        await startWorkFromPlan(pi, ctx, getAgentDir);
-        return;
-      }
+      // NOTE: planApproved no longer triggers startWorkFromPlan here.
+      // Handoff now happens via workPending + before_agent_start finalize.
     }
+
+    // Clean up per-turn in-memory state.
+    clearCurrentTurnGuardMode(sessionKey);
+    clearInvalidHandoffTurn(sessionKey);
 
     // planReview mode: no longer used (inline fallback removed).
     // All plan reviews go through isolated subagent.
@@ -767,7 +686,7 @@ export function registerPlanCommand(
         overlay.update(state.todos);
       }
 
-      const ok = await switchMode(pi, ctx, "plan", getAgentDir);
+      const ok = await applyModeRuntime(pi, ctx, "plan", getAgentDir);
       if (!ok) return;
 
       ctx.ui.notify(
@@ -810,10 +729,22 @@ export function registerGoCommand(
         return;
       }
 
-      state.planApproved = true;
-      saveState(ctx.cwd, sessionKey, state);
+      const result = await startApprovedWorkFromCommand(
+        pi,
+        ctx,
+        getAgentDir,
+        force
+      );
 
-      await startWorkFromPlan(pi, ctx, getAgentDir);
+      if (!result.success) {
+        ctx.ui.notify(`自动启动 Work Mode 失败：${result.error}`, "error");
+        return;
+      }
+
+      ctx.ui.notify(
+        `Work Mode started. Work run: ${result.workRunId?.slice(-8)}.`,
+        "info"
+      );
     },
   });
 }
@@ -843,7 +774,7 @@ export function registerWorkCommand(
         overlay.update(state.todos);
       }
 
-      const ok = await switchMode(pi, ctx, "work", getAgentDir);
+      const ok = await applyModeRuntime(pi, ctx, "work", getAgentDir);
       if (!ok) return;
 
       ctx.ui.notify("已进入 Work Mode。可以直接描述任务。", "info");
@@ -887,9 +818,11 @@ export function registerCommitCommand(
         mode: "commit" as const,
         autoCodeReview: false,
       };
+      // Clear any stale pending handoff — commit mode does not execute plans.
+      clearPendingWorkHandoff(state);
       saveState(ctx.cwd, sessionKey, state);
 
-      const ok = await switchMode(pi, ctx, "commit", getAgentDir);
+      const ok = await applyModeRuntime(pi, ctx, "commit", getAgentDir);
       if (!ok) return;
 
       const extra = args.trim()
@@ -931,6 +864,7 @@ export function registerWfExitCommand(pi: ExtensionAPI): void {
       const state = loadState(ctx.cwd, sessionKey);
       state.mode = "idle";
       state.autoCodeReview = false;
+      clearPendingWorkHandoff(state);
       saveState(ctx.cwd, sessionKey, state);
 
       const overlay = getWorkflowOverlay();

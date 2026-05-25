@@ -8,6 +8,7 @@ export type Mode =
   | "idle"
   | "plan"
   | "planReview"
+  | "workPending"
   | "work"
   | "review"
   | "fix"
@@ -83,11 +84,24 @@ export interface WorkflowConfig {
 
 export type PlanReviewStatus = "none" | "pending" | "pass" | "fail";
 
+export interface PendingWorkHandoff {
+  id: string;
+  marker: string;
+  planPath: string;
+  planRunId?: string;
+  workRunId: string;
+  createdAt: string;
+  expiresAt: string;
+  expectedPrompt: string;
+}
+
 export interface WorkflowState {
   mode: Mode;
   planPath?: string;
   planReviewPath?: string;
   planTitle?: string;
+  /** Whether the current plan has been approved. No longer drives handoff
+   *  — handoff is driven by mode=workPending + pendingWorkHandoff. */
   planApproved: boolean;
   planReviewStatus: PlanReviewStatus;
   planReviewLoops: number;
@@ -99,6 +113,8 @@ export interface WorkflowState {
   codeReviewLoops: number;
   autoCodeReview: boolean;
   todos: TodoItem[];
+  /** Pending plan→work handoff (plan approved, waiting for before_agent_start finalize). */
+  pendingWorkHandoff?: PendingWorkHandoff;
   /** Work status set by workflow_status tool. */
   workStatus?: WorkStatus;
   /** The run id this work status was set for. */

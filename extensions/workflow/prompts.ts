@@ -388,6 +388,11 @@ export const COMMIT_PROMPT = `
 export function promptForMode(mode: Mode): string {
   if (mode === "plan") return PLAN_PROMPT;
   if (mode === "planReview") return PLAN_REVIEW_PROMPT;
+  if (mode === "workPending") {
+    // All workPending turns must be intercepted by the handoff handler before
+    // this function is ever reached. Return a safety prompt as a fallback.
+    return `\n# Work Pending\n\n计划批准排队中，在当前 turn 中不应执行 Work Mode。请等待下一轮 Work kickoff。\n如持续出现此提示，请执行 /wf-status 检查状态，然后 /wf-reset 重新开始。\n`;
+  }
   if (mode === "work") return WORK_PROMPT;
   if (mode === "fix") return FIX_PROMPT;
   if (mode === "review") return CODE_REVIEW_PROMPT;

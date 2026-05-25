@@ -141,7 +141,7 @@ export function isAllowedPlanScratchPath(
 
 /** Returns true if the given mode does not allow local file mutations. */
 export function isReadonlyMode(mode: Mode): boolean {
-  return mode === "plan" || mode === "planReview" || mode === "review";
+  return mode === "plan" || mode === "planReview" || mode === "workPending" || mode === "review";
 }
 
 /** Check whether a shell command would modify local files. */

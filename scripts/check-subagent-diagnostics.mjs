@@ -42,6 +42,11 @@ function assertPattern(haystack, pattern, label) {
 const subagentSrc = readFileSync("extensions/workflow/subagent.ts", "utf8");
 const commandsSrc = readFileSync("extensions/workflow/commands.ts", "utf8");
 const defaultsSrc = readFileSync("extensions/workflow/defaults.ts", "utf8");
+const typesSrc = readFileSync("extensions/workflow/types.ts", "utf8");
+const workHandoffSrc = readFileSync("extensions/workflow/work-handoff.ts", "utf8");
+const modeSrc = readFileSync("extensions/workflow/mode.ts", "utf8");
+const guardsSrc = readFileSync("extensions/workflow/guards.ts", "utf8");
+const toolsSrc = readFileSync("extensions/workflow/tools.ts", "utf8");
 
 // ── 1. Timeout defaults ────────────────────────────────────
 
@@ -173,6 +178,38 @@ assertContains(subagentSrc, "result.durationMs", "formatter: checks durationMs")
 assertContains(subagentSrc, "slice(0, 500)", "formatter: stderr is bounded");
 assertContains(subagentSrc, "slice(0, 1000)", "formatter: text is bounded");
 assertContains(subagentSrc, "exitCode === 2", "formatter: recognizes exitCode 2 (identity marker)");
+
+// ── Summary ────────────────────────────────────────────────
+
+// ── 9. New handoff infrastructure ──────────────────────────
+
+console.log("9. Handoff infrastructure");
+
+// workPending mode
+assertContains(typesSrc, '"workPending"', "Mode union includes workPending");
+
+// PendingWorkHandoff type
+assertContains(typesSrc, "PendingWorkHandoff", "types exports PendingWorkHandoff");
+assertContains(typesSrc, "pendingWorkHandoff", "WorkflowState includes pendingWorkHandoff");
+
+// HANDOFF_MARKER_RE
+assertContains(workHandoffSrc, "HANDOFF_MARKER_RE", "work-handoff exports HANDOFF_MARKER_RE");
+assertContains(workHandoffSrc, "PENDING_WORK_HANDOFF_TTL_MS", "work-handoff exports TTL constant");
+assertContains(workHandoffSrc, "handleWorkPendingBeforeAgentStart", "work-handoff exports handler");
+
+// guard mode helpers
+assertContains(modeSrc, "getCurrentTurnGuardMode", "mode exports getCurrentTurnGuardMode");
+assertContains(modeSrc, "isInvalidHandoffTurn", "mode exports isInvalidHandoffTurn");
+
+// isReadonlyMode
+assertContains(guardsSrc, '"workPending"', "isReadonlyMode includes workPending");
+
+// /go --force still exists
+assertContains(commandsSrc, "--force", "/go --force still exists");
+
+// approve sends followUp via queueApprovedWorkFromTool
+assertContains(toolsSrc, "queueApprovedWorkFromTool", "tools approve calls queueApprovedWorkFromTool");
+assertContains(toolsSrc, "clearPendingWorkHandoff", "tools save calls clearPendingWorkHandoff");
 
 // ── Summary ────────────────────────────────────────────────
 
