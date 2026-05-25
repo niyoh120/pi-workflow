@@ -92,9 +92,9 @@ export interface WorkflowState {
   planReviewStatus: PlanReviewStatus;
   planReviewLoops: number;
   planReviewNotes?: string;
-  /** Plan run id — new /plan creates a fresh id and resets planReviewLoops. */
+  /** Plan run id — identifies a plan document lifecycle (not the review trigger). */
   planRunId?: string;
-  /** Work run id — new Work entry creates a fresh id and resets codeReviewLoops. */
+  /** Work run id — identifies a work session (not the auto-review trigger). */
   workRunId?: string;
   codeReviewLoops: number;
   autoCodeReview: boolean;

@@ -479,10 +479,9 @@ async function runCodeReviewSubagent(
     }
 
     // FAIL or no marker → fail
-    state.codeReviewLoops += 1;
 
     if (!autoFix) {
-      // Manual review: just display result, don't enter fix loop
+      // Manual review: just display result, don't increment auto-fix loop counter
       state.mode = "idle";
       state.autoCodeReview = false;
       saveState(ctx.cwd, sessionKey, state);
@@ -492,7 +491,9 @@ async function runCodeReviewSubagent(
       return true;
     }
 
-    if (state.codeReviewLoops > config.codeReview.maxLoops) {
+    state.codeReviewLoops += 1;
+
+    if (state.codeReviewLoops >= config.codeReview.maxLoops) {
       state.mode = "idle";
       state.autoCodeReview = false;
       saveState(ctx.cwd, sessionKey, state);

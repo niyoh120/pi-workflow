@@ -209,15 +209,16 @@ workflow_status({ status: "blocked", runId: currentRunId, error: "..." })
 
 This is the **only** way to trigger automatic code review. The tool validates the current mode and run ID. If not called, or called with a stale run ID, auto review does not start and a diagnostic is shown.
 
-## Run-Scoped Counters
+## Trigger-Scoped Review Counters
 
-Plan review and code review loop counters are scoped to each plan/work run:
+Plan review and code review loop counters limit review retries per trigger, not across the whole session.
 
-- Starting a new `/plan` creates a fresh `planRunId` and resets `planReviewLoops`.
-- Revising the same plan keeps the same run and increments the counter.
-- Starting a new `/work` creates a fresh `workRunId` and resets `codeReviewLoops`.
-- Fix mode keeps the same work run and increments the counter.
-- A prior plan/work run's review failures never affect a new run.
+- `planReviewLoops` resets to `0` on every `workflow_plan save`. A save is a fresh plan-review trigger.
+- If plan review is enabled, each save creates a `pending` review status. Review failures increment `planReviewLoops` within that save-trigger only. When `planReviewLoops` reaches `maxLoops`, auto review stops and the user must decide manually.
+- `codeReviewLoops` resets to `0` when the Work-mode agent reports `ready_for_review` via `workflow_status`. This starts a fresh automatic review/fix sequence.
+- Fix-mode `ready_for_review` does **not** reset `codeReviewLoops` — retries in the same auto sequence accumulate.
+- Manual `/review` never increments `codeReviewLoops` and does not consume the automatic fix-loop budget.
+- A prior trigger's review failures never block a later trigger in the same session.
 
 ## Session-Scoped Runtime State
 

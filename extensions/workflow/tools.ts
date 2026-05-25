@@ -163,6 +163,7 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
         state.planTitle = params.title ?? "Active Plan";
         state.planApproved = false;
         state.planReviewStatus = config.planReview.enabled ? "pending" : "none";
+        state.planReviewLoops = 0;
         state.planReviewNotes = undefined;
         state.planPath = planPath;
         state.planReviewPath = planReviewPath;
@@ -485,6 +486,12 @@ export function registerWorkflowStatusTool(
       }
 
       const status = params.status as WorkStatus;
+
+      // Reset code-review loop counter at the start of a new automatic review
+      // sequence triggered by Work mode (not Fix mode retries).
+      if (status === "ready_for_review" && state.mode === "work") {
+        state.codeReviewLoops = 0;
+      }
 
       state.workStatus = status;
       state.workStatusRunId = state.workRunId;
