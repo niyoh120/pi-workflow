@@ -170,6 +170,8 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
         state.planReviewStatus = config.planReview.enabled ? "pending" : "none";
         state.planReviewLoops = 0;
         state.planReviewNotes = undefined;
+        state.lastReviewNotes = undefined;
+        state.lastReviewStatus = undefined;
         state.planPath = planPath;
         state.planReviewPath = planReviewPath;
         state.todos = [];
@@ -355,9 +357,9 @@ export function registerSubagentTool(
     name: "workflow_subagent",
     label: "Workflow Subagent",
     description:
-      "Spawn a role-shaped, read-only child Pi process with no parent session history. Supported roles: planReview (isolated plan review), review (isolated code review), explore (fast read-only codebase exploration). Child returns a structured result with text, status marker, exit code, and usage.",
+      "Spawn a role-shaped child Pi process with no parent session history. Supported roles: planReview (isolated plan review), review (isolated code review), explore (fast read-only codebase exploration). Review agents have full built-in tool access — only workflow tools (workflow_subagent, workflow_plan, workflow_todo, workflow_status) are blocked. Child returns a structured result with text, status marker, exit code, and usage.",
     promptSnippet:
-      "workflow_subagent: spawn a read-only child Pi process to handle review or exploration with a clean session. The child has no parent context — pass everything it needs explicitly.",
+      "workflow_subagent: spawn a child Pi process to handle review or exploration with a clean session. The child has no parent context — pass everything it needs explicitly.",
     promptGuidelines: [
       "Use workflow_subagent to get an objective review or explore the codebase without parent session history.",
       "Provide role (planReview, review, or explore), task, and relevant context.",

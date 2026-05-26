@@ -50,13 +50,21 @@ export async function setRole(
   }
 }
 
-/** Ensure workflow tools are active, including optional ask_user_question when available. */
+/** Ensure workflow tools are active, including optional ask_user_question when available.
+ *  Skips when the current agent has already excluded workflow_todo (e.g. review subagents
+ *  that block workflow tools via disallowed_tools frontmatter). */
 export function ensureWorkflowToolsActive(pi: ExtensionAPI, cwd: string, getAgentDir: () => string): void {
   try {
     const active = pi.getActiveTools().map((tool: any) => {
       if (typeof tool === "string") return tool;
       return tool.name;
     });
+
+  // Guard: if the agent already excludes workflow_todo, it is a review subagent or
+  // similar restricted agent — do NOT re-add workflow tools. The disallowed_tools
+  // frontmatter enforcement should be the sole authority for tool blocking.
+  if (!active.includes("workflow_todo")) return;
+
   const next = new Set(active);
   next.add("workflow_todo");
   next.add("workflow_plan");

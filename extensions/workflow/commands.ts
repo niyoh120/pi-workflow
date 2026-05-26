@@ -307,7 +307,39 @@ async function runCodeReviewSubagent(
     ``,
     `## Todo Status`,
     todoText(state),
-  ].join("\n");
+  ];
+
+  // ── Review dialogue: include prior review notes + fix/work response ──
+  if (state.lastReviewNotes && state.lastReviewStatus === "FAIL") {
+    context.push(
+      ``,
+      `## Previous Code Review`,
+      `Status: ${state.lastReviewStatus}`,
+      ``,
+      `> The review below already ran. Issues that were rebutted with technical reasoning`,
+      `> should NOT be repeated unless you can refute the rebuttal. Only flag genuinely`,
+      `> unresolved or new issues.`,
+      ``,
+      state.lastReviewNotes.slice(-6000),
+    );
+
+    // Include Work/Fix response to the last review if available
+    const fixResponse = state.workStatusSummary || state.workStatusError;
+    if (fixResponse) {
+      context.push(
+        ``,
+        `## Work / Fix Response to Previous Review`,
+        state.workStatusSummary ? `Summary: ${state.workStatusSummary}` : "",
+        state.workStatusError ? `Error: ${state.workStatusError}` : "",
+        state.workStatusTests ? `Tests: ${state.workStatusTests}` : "",
+        ``,
+        `If the Work/Fix agent argued that an item is invalid, out of scope, or cannot be fixed:`,
+        `do NOT repeat that item unless you have new concrete evidence to refute the rebuttal.`,
+      );
+    }
+  }
+
+  const fullContext = context.join("\n");
 
   const systemPrompt = promptForSubagentRole("review");
 
@@ -316,7 +348,7 @@ async function runCodeReviewSubagent(
   try {
     const result = await _subagentsClient.run({
       role: "review",
-      task: `Review the current working tree changes (git diff) provided below. Check the diff against the plan and todo context.\n\n${context}`,
+      task: `Review the current working tree changes (git diff) provided below. Check the diff against the plan and todo context.\n\n${fullContext}`,
       systemPrompt,
       subagentConfig: config.subagent,
       modelSpec: config.models.review,
@@ -338,6 +370,8 @@ async function runCodeReviewSubagent(
     }
 
     if (result.statusMarker === "PASS") {
+      state.lastReviewNotes = undefined;
+      state.lastReviewStatus = undefined;
       state.mode = "idle";
       state.autoCodeReview = false;
       saveState(ctx.cwd, sessionKey, state);
@@ -364,6 +398,10 @@ async function runCodeReviewSubagent(
     }
 
     state.codeReviewLoops += 1;
+
+    // Store review result for dialogue context in the next review loop.
+    state.lastReviewNotes = result.text;
+    state.lastReviewStatus = "FAIL";
 
     if (state.codeReviewLoops >= config.codeReview.maxLoops) {
       state.mode = "idle";
@@ -636,11 +674,15 @@ export function registerAgentEnd(
 
       if (state.workStatus === "blocked") {
         state.autoCodeReview = false;
+        state.mode = "idle";
         saveState(ctx.cwd, sessionKey, state);
-        ctx.ui.notify(
-          `Work/Fix Mode blocked: ${state.workStatusError ?? "(no details)"}。已停止自动 review。`,
-          "warning"
-        );
+
+        const blockedMsg = `Work/Fix Mode blocked: ${state.workStatusError ?? "(no details)"}。已停止自动 review，等待用户决策。`;
+        ctx.ui.notify(blockedMsg, "warning");
+        ctx.ui.setStatus("lite-sp", undefined);
+
+        // Also deliver as a chat message for visibility.
+        pi.sendUserMessage(blockedMsg, { deliverAs: "followUp" });
         return;
       }
 
@@ -908,7 +950,7 @@ export function registerWfInstallSubagentsCommand(
   getAgentDir: () => string,
 ): void {
   pi.registerCommand("wf-install-subagents", {
-    description: "安装 @tintinweb/pi-subagents 并同步最小 review containers（不包含模型配置）",
+    description: "安装 @tintinweb/pi-subagents 并同步 review containers",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
 
@@ -936,9 +978,9 @@ export function registerWfInstallSubagentsCommand(
         return;
       }
 
-      // 2. Sync minimal review containers to global agents directory
+      // 2. Sync review containers to global agents directory
       const targetDir = getGlobalAgentsDir(agentDir);
-      ctx.ui.notify(`正在同步最小 review containers 到 ${targetDir}...`, "info");
+      ctx.ui.notify(`正在同步 review containers 到 ${targetDir}...`, "info");
 
       const syncResult = syncReviewAgentsToGlobal(agentDir);
 
@@ -957,7 +999,7 @@ export function registerWfInstallSubagentsCommand(
 
       // 3. Prompt reload
       ctx.ui.notify(
-        "Minimal review containers 已同步。请执行 /reload 或重启 Pi 使 pi-subagents 加载新 containers。",
+        "Review containers 已同步。请执行 /reload 或重启 Pi 使 pi-subagents 加载新 containers。",
         "info"
       );
 

@@ -160,7 +160,7 @@ Every plan save, read, review, and `/wf-status` explicitly shows the plan file p
 | `/wf-exit` | Exit workflow mode |
 | `/wf-reset` | Clear workflow state and plan directory |
 | `/wf-init` | Initialize agent workspace: ensure git repo, generate/update AGENTS.md |
-| `/wf-install-subagents` | Install @tintinweb/pi-subagents and sync minimal review containers |
+| `/wf-install-subagents` | Install @tintinweb/pi-subagents and sync review containers |
 
 ## Subagents
 
@@ -170,16 +170,17 @@ Plan review, code review, and exploration run as **fresh-context subagents via @
 - **Parallel execution** — multiple subagents can run concurrently.
 - **Live widget UI** — see agent progress, tool usage, and token counts.
 - **Minimal containers** — `planReview` and `review` use lightweight pi-workflow custom agent files that only declare tool permissions; the actual review rules come from workflow-injected prompts.
+- **Tool blocking** — review agents block `workflow_subagent`, `workflow_todo`, `workflow_plan`, and `workflow_status` to prevent recursive workflow/subagent use and workflow state mutation.
 - **Exploration** — `explore` uses the built-in `Explore` agent type.
 
-Review agents are **not a hard OS/tool sandbox** — they disable `write` / `edit` but retain `bash` for read-only operations. They run as fresh sessions without parent conversation history. (`extensions: false` limits them to built-in tools only; if web search or MCP tools are desired for review, set `extensions: true` in the agent `.md` frontmatter.)
+Review agents run as **fresh sessions** without parent conversation history. By default they inherit the pi-subagents default tool set plus extensions and skills — the only blocked tools are the workflow family. The review prompts (not tool restrictions) are what enforce read-only discipline during review.
 
 ### Agent Types
 
 | Role | Agent Type | Source |
 |------|-----------|--------|
-| `planReview` | `pi-workflow-plan-review` | Minimal container — bundled and synced via `/wf-install-subagents` |
-| `review` | `pi-workflow-code-review` | Minimal container — bundled and synced via `/wf-install-subagents` |
+| `planReview` | `pi-workflow-plan-review` | Review container (workflow tools blocked) — bundled and synced via `/wf-install-subagents` |
+| `review` | `pi-workflow-code-review` | Review container (workflow tools blocked) — bundled and synced via `/wf-install-subagents` |
 | `explore` | `Explore` | Built-in (from `@tintinweb/pi-subagents`) |
 
 Custom review agents are defined under `extensions/workflow/agents/` in the pi-workflow package. `/wf-install-subagents` syncs them to the global agents directory (`~/.pi/agent/agents/`) so pi-subagents discovers them in any project.
@@ -194,11 +195,20 @@ Custom review agent files are **minimal containers** — they only declare tool 
 Custom review agent frontmatter:
 
 ```yaml
-tools: read, bash, grep, find, ls
-disallowed_tools: write, edit
-extensions: false
-skills: false
+disallowed_tools: workflow_subagent, workflow_plan, workflow_todo, workflow_status
 ```
+
+Only workflow tools are blocked — review agents have full access to built-in tools, extensions, and skills. The review prompts enforce read-only discipline during review.
+
+### Early Exit (Blocked)
+
+Fix Mode can stop the auto review loop early when remaining review issues are invalid, out of scope, or require a user decision:
+
+```
+workflow_status({ status: "blocked", runId: currentRunId, error: "Issue #3 is invalid — the reviewer misread X. See tests at Y." })
+```
+
+This halts the review loop immediately and presents the rationale to the user for a decision. It prevents the wasteful pattern of repeated review cycles where the Fix agent cannot or should not address certain reviewer feedback.
 
 ## Workflow Status (auto review trigger)
 

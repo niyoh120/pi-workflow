@@ -50,6 +50,7 @@ export function currentStatusText(
     `autoCodeReview: ${s.autoCodeReview}`,
     `workRunId: ${s.workRunId ?? "none"}`,
     `codeReviewLoops: ${s.codeReviewLoops}/${config.codeReview.maxLoops}`,
+    `lastReviewStatus: ${s.lastReviewStatus ?? "none"}`,
     `workStatus: ${workStatusText}`,
     pendingInfo,
     "",

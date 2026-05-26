@@ -259,6 +259,8 @@ export async function handleWorkPendingBeforeAgentStart(
         state.workStatusTests = undefined;
         state.workStatusError = undefined;
         state.workStatusUpdatedAt = undefined;
+        state.lastReviewNotes = undefined;
+        state.lastReviewStatus = undefined;
         clearPendingWorkHandoff(state);
         saveState(ctx.cwd, sessionKey, state);
 
@@ -396,6 +398,8 @@ export async function startApprovedWorkFromCommand(
     state.workStatusTests = undefined;
     state.workStatusError = undefined;
     state.workStatusUpdatedAt = undefined;
+    state.lastReviewNotes = undefined;
+    state.lastReviewStatus = undefined;
     state.workRunId = workRunId;
     state.planApproved = true;
     clearPendingWorkHandoff(state);

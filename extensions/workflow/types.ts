@@ -123,4 +123,8 @@ export interface WorkflowState {
   workStatusTests?: string;
   workStatusUpdatedAt?: string;
   workStatusError?: string;
+  /** Latest code review result text (stored when review fails, cleared on plan save / new work run). */
+  lastReviewNotes?: string;
+  /** Status marker from the latest code review. */
+  lastReviewStatus?: "PASS" | "FAIL";
 }
