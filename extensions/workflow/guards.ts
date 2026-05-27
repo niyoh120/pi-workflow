@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 
 // Fixed scratch root for Plan Mode temporary scripts.
-export const PLAN_SCRATCH_ROOT = path.join(tmpdir(), "pi-workflow-plan-scratch");
+const PLAN_SCRATCH_ROOT = path.join(tmpdir(), "pi-workflow-plan-scratch");
 
 /**
  * Check whether a target path is a safe scratch path for Plan Mode write/edit.
@@ -191,16 +191,3 @@ export function isLocalFileMutatingShell(command: string): boolean {
   return mutatingPatterns.some((re) => re.test(cmd));
 }
 
-/** Extract all assistant message text from an agent_end event. */
-export function extractAssistantText(event: any): string {
-  return (event.messages ?? [])
-    .filter((m: any) => m.role === "assistant")
-    .map((m: any) => {
-      if (typeof m.content === "string") return m.content;
-      if (Array.isArray(m.content)) {
-        return m.content.map((p: any) => p.text ?? "").join("\n");
-      }
-      return "";
-    })
-    .join("\n");
-}

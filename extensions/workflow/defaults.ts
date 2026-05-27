@@ -69,7 +69,6 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
 
 export const DEFAULT_STATE: WorkflowState = {
   mode: "idle",
-  planApproved: false,
   planReviewStatus: "none",
   planReviewLoops: 0,
   codeReviewLoops: 0,

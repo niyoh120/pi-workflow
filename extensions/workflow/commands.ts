@@ -12,7 +12,7 @@ import { planDir } from "./paths.js";
 import type { SubagentsClient } from "./subagent.js";
 import { formatSubagentFailure } from "./subagent.js";
 import {
-  ensureWorkflowToolsActive,
+  activateWorkflowToolsIfAllowed,
   applyModeRuntime,
   getCurrentTurnGuardMode,
   clearCurrentTurnGuardMode,
@@ -465,7 +465,7 @@ export function registerBeforeAgentStart(
     const sessionKey = getSessionKey(ctx.sessionManager);
     const config = loadConfig(ctx.cwd, getAgentDir());
 
-    ensureWorkflowToolsActive(pi, ctx.cwd, getAgentDir);
+    activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir);
 
     // Hide done items at the start of each new turn.
     const overlay = getWorkflowOverlay();
@@ -482,7 +482,7 @@ export function registerBeforeAgentStart(
     );
 
     // Refresh state after handoff may have mutated it.
-    const currentState = loadState(ctx.cwd, sessionKey);
+    const currentState = handoffResult.state;
 
     // Overlay setup.
     if (overlay) {
@@ -635,8 +635,7 @@ export function registerAgentEnd(
       ) {
         await runPlanReviewSubagent(pi, ctx, getAgentDir);
       }
-      // NOTE: planApproved no longer triggers startWorkFromPlan here.
-      // Handoff now happens via workPending + before_agent_start finalize.
+      // NOTE: planApproved has been removed. Handoff uses workPending + before_agent_start finalize.
     }
 
     // Clean up per-turn in-memory state.

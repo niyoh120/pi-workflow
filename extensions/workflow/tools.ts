@@ -166,7 +166,6 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
         );
 
         state.planTitle = params.title ?? "Active Plan";
-        state.planApproved = false;
         state.planReviewStatus = config.planReview.enabled ? "pending" : "none";
         state.planReviewLoops = 0;
         state.planReviewNotes = undefined;
@@ -179,7 +178,6 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
         // If we were in workPending (stale handoff), revert to plan.
         if (state.mode === "workPending") {
           state.mode = "plan";
-          state.planApproved = false;
         }
         saveState(ctx.cwd, sessionKey, state);
 
@@ -281,7 +279,6 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
         }
         // Plan review failure invalidates any pending handoff.
         clearPendingWorkHandoff(state);
-        state.planApproved = false;
         saveState(ctx.cwd, sessionKey, state);
 
         return {
@@ -314,7 +311,6 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
       if (action === "clear") {
         const cleared: WorkflowState = {
           mode: "idle",
-          planApproved: false,
           planReviewStatus: "none",
           planReviewLoops: 0,
           codeReviewLoops: 0,

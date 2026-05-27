@@ -120,8 +120,6 @@ pi install .
   - Set to `0` to disable the result timeout entirely (the parent will wait indefinitely).
   - Override in global (`~/.pi/agent/workflow/config.json`) or project (`.pi/workflow/config.json`) config; the project value takes precedence.
 
-**Legacy config fields:** Old `subagent` fields (`enabled`, `timeoutMs`, `extensionMode`, `extensions`, `fallbackToInlineReview`) are silently ignored. They do not cause errors.
-
 ### Project config
 
 `.pi/workflow/config.json` — same structure as the global config. Project values override global values.
@@ -250,8 +248,6 @@ The session key is derived by hashing the Pi session ID or session file path —
 This means two Pi processes in the same project directory can run independent workflow state machines without overwriting each other. Plan files remain in the shared `.pi/workflow/plan/` directory with randomized names.
 
 Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) are directory/global scoped and shared intentionally.
-
-**Legacy migration:** If a session has no state but the old `.pi/workflow/state.json` exists, it is imported once into the session-scoped path. The legacy file is not deleted.
 
 ## Tools
 

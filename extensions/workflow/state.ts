@@ -2,8 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
-import { sessionStatePath, legacyStatePath, legacyMigrationMarkerPath, deriveSessionKey, ensureWorkflowDir, planDir, generatePlanFilename, deriveReviewFilename } from "./paths.js";
-import { deepMerge } from "./config.js";
+import { sessionStatePath, deriveSessionKey, ensureWorkflowDir, planDir, generatePlanFilename, deriveReviewFilename } from "./paths.js";
 
 /** Minimal session manager interface needed to derive the session key. */
 export interface SessionKeySource {
@@ -18,56 +17,81 @@ export function getSessionKey(ctx: { sessionManager?: SessionKeySource } | Sessi
 }
 
 /**
+ * Normalize a raw JSON object into a strict WorkflowState shape.
+ * Drops unknown/removed keys such as planApproved.
+ * Fills missing fields from DEFAULT_STATE.
+ */
+export function normalizeState(raw: unknown): WorkflowState {
+  const obj = (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw as Record<string, unknown> : {};
+
+  return {
+    mode:        (typeof obj.mode === "string" ? obj.mode : DEFAULT_STATE.mode) as WorkflowState["mode"],
+    planPath:    typeof obj.planPath   === "string" ? obj.planPath   : undefined,
+    planReviewPath: typeof obj.planReviewPath === "string" ? obj.planReviewPath : undefined,
+    planTitle:   typeof obj.planTitle  === "string" ? obj.planTitle  : undefined,
+    planReviewStatus: (typeof obj.planReviewStatus === "string" ? obj.planReviewStatus : DEFAULT_STATE.planReviewStatus) as WorkflowState["planReviewStatus"],
+    planReviewLoops:  typeof obj.planReviewLoops === "number" ? obj.planReviewLoops : DEFAULT_STATE.planReviewLoops,
+    planReviewNotes:  typeof obj.planReviewNotes === "string" ? obj.planReviewNotes : undefined,
+    planRunId:   typeof obj.planRunId   === "string" ? obj.planRunId   : undefined,
+    workRunId:   typeof obj.workRunId   === "string" ? obj.workRunId   : undefined,
+    codeReviewLoops:  typeof obj.codeReviewLoops === "number" ? obj.codeReviewLoops : DEFAULT_STATE.codeReviewLoops,
+    autoCodeReview:   typeof obj.autoCodeReview  === "boolean" ? obj.autoCodeReview  : DEFAULT_STATE.autoCodeReview,
+    todos:       Array.isArray(obj.todos) ? (obj.todos as Array<WorkflowState["todos"][number]>).filter((t: any) => t && typeof t === "object").map((t: any) => ({
+                   id: t.id ?? "",
+                   title: t.title ?? "",
+                   status: t.status ?? "pending",
+                   notes: t.notes,
+                 })) : [],
+    pendingWorkHandoff: (obj.pendingWorkHandoff && typeof obj.pendingWorkHandoff === "object")
+      ? {
+          id:             String((obj.pendingWorkHandoff as any).id ?? ""),
+          marker:         String((obj.pendingWorkHandoff as any).marker ?? ""),
+          planPath:       String((obj.pendingWorkHandoff as any).planPath ?? ""),
+          planRunId:      typeof (obj.pendingWorkHandoff as any).planRunId === "string" ? (obj.pendingWorkHandoff as any).planRunId : undefined,
+          workRunId:      String((obj.pendingWorkHandoff as any).workRunId ?? ""),
+          createdAt:      String((obj.pendingWorkHandoff as any).createdAt ?? ""),
+          expiresAt:      String((obj.pendingWorkHandoff as any).expiresAt ?? ""),
+          expectedPrompt: String((obj.pendingWorkHandoff as any).expectedPrompt ?? ""),
+        }
+      : undefined,
+    workStatus:     typeof obj.workStatus     === "string" ? obj.workStatus     as WorkflowState["workStatus"] : undefined,
+    workStatusRunId:    typeof obj.workStatusRunId    === "string" ? obj.workStatusRunId    : undefined,
+    workStatusSummary:  typeof obj.workStatusSummary  === "string" ? obj.workStatusSummary  : undefined,
+    workStatusTests:    typeof obj.workStatusTests    === "string" ? obj.workStatusTests    : undefined,
+    workStatusUpdatedAt: typeof obj.workStatusUpdatedAt === "string" ? obj.workStatusUpdatedAt : undefined,
+    workStatusError: typeof obj.workStatusError  === "string" ? obj.workStatusError  : undefined,
+    lastReviewNotes: typeof obj.lastReviewNotes  === "string" ? obj.lastReviewNotes : undefined,
+    lastReviewStatus: typeof obj.lastReviewStatus === "string"
+      ? (obj.lastReviewStatus as WorkflowState["lastReviewStatus"])
+      : undefined,
+  };
+}
+
+/**
  * Load runtime state from the session-scoped path.
- * On first access, imports legacy .pi/workflow/state.json once,
- * then writes a marker so subsequent sessions start fresh.
+ * Normalizes the result so removed/unknown keys like planApproved are dropped.
+ * Falls back to DEFAULT_STATE if the file is missing or corrupt.
  */
 export function loadState(cwd: string, sessionKey: string): WorkflowState {
   ensureWorkflowDir(cwd);
   const spath = sessionStatePath(cwd, sessionKey);
 
   if (!fs.existsSync(spath)) {
-    // One-shot legacy migration: import directory-wide state.json once.
-    const markerPath = legacyMigrationMarkerPath(cwd);
-    if (!fs.existsSync(markerPath)) {
-      const lpath = legacyStatePath(cwd);
-      if (fs.existsSync(lpath)) {
-        try {
-          const legacy = deepMerge(
-            DEFAULT_STATE,
-            JSON.parse(fs.readFileSync(lpath, "utf8"))
-          );
-          fs.mkdirSync(path.dirname(spath), { recursive: true });
-          fs.writeFileSync(spath, JSON.stringify(legacy, null, 2), "utf8");
-          fs.writeFileSync(markerPath, "", "utf8");
-          return legacy;
-        } catch {
-          // Corrupt legacy JSON — write marker to prevent repeated import attempts.
-          fs.writeFileSync(markerPath, "", "utf8");
-          return { ...DEFAULT_STATE };
-        }
-      }
-      // No legacy state to import. Write marker so later sessions skip the check.
-      fs.writeFileSync(markerPath, "", "utf8");
-    }
     return { ...DEFAULT_STATE };
   }
 
   try {
-    return deepMerge(
-      DEFAULT_STATE,
-      JSON.parse(fs.readFileSync(spath, "utf8"))
-    );
+    return normalizeState(JSON.parse(fs.readFileSync(spath, "utf8")));
   } catch {
     return { ...DEFAULT_STATE };
   }
 }
 
-/** Persist runtime state to the session-scoped path. */
+/** Persist runtime state to the session-scoped path with normalization. */
 export function saveState(cwd: string, sessionKey: string, state: WorkflowState): void {
   const spath = sessionStatePath(cwd, sessionKey);
   fs.mkdirSync(path.dirname(spath), { recursive: true });
-  fs.writeFileSync(spath, JSON.stringify(state, null, 2), "utf8");
+  fs.writeFileSync(spath, JSON.stringify(normalizeState(state), null, 2), "utf8");
 }
 
 /**

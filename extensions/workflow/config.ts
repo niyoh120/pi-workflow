@@ -25,34 +25,6 @@ export function deepMerge<T>(base: T, override: Partial<T>): T {
   return output;
 }
 
-/**
- * Strip legacy subagent fields from a loaded config object.
- * Old fields like enabled/extensionMode/extensions/fallbackToInlineReview/timeoutMs
- * are silently ignored. New fields from DEFAULT_CONFIG take over.
- */
-function stripLegacySubagentFields(cfg: any): any {
-  if (!cfg || !cfg.subagent) return cfg;
-  const cleaned = { ...cfg };
-  const sa = { ...cleaned.subagent };
-  // Fields that existed in the old SubagentConfig but are no longer used.
-  const legacyKeys = ["enabled", "timeoutMs", "extensionMode", "extensions", "fallbackToInlineReview"];
-  let hadLegacy = false;
-  for (const k of legacyKeys) {
-    if (k in sa) { hadLegacy = true; delete sa[k]; }
-  }
-  // If after stripping the object is empty, remove it entirely so deepMerge doesn't
-  // leave an empty subagent override that shadows the default.
-  if (Object.keys(sa).length === 0) {
-    delete cleaned.subagent;
-  } else {
-    cleaned.subagent = sa;
-  }
-  if (hadLegacy) {
-    console.warn("[pi-workflow] Ignoring legacy subagent config fields — subagents are now managed by @tintinweb/pi-subagents.");
-  }
-  return cleaned;
-}
-
 /** Load merged config: DEFAULT ← global ← project. */
 export function loadConfig(cwd: string, agentDir: string): WorkflowConfig {
   ensureWorkflowDir(cwd);
@@ -64,7 +36,7 @@ export function loadConfig(cwd: string, agentDir: string): WorkflowConfig {
   if (fs.existsSync(gpath)) {
     try {
       const globalCfg = JSON.parse(fs.readFileSync(gpath, "utf8"));
-      merged = deepMerge(merged, stripLegacySubagentFields(globalCfg));
+      merged = deepMerge(merged, globalCfg);
     } catch (e) {
       console.error(`Warning: Could not parse global config ${gpath}: ${e}`);
     }
@@ -75,11 +47,32 @@ export function loadConfig(cwd: string, agentDir: string): WorkflowConfig {
   if (fs.existsSync(ppath)) {
     try {
       const projectCfg = JSON.parse(fs.readFileSync(ppath, "utf8"));
-      merged = deepMerge(merged, stripLegacySubagentFields(projectCfg));
+      merged = deepMerge(merged, projectCfg);
     } catch (e) {
       console.error(`Warning: Could not parse project config ${ppath}: ${e}`);
     }
   }
 
+  // Normalize: restrict subagent to known keys so removed/stale fields like
+  // enabled/timeoutMs/extensionMode/extensions/fallbackToInlineReview do not
+  // survive from old user configs.
+  merged = normalizeConfig(merged);
+
   return merged;
+}
+
+/**
+ * Normalize a config object to the current schema.
+ * Removes unknown subagent keys such as the old enabled/timeoutMs/extensionMode
+ * fields that no longer have any runtime effect.
+ */
+function normalizeConfig(cfg: WorkflowConfig): WorkflowConfig {
+  const sa = cfg.subagent as any;
+  if (!sa) return cfg;
+  const allowedSubagent = ["installSource", "rpcTimeoutMs", "resultTimeoutMs", "autoInstall", "agentTypes", "maxTurns"];
+  const cleaned: any = {};
+  for (const k of allowedSubagent) {
+    if (k in sa) cleaned[k] = sa[k];
+  }
+  return { ...cfg, subagent: cleaned as WorkflowConfig["subagent"] };
 }

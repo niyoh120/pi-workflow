@@ -43,7 +43,6 @@ export function currentStatusText(
     `mode: ${s.mode}`,
     `planPath: ${s.planPath ?? "none"}`,
     `planRunId: ${s.planRunId ?? "none"}`,
-    `planApproved: ${s.planApproved}`,
     `planReviewEnabled: ${config.planReview.enabled}`,
     `planReviewStatus: ${s.planReviewStatus}`,
     `planReviewLoops: ${s.planReviewLoops}/${config.planReview.maxLoops}`,

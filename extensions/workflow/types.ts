@@ -31,7 +31,7 @@ export interface ModelSpec {
   thinking?: Thinking;
 }
 
-/** pi-subagents integration config. Legacy SubagentConfig fields are tolerated but ignored. */
+/** pi-subagents integration config. */
 export interface SubagentConfig {
   /** Source for pi install, e.g. "npm:@tintinweb/pi-subagents". */
   installSource?: string;
@@ -100,9 +100,7 @@ export interface WorkflowState {
   planPath?: string;
   planReviewPath?: string;
   planTitle?: string;
-  /** Whether the current plan has been approved. No longer drives handoff
-   *  — handoff is driven by mode=workPending + pendingWorkHandoff. */
-  planApproved: boolean;
+
   planReviewStatus: PlanReviewStatus;
   planReviewLoops: number;
   planReviewNotes?: string;

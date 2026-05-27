@@ -50,38 +50,38 @@ export async function setRole(
   }
 }
 
-/** Ensure workflow tools are active, including optional ask_user_question when available.
+/** Activate workflow tools when the current agent allows them, including optional ask_user_question when available.
  *  Skips when the current agent has already excluded workflow_todo (e.g. review subagents
  *  that block workflow tools via disallowed_tools frontmatter). */
-export function ensureWorkflowToolsActive(pi: ExtensionAPI, cwd: string, getAgentDir: () => string): void {
+export function activateWorkflowToolsIfAllowed(pi: ExtensionAPI, cwd: string, getAgentDir: () => string): void {
   try {
     const active = pi.getActiveTools().map((tool: any) => {
       if (typeof tool === "string") return tool;
       return tool.name;
     });
 
-  // Guard: if the agent already excludes workflow_todo, it is a review subagent or
-  // similar restricted agent — do NOT re-add workflow tools. The disallowed_tools
-  // frontmatter enforcement should be the sole authority for tool blocking.
-  if (!active.includes("workflow_todo")) return;
+    // Guard: if the agent already excludes workflow_todo, it is a review subagent or
+    // similar restricted agent — do NOT re-add workflow tools. The disallowed_tools
+    // frontmatter enforcement should be the sole authority for tool blocking.
+    if (!active.includes("workflow_todo")) return;
 
-  const next = new Set(active);
-  next.add("workflow_todo");
-  next.add("workflow_plan");
-  next.add("workflow_subagent");
-  next.add("workflow_status");
+    const next = new Set(active);
+    next.add("workflow_todo");
+    next.add("workflow_plan");
+    next.add("workflow_subagent");
+    next.add("workflow_status");
 
-  try {
-    const config = loadConfig(cwd, getAgentDir());
-    if (config.askUserQuestion.enabled) {
-      const allTools = pi.getAllTools();
-      if (allTools.some((t: any) => t.name === config.askUserQuestion.toolName)) {
-        next.add(config.askUserQuestion.toolName);
+    try {
+      const config = loadConfig(cwd, getAgentDir());
+      if (config.askUserQuestion.enabled) {
+        const allTools = pi.getAllTools();
+        if (allTools.some((t: any) => t.name === config.askUserQuestion.toolName)) {
+          next.add(config.askUserQuestion.toolName);
+        }
       }
+    } catch {
+      // If config load or getAllTools fails, skip silently.
     }
-  } catch {
-    // If config load or getAllTools fails, skip silently.
-  }
 
     pi.setActiveTools([...next]);
   } catch {
@@ -110,7 +110,7 @@ export async function applyModeRuntime(
   const role = roleMap[mode];
   try {
     if (role && !(await setRole(pi, ctx, role, getAgentDir))) return false;
-    ensureWorkflowToolsActive(pi, ctx.cwd, getAgentDir);
+    activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir);
     ctx.ui.setStatus("lite-sp", modeLabel(mode));
     return true;
   } catch {

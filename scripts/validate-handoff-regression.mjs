@@ -97,12 +97,12 @@ console.log("5. queueApprovedWorkFromTool");
 
 assertContains(workHandoffSrc, "queueApprovedWorkFromTool", "queueApprovedWorkFromTool function exists");
 assertContains(workHandoffSrc, 'state.mode !== "plan"', "approve validates state.mode === plan");
-assertContains(workHandoffSrc, 'guardMode !== "plan"', "approve validates guard mode is plan");
+assertNotContains(workHandoffSrc, 'guardMode !== "plan"', "approve no longer hard-rejects non-plan guard");
+assertNotContains(workHandoffSrc, "planApproved", "approve no longer uses planApproved");
 assertContains(workHandoffSrc, "pendingWorkHandoff", "approve checks existing pending");
 assertContains(workHandoffSrc, "sendUserMessage", "approve sends followUp");
 assertContains(workHandoffSrc, 'deliverAs: "followUp"', "approve uses followUp delivery");
 assertContains(workHandoffSrc, 'mode = "workPending"', "approve sets mode to workPending");
-assertContains(workHandoffSrc, "planApproved = true", "approve sets planApproved true");
 
 // send-first-save-after: sendUserMessage appears before mode = "workPending" save
 const queueFnStart = workHandoffSrc.indexOf("async function queueApprovedWorkFromTool");
@@ -111,6 +111,62 @@ const sendIdx = queueFnBody.indexOf("sendUserMessage");
 const modePendingIdx = queueFnBody.indexOf('mode = "workPending"');
 assert(sendIdx > 0 && modePendingIdx > 0, "queueApprovedWorkFromTool: contains send and save");
 assert(sendIdx < modePendingIdx, "queueApprovedWorkFromTool: sends BEFORE saving pending (send-first-save-after)");
+
+// ── 5b. Executable approval guard tests (source-backed decision checks) ──
+
+console.log("5b. Executable approval guard tests");
+
+// Extract the approval function body from work-handoff.ts for line-level checks.
+const approveFnBodySrc = workHandoffSrc.slice(
+  workHandoffSrc.indexOf("async function queueApprovedWorkFromTool"),
+  workHandoffSrc.indexOf("// ── before_agent_start")
+);
+
+// Verify each of the 5 durable rejection conditions, in order, by line position.
+function durableCheckOrder(condition, label) {
+  const idx = approveFnBodySrc.indexOf(condition);
+  assert(idx > 0, "durable check present: " + label);
+  return idx;
+}
+
+const chkModeNotPlan  = durableCheckOrder('state.mode !== "plan"', "mode !== plan");
+const chkNoPlanPath   = durableCheckOrder('!state.planPath', "missing planPath");
+const chkReview       = durableCheckOrder('planReview.enabled', "review enabled");
+const chkPending      = durableCheckOrder('state.pendingWorkHandoff', "pending exists");
+const chkInvalidTurn  = durableCheckOrder('isInvalidHandoffTurn', "invalid handoff");
+
+// Verify checks are in the correct order.
+assert(chkModeNotPlan < chkNoPlanPath, "checks ordered: mode → planPath");
+assert(chkNoPlanPath < chkReview, "checks ordered: planPath → review");
+assert(chkReview < chkPending, "checks ordered: review → pending");
+assert(chkPending < chkInvalidTurn, "checks ordered: pending → invalidTurn");
+
+// Verify guard mode is NOT used as a rejection condition.
+assertNotContains(approveFnBodySrc, 'guardMode !== "plan"', "no guardMode!==plan check");
+assertNotContains(approveFnBodySrc, "getCurrentTurnGuardMode", "no getCurrentTurnGuardMode call");
+
+// Verify planApproved is NOT used.
+assertNotContains(approveFnBodySrc, "planApproved", "no planApproved in approve function");
+
+// Verify the send-first-save-after pattern is preserved.
+const sendIdx2 = approveFnBodySrc.indexOf("sendUserMessage");
+const saveIdx2 = approveFnBodySrc.indexOf("saveState(ctx.cwd, sessionKey, state)", approveFnBodySrc.indexOf('mode = "workPending"'));
+assert(sendIdx2 > 0 && saveIdx2 > 0, "send and save both present in approve");
+assert(sendIdx2 < saveIdx2, "sendUserMessage BEFORE saveState (send-first-save-after)");
+
+// Extract only the queueApprovedWorkFromTool function body for scoped checks.
+const approveFnBody = queueFnBody.slice(0, queueFnBody.indexOf("\n// ── before_agent_start"));
+
+// All 5 durable rejection conditions must exist:
+assertContains(approveFnBody, 'state.mode !== "plan"', "durable guard: rejects non-plan mode");
+assertContains(approveFnBody, "planPath", "durable guard: checks missing planPath");
+assertContains(approveFnBody, "planReviewStatus", "durable guard: checks plan review status");
+assertContains(approveFnBody, "pendingWorkHandoff", "durable guard: rejects existing pending");
+assertContains(approveFnBody, "isInvalidHandoffTurn", "durable guard: rejects invalid handoff turn");
+
+// Old guard mode check must no longer exist in any rejection path.
+assertNotContains(approveFnBody, 'guardMode', "durable guard: no guardMode check anywhere");
+assertNotContains(approveFnBody, "getCurrentTurnGuardMode", "durable guard: no getCurrentTurnGuardMode call");
 
 // ── 6. handleWorkPendingBeforeAgentStart ───────────────────────────────────
 
@@ -178,7 +234,7 @@ const saveBlock = toolsSrc.slice(toolsSrc.indexOf('action === "save"'), toolsSrc
 assertContains(saveBlock, "clearPendingWorkHandoff", "save clears pendingWorkHandoff");
 
 const clearBlock = toolsSrc.slice(toolsSrc.indexOf('action === "clear"'));
-assertContains(clearBlock, "planApproved: false", "clear resets planApproved");
+assertNotContains(clearBlock, "planApproved", "clear no longer uses planApproved");
 
 // ── 12. /go uses command direct helper ─────────────────────────────────────
 
@@ -199,7 +255,7 @@ const agentEndFn = commandsSrc.slice(
 );
 assertNotContains(agentEndFn, "if (state.planApproved)", "agent_end: no planApproved check");
 assertNotContains(agentEndFn, "await startWorkFromPlan(", "agent_end: no startWorkFromPlan call");
-assertContains(agentEndFn, "planApproved no longer triggers", "agent_end: has explanatory comment");
+assertContains(agentEndFn, "planApproved has been removed", "agent_end: has updated comment");
 assertContains(agentEndFn, "clearCurrentTurnGuardMode", "agent_end: clears turn guard mode");
 assertContains(agentEndFn, "clearInvalidHandoffTurn", "agent_end: clears invalidHandoff flag");
 
@@ -239,7 +295,7 @@ assertContains(modeSrc, "clearInvalidHandoffTurn", "clearInvalidHandoffTurn exis
 assertContains(modeSrc, "captureRuntimeSnapshot", "captureRuntimeSnapshot exists");
 assertContains(modeSrc, "restoreRuntimeSnapshot", "restoreRuntimeSnapshot exists");
 assertContains(modeSrc, "applyModeRuntime", "applyModeRuntime exists");
-assertContains(modeSrc, "ensureWorkflowToolsActive", "ensureWorkflowToolsActive exists");
+assertContains(modeSrc, "activateWorkflowToolsIfAllowed", "activateWorkflowToolsIfAllowed exists");
 
 // ── 17. before_agent_start integration ─────────────────────────────────────
 
@@ -260,7 +316,8 @@ assertNotContains(commandsSrc, "function startWorkFromPlan", "commands.ts: no ol
 assertNotContains(commandsSrc, "function sendHandoffUserMessage", "commands.ts: no old sendHandoffUserMessage");
 assertNotContains(commandsSrc, "function switchMode", "commands.ts: no old switchMode");
 assertNotContains(commandsSrc, "function setRole", "commands.ts: no old setRole");
-assertNotContains(commandsSrc, "function ensureWorkflowToolsActive", "commands.ts: no old ensureWorkflowToolsActive");
+assertNotContains(commandsSrc, "function activateWorkflowToolsIfAllowed", "commands.ts: no own activateWorkflowToolsIfAllowed");
+assertContains(commandsSrc, "activateWorkflowToolsIfAllowed", "commands.ts imports activateWorkflowToolsIfAllowed");
 
 // ── 19. runCodeReviewSubagent still uses fix handoff ───────────────────────
 

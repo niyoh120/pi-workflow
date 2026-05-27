@@ -147,7 +147,7 @@ idle → plan → planReview → work → review ↔ fix → commit → idle
 
 ### 核心规则
 1. **状态持久化**: 每次状态变更必须调用 `saveState()` 写盘
-2. **计划批准先行**: Work Mode 前必须有 `planApproved === true`（除非 `/work` 跳过计划）
+2. **计划批准先行**: Work Mode 前必须通过 `workflow_plan approve` 排队 handoff（`mode=workPending + pendingWorkHandoff`），由 `before_agent_start` 最终确认进入 Work Mode。Approval 以持久化状态（`mode`、`pendingWorkHandoff`、review status）为准，不依赖当前 turn 的 in-memory guard。除非 `/work` 跳过计划。
 3. **审查隔离**: Plan Review 和 Code Review 必须在独立子代理中执行，使用 `workflow_subagent` 工具
 4. **Review 循环防死锁**: Review loop 计数器作用域为每次 trigger，非全局 session
 5. **Todo 管理**: 计划开始后通过 `workflow_todo` 跟踪每步进度，Work 完成后 todo 列表在 `workflow_plan save` 时自动清空
@@ -168,7 +168,6 @@ idle → plan → planReview → work → review ↔ fix → commit → idle
 #### 安全
 - 所有文件路径操作使用 `node:path` 而非字符串拼接
 - session key 通过 hash 派生，不直接使用原始 session ID 作为路径段
-- 遗留状态迁移（`state.json` → `sessions/<key>/state.json`）是一次性的，通过 marker 文件防止重复导入
 - 配置合并使用 `deepMerge()`，不直接修改默认值
 - 所有 JSON 解析操作使用 try/catch 保护
 

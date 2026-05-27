@@ -120,11 +120,6 @@ export async function queueApprovedWorkFromTool(
   if (state.mode !== "plan") {
     return { success: false, error: "Approve only allowed in Plan Mode." };
   }
-  const guardMode = getCurrentTurnGuardMode(sessionKey);
-  if (guardMode !== "plan") {
-    return { success: false, error: "Approve only allowed in Plan turn context." };
-  }
-
   if (!state.planPath) {
     return { success: false, error: "No active plan. Save a plan first." };
   }
@@ -160,14 +155,12 @@ export async function queueApprovedWorkFromTool(
 
   // Only save after send succeeds.
   state.mode = "workPending";
-  state.planApproved = true;
   state.pendingWorkHandoff = pending;
   try {
     saveState(ctx.cwd, sessionKey, state);
   } catch (err: any) {
     // Save failed after send succeeded — rollback in-memory state.
     state.mode = "plan";
-    state.planApproved = false;
     clearPendingWorkHandoff(state);
     return {
       success: false,
@@ -189,6 +182,8 @@ export interface BeforeAgentStartResult {
   systemPrompt?: string;
   /** Effective guard mode for this turn. */
   guardMode: NonNullable<ReturnType<typeof getCurrentTurnGuardMode>>;
+  /** Current in-memory state after handoff processing, including fallback mutations. */
+  state: WorkflowState;
 }
 
 /**
@@ -211,10 +206,11 @@ export async function handleWorkPendingBeforeAgentStart(
   // ── Marker prompt branch ──
   if (isMarkerPrompt) {
     // Valid pending + matching prompt + runtime success → finalize Work.
+    const handoffInvalidReason = isPendingWorkHandoffValid(state, eventPrompt);
     if (
       state.mode === "workPending" &&
       state.pendingWorkHandoff &&
-      !isPendingWorkHandoffValid(state, eventPrompt)
+      handoffInvalidReason === null
     ) {
       // Attempt runtime switch.
       const pending = state.pendingWorkHandoff!;
@@ -224,7 +220,6 @@ export async function handleWorkPendingBeforeAgentStart(
         // Runtime switch failed — safety branch.
         clearPendingWorkHandoff(state);
         state.mode = "plan";
-        state.planApproved = false;
         try { saveState(ctx.cwd, sessionKey, state); } catch { /* ok */ }
 
         setCurrentTurnGuardMode(sessionKey, "plan");
@@ -242,6 +237,7 @@ export async function handleWorkPendingBeforeAgentStart(
             `Work Mode model/tools 切换失败。当前 plan review status: ${state.planReviewStatus}`
           ),
           guardMode: "plan",
+          state,
         };
       }
 
@@ -265,13 +261,12 @@ export async function handleWorkPendingBeforeAgentStart(
         saveState(ctx.cwd, sessionKey, state);
 
         setCurrentTurnGuardMode(sessionKey, "work");
-        return { guardMode: "work" };
+        return { guardMode: "work", state };
       } catch (err: any) {
         // Save state failed — restore original safe state (NOT workPending).
         clearPendingWorkHandoff(state);
         Object.assign(state, preFinalizeState);
         state.mode = "plan";
-        state.planApproved = false;
         state.pendingWorkHandoff = undefined;
         try { saveState(ctx.cwd, sessionKey, state); } catch { /* ok */ }
 
@@ -290,6 +285,7 @@ export async function handleWorkPendingBeforeAgentStart(
             `Work state 保存失败：${err.message ?? String(err)}`
           ),
           guardMode: "plan",
+          state,
         };
       }
     }
@@ -309,7 +305,6 @@ export async function handleWorkPendingBeforeAgentStart(
 
     clearPendingWorkHandoff(state);
     state.mode = "plan";
-    state.planApproved = false;
     try { saveState(ctx.cwd, sessionKey, state); } catch { /* ok */ }
 
     setCurrentTurnGuardMode(sessionKey, "plan");
@@ -318,6 +313,7 @@ export async function handleWorkPendingBeforeAgentStart(
     return {
       systemPrompt: buildInvalidHandoffSafetyPrompt(invalidReason),
       guardMode: "plan",
+      state,
     };
   }
 
@@ -327,7 +323,6 @@ export async function handleWorkPendingBeforeAgentStart(
   if (state.mode === "workPending") {
     clearPendingWorkHandoff(state);
     state.mode = "plan";
-    state.planApproved = false;
     try { saveState(ctx.cwd, sessionKey, state); } catch { /* ok */ }
     setCurrentTurnGuardMode(sessionKey, "plan");
     setInvalidHandoffTurn(sessionKey, true);
@@ -336,13 +331,14 @@ export async function handleWorkPendingBeforeAgentStart(
         "收到非 handoff 用户输入，pending 已取消。"
       ),
       guardMode: "plan",
+      state,
     };
   }
 
   // Normal non-pending turn — set guard to current state mode.
   const guard = state.mode;
   setCurrentTurnGuardMode(sessionKey, guard);
-  return { guardMode: guard };
+  return { guardMode: guard, state };
 }
 
 // ── Command direct start path (/go) ────────────────────────────────────────
@@ -401,7 +397,6 @@ export async function startApprovedWorkFromCommand(
     state.lastReviewNotes = undefined;
     state.lastReviewStatus = undefined;
     state.workRunId = workRunId;
-    state.planApproved = true;
     clearPendingWorkHandoff(state);
     saveState(ctx.cwd, sessionKey, state);
   } catch (err: any) {
