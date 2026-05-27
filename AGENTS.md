@@ -138,8 +138,8 @@ idle → plan → planReview → work → review ↔ fix → commit → idle
         ↑______________________|   (auto loop)
 ```
 
-- **Plan Mode**: 用户发起 `/plan`，AI 产出计划文档，用户通过 `/go` 批准
-- **Plan Review Mode**: 计划批准后自动进入，最⼤ loop 次数由 `config.planReview.maxLoops` 控制
+- **Plan Mode**: 用户发起 `/plan`，AI 探索、讨论、确认需求充分后产出计划文档并保存。保存后自动触发 plan-review，评审通过后由用户确认执行
+- **Plan Review Mode**: 计划保存后自动进入，最⼤ loop 次数由 `config.planReview.maxLoops` 控制
 - **Work Mode**: 执行批准的计划，使用 `workflow_todo` 跟踪进度
 - **Code Review Mode**: Work 完成后或手动 `/review`，触发隔离子代理审查
 - **Fix Mode**: 审查发现 critical/important 问题后自动进入，修复后重新触发 review

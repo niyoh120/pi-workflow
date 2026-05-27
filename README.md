@@ -145,6 +145,18 @@ This allows multiple plans to coexist in the same project without conflicts.
 
 Every plan save, read, review, and `/wf-status` explicitly shows the plan file path (e.g., `.pi/workflow/plan/plan-a3b9f2c1.md`) so you can easily find and inspect the document.
 
+### Plan Mode Confirmation Gate
+
+Before producing and saving the final plan (which triggers automatic plan review), Plan Mode explicitly asks whether the discussion is sufficient:
+
+> "Is the discussion sufficient? Shall I write the final plan?"
+
+Only after the user confirms the discussion is complete does the agent:
+1. Write the final plan document.
+2. Call `workflow_plan(action="save")` and `workflow_todo(action="reset")` — which triggers automatic plan review.
+
+This prevents wasting tokens on auto-review when the user still wants to refine the design. Ordinary clarification replies or approach confirmations are NOT treated as permission to save.
+
 ## Commands
 
 | Command | Description |
