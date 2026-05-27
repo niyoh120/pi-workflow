@@ -460,16 +460,22 @@ export const COMMIT_PROMPT = `
 - 禁止 push。
 - git 命令和 shell 工具可用，请专注于生成 commit message 并执行 git add / git commit。
 
+Commit 风格和语言（优先级从高到低）：
+1. 先检查是否有 commit 历史（git rev-parse --verify HEAD）。如果有，执行 git log --oneline -20 学习项目的 title 格式、语言（中文/英文）、类型前缀、是否使用 scope、body 格式等，生成与项目一致的 message。
+2. 检查仓库根目录是否有 AGENTS.md，如有且定义了 commit 规范，以其为准。
+3. 如果是新项目（无历史 commit，git log 会失败），则使用当前 diff 内容中体现的代码风格来写 commit，但语言使用中文。
+
 规则：
 1. 查看 git status --short。
 2. 查看 git diff --stat。
 3. 查看必要的 git diff。
-4. 生成 Conventional Commit 风格 message。
-5. 直接执行 git add 相关文件并 git commit。
-6. 只添加与本次任务相关的文件；不要盲目 git add .，除非所有改动都明显属于本次任务。
-7. 标题不超过 72 字符。
-8. 不要写 AI 生成痕迹。
-9. 提交后显示 commit hash。
+4. 检查 git rev-parse --verify HEAD 判断是否有历史 commit。有则执行 git log --oneline -20 了解项目风格和语言习惯；如有 AGENTS.md 则一并参考其中 commit 规范。如果 git log 失败（无历史），按新项目规则处理。
+5. 根据项目现有风格生成 commit message（语言、类型、scope、格式均与项目一致）。
+6. 直接执行 git add 相关文件并 git commit。
+7. 只添加与本次任务相关的文件；不要盲目 git add .，除非所有改动都明显属于本次任务。
+8. 标题不超过 72 字符（英文）或 30 个汉字（中文），不超 50 字符的中英文混合。
+9. 不要写 AI 生成痕迹。
+10. 提交后显示 commit hash。
 `;
 
 export function promptForMode(mode: Mode): string {
