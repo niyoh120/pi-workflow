@@ -82,7 +82,7 @@ export interface WorkflowConfig {
   askUserQuestion: AskUserQuestionConfig;
 }
 
-export type PlanReviewStatus = "none" | "pending" | "pass" | "fail";
+export type PlanReviewStatus = "none" | "pending" | "reviewing" | "pass" | "fail";
 
 export interface PendingWorkHandoff {
   id: string;

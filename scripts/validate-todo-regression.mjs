@@ -375,8 +375,87 @@ console.log("\n=== Check 6: Source verification ===");
 }
 
 // ═══════════════════════════════════════════════════════
-// Summary
+// 7. Plan review death spiral prevention
 // ═══════════════════════════════════════════════════════
+
+console.log("\n=== Check 7: Plan review death spiral prevention ===");
+
+{
+  const stateTs = fs.readFileSync(
+    path.join(CWD, "extensions/workflow/state.ts"), "utf8"
+  );
+  const toolsTs = fs.readFileSync(
+    path.join(CWD, "extensions/workflow/tools.ts"), "utf8"
+  );
+  const commandsTs = fs.readFileSync(
+    path.join(CWD, "extensions/workflow/commands.ts"), "utf8"
+  );
+  const helpersTs = fs.readFileSync(
+    path.join(CWD, "extensions/workflow/helpers.ts"), "utf8"
+  );
+
+  // 7a: Revision save does NOT reset planReviewLoops
+  // The tools save action has a revision branch that skips loops reset
+  const saveBlock = toolsTs.slice(
+    toolsTs.indexOf("if (action === \"save\")")
+  );
+  const revisionBranch = saveBlock.slice(
+    saveBlock.indexOf("if (state.planPath)"),
+    saveBlock.indexOf("} else {")
+  );
+  assert(!revisionBranch.includes("planReviewLoops = 0"),
+    "Revision save does NOT reset planReviewLoops");
+
+  // 7b: First save DOES reset planReviewLoops
+  const elseBranch = saveBlock.slice(
+    saveBlock.indexOf("} else {"),
+    saveBlock.indexOf("saveState", saveBlock.indexOf("} else {") + 50)
+  );
+  assert(elseBranch.includes("planReviewLoops = 0"),
+    "First save DOES reset planReviewLoops");
+
+  // 7c: updatePlan uses atomic write (renameSync)
+  assert(stateTs.includes("fs.renameSync") && stateTs.includes("updatePlan"),
+    "updatePlan uses atomic write (fs.renameSync)");
+
+  // 7d: updatePlan deletes stale review file
+  assert(stateTs.includes("removeStaleReviewFile"),
+    "state.ts exports removeStaleReviewFile");
+
+  // 7e: agent_end sets reviewing before subagent
+  assert(commandsTs.includes('planReviewStatus = "reviewing"'),
+    "agent_end sets reviewing before subagent launch");
+
+  // 7f: agent_end trigger condition is === "pending" (not reviewing)
+  assert(commandsTs.includes('planReviewStatus === "pending"'),
+    "agent_end trigger condition is === 'pending'");
+
+  // 7g: runPlanReviewSubagent does NOT write planReviewNotes to state
+  const reviewFn = commandsTs.slice(
+    commandsTs.indexOf("async function runPlanReviewSubagent")
+  );
+  // Only check within the function body (rough scope)
+  const reviewFnEnd = reviewFn.indexOf("\n}\n", 10);
+  const reviewFnBody = reviewFn.slice(0, reviewFnEnd > 0 ? reviewFnEnd : reviewFn.length);
+  assert(!reviewFnBody.includes("state.planReviewNotes =") && !reviewFnBody.includes("planReviewNotes = diag") && !reviewFnBody.includes("planReviewNotes = result.text") && !reviewFnBody.includes("planReviewNotes = `Subagent"),
+    "runPlanReviewSubagent does NOT write planReviewNotes to state");
+
+  // 7h: runPlanReviewSubagent does NOT call writePlanReview
+  assert(!reviewFnBody.includes("writePlanReview(ctx.cwd"),
+    "runPlanReviewSubagent does NOT call writePlanReview");
+
+  // 7i: Crash recovery in save: reviewing → pending
+  assert(toolsTs.includes('planReviewStatus === "reviewing"') && toolsTs.includes('state.planReviewStatus = "pending"'),
+    "tools save: crash recovery resets reviewing to pending");
+
+  // 7j: Crash recovery in before_agent_start: stale reviewing mtime check
+  assert(commandsTs.includes("REVIEWING_STALE_THRESHOLD_MS"),
+    "before_agent_start has stale reviewing mtime threshold");
+
+  // 7k: helpers shows reviewing status
+  assert(helpersTs.includes('planReviewStatus === "reviewing"'),
+    "helpers currentStatusText shows reviewing status");
+}
 
 console.log(`\n=== Result: ${runs - failures}/${runs} passed ===`);
 if (failures > 0) {

@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { getSessionKey, loadState, saveState, writeNewPlan, readPlan, writePlanReview } from "./state.js";
+import { getSessionKey, loadState, saveState, writeNewPlan, updatePlan, readPlan, writePlanReview } from "./state.js";
 import { loadConfig } from "./config.js";
 import { todoText } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
@@ -159,26 +159,50 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
           };
         }
 
-        const { planPath, planReviewPath } = writeNewPlan(
-          ctx.cwd,
-          state,
-          params.markdown
-        );
-
-        state.planTitle = params.title ?? "Active Plan";
-        state.planReviewStatus = config.planReview.enabled ? "pending" : "none";
-        state.planReviewLoops = 0;
-        state.planReviewNotes = undefined;
-        state.lastReviewNotes = undefined;
-        state.lastReviewStatus = undefined;
-        state.planPath = planPath;
-        state.planReviewPath = planReviewPath;
-        state.todos = [];
-        clearPendingWorkHandoff(state);
-        // If we were in workPending (stale handoff), revert to plan.
-        if (state.mode === "workPending") {
-          state.mode = "plan";
+        // Crash recovery: if planReviewStatus is stuck at "reviewing", reset to "pending"
+        // so the next agent_end will re-trigger the review.
+        if (state.planReviewStatus === "reviewing") {
+          state.planReviewStatus = "pending";
         }
+
+        // Distinguish first save (new plan) vs revision save (update existing plan)
+        if (state.planPath) {
+          // Revision: update existing plan file in-place, do NOT reset loops
+          updatePlan(ctx.cwd, state, params.markdown);
+          state.planTitle = params.title ?? state.planTitle ?? "Active Plan";
+          state.planReviewStatus = config.planReview.enabled ? "pending" : "none";
+          // Do NOT reset planReviewLoops on revision — loops track the entire plan cycle
+          state.lastReviewNotes = undefined;
+          state.lastReviewStatus = undefined;
+          state.todos = [];
+          clearPendingWorkHandoff(state);
+          // If we were in workPending (stale handoff), revert to plan.
+          if (state.mode === "workPending") {
+            state.mode = "plan";
+          }
+        } else {
+          // First save: create new plan file, reset loops
+          const { planPath, planReviewPath } = writeNewPlan(
+            ctx.cwd,
+            state,
+            params.markdown
+          );
+          state.planTitle = params.title ?? "Active Plan";
+          state.planReviewStatus = config.planReview.enabled ? "pending" : "none";
+          state.planReviewLoops = 0;
+          state.planReviewNotes = undefined;
+          state.lastReviewNotes = undefined;
+          state.lastReviewStatus = undefined;
+          state.planPath = planPath;
+          state.planReviewPath = planReviewPath;
+          state.todos = [];
+          clearPendingWorkHandoff(state);
+          // If we were in workPending (stale handoff), revert to plan.
+          if (state.mode === "workPending") {
+            state.mode = "plan";
+          }
+        }
+
         saveState(ctx.cwd, sessionKey, state);
 
         const overlay = getWorkflowOverlay();

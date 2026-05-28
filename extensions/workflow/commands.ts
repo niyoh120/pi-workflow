@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import crypto from "node:crypto";
-import { getSessionKey, loadState, saveState, readPlan, writePlanReview } from "./state.js";
+import fs from "node:fs";
+import { getSessionKey, loadState, saveState, readPlan } from "./state.js";
 import { loadConfig } from "./config.js";
 import { COMMON_PROMPT, promptForMode, promptForSubagentRole } from "./prompts.js";
 import { isReadonlyMode, isLocalFileMutatingShell, isAllowedPlanScratchPath } from "./guards.js";
@@ -8,7 +9,7 @@ import { currentStatusText, todoText } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
-import { planDir } from "./paths.js";
+import { planDir, sessionStatePath } from "./paths.js";
 import type { SubagentsClient } from "./subagent.js";
 import { formatSubagentFailure } from "./subagent.js";
 import {
@@ -24,7 +25,6 @@ import {
   startApprovedWorkFromCommand,
   clearPendingWorkHandoff,
 } from "./work-handoff.js";
-import fs from "node:fs";
 import { execSync } from "node:child_process";
 import path from "node:path";
 import { syncReviewAgentsToGlobal, getGlobalAgentsDir } from "./agents.js";
@@ -64,6 +64,10 @@ async function runPlanReviewSubagent(
 
   ctx.ui.notify("正在运行 isolated plan review 子代理...", "info");
 
+  // Truncate helper for followUp messages (declared before try so catch can access it)
+  const truncate = (text: string, maxLen: number = 3000): string =>
+    text.length > maxLen ? text.slice(0, maxLen) + "...\n(truncated, full text exceeds limit)" : text;
+
   try {
     const result = await _subagentsClient.run({
       role: "planReview",
@@ -83,23 +87,20 @@ async function runPlanReviewSubagent(
       );
       state.planReviewStatus = "fail";
       state.planReviewLoops += 1;
-      state.planReviewNotes = diag;
-      if (state.planReviewPath) writePlanReview(ctx.cwd, state.planReviewPath, state.planReviewNotes);
+      // Do NOT write review notes to state or disk — only delivered via followUp
       state.mode = "plan";
       saveState(ctx.cwd, sessionKey, state);
       await applyModeRuntime(pi, ctx, "plan", getAgentDir);
       pi.sendUserMessage(
-        `计划评审子代理执行失败。${diag}`,
+        `计划评审子代理执行失败。\n\n诊断信息：\n${diag}\n\n子代理输出（截断）：\n${truncate(result.text ?? "")}`,
         { deliverAs: "followUp" }
       );
       return;
     }
 
-    // Write review notes to plan review file
-    state.planReviewNotes = result.text;
-    if (state.planReviewPath) {
-      writePlanReview(ctx.cwd, state.planReviewPath, result.text);
-    }
+    // Do NOT write review notes to state or disk — only delivered via followUp
+    // (state.planReviewNotes and writePlanReview removed to prevent model
+    //  from reading review results before the followUp arrives)
 
     if (result.statusMarker === "PASS") {
       state.planReviewStatus = "pass";
@@ -113,7 +114,8 @@ async function runPlanReviewSubagent(
         (config.askUserQuestion.enabled
           ? `如果 ask_user_question 工具可用，建议用结构化选项让用户一键确认（如：执行计划 / 修改计划 / 继续讨论），减少打字摩擦。`
           : ``) +
-        `用户确认后调用 workflow_plan(action="approve")。`,
+        `用户确认后调用 workflow_plan(action="approve")。` +
+        `\n\n评审通过的详细意见：\n${truncate(result.text)}`,
         { deliverAs: "followUp" }
       );
       return;
@@ -129,14 +131,14 @@ async function runPlanReviewSubagent(
 
     if (state.planReviewLoops >= config.planReview.maxLoops) {
       pi.sendUserMessage(
-        `计划评审未通过，且已达到最大评审轮数（${config.planReview.maxLoops}）。请向用户展示评审意见并等待用户决定。\n\n评审意见：\n${result.text}`,
+        `计划评审未通过，且已达到最大评审轮数（${config.planReview.maxLoops}）。请向用户展示评审意见并等待用户决定。\n\n评审意见：\n${truncate(result.text)}`,
         { deliverAs: "followUp" }
       );
       return;
     }
 
     pi.sendUserMessage(
-      `计划评审未通过。请根据以下意见修订计划，并重新调用 workflow_plan(action="save") 保存。\n\n评审意见：\n${result.text}`,
+      `计划评审未通过。请根据以下意见修订计划，并重新调用 workflow_plan(action="save") 保存。\n\n评审意见：\n${truncate(result.text)}`,
       { deliverAs: "followUp" }
     );
   } catch (err: any) {
@@ -147,13 +149,12 @@ async function runPlanReviewSubagent(
     );
     state.planReviewStatus = "fail";
     state.planReviewLoops += 1;
-    state.planReviewNotes = `Subagent exception: ${errMsg}`;
-    if (state.planReviewPath) writePlanReview(ctx.cwd, state.planReviewPath, state.planReviewNotes);
+    // Do NOT write review notes to state or disk
     state.mode = "plan";
     saveState(ctx.cwd, sessionKey, state);
     await applyModeRuntime(pi, ctx, "plan", getAgentDir);
     pi.sendUserMessage(
-      `计划评审子代理异常：${errMsg}`,
+      `计划评审子代理异常：${truncate(errMsg ?? String(err))}`,
       { deliverAs: "followUp" }
     );
     return;
@@ -484,6 +485,27 @@ export function registerBeforeAgentStart(
     // Refresh state after handoff may have mutated it.
     const currentState = handoffResult.state;
 
+    // ── Crash recovery: stale reviewing state ──
+    // If planReviewStatus is stuck at "reviewing" for more than 5 minutes,
+    // it means the subagent process crashed without writing the final result.
+    // Reset to "pending" so the next agent_end will re-trigger the review.
+    {
+      const spath = sessionStatePath(ctx.cwd, sessionKey);
+      if (currentState.planReviewStatus === "reviewing" && fs.existsSync(spath)) {
+        const stat = fs.statSync(spath);
+        const ageMs = Date.now() - stat.mtimeMs;
+        const REVIEWING_STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
+        if (ageMs > REVIEWING_STALE_THRESHOLD_MS) {
+          currentState.planReviewStatus = "pending";
+          saveState(ctx.cwd, sessionKey, currentState);
+          ctx.ui.notify(
+            `Recovered stale reviewing state (stuck for ${Math.round(ageMs / 1000)}s). Reset to pending for re-review.`,
+            "warn"
+          );
+        }
+      }
+    }
+
     // Overlay setup.
     if (overlay) {
       if (currentState.mode === "idle") {
@@ -633,6 +655,9 @@ export function registerAgentEnd(
         state.planReviewStatus === "pending" &&
         state.planReviewLoops < config.planReview.maxLoops
       ) {
+        // Set reviewing status before launching subagent to prevent re-triggering
+        state.planReviewStatus = "reviewing";
+        saveState(ctx.cwd, sessionKey, state);
         await runPlanReviewSubagent(pi, ctx, getAgentDir);
       }
       // NOTE: planApproved has been removed. Handoff uses workPending + before_agent_start finalize.
@@ -890,7 +915,11 @@ export function registerWfStatusCommand(
       const state = loadState(ctx.cwd, sessionKey);
       const config = loadConfig(ctx.cwd, getAgentDir());
 
-      ctx.ui.notify(currentStatusText(config, state), "info");
+      let msg = currentStatusText(config, state);
+      if (state.planReviewStatus === "reviewing") {
+        msg += "\n\n⚠ planReviewStatus is stuck at 'reviewing'. This means a plan review subagent may have crashed.\nOptions: call workflow_plan(action='save') to reset to 'pending' and re-trigger review, or use /wf-reset to clear all state.";
+      }
+      ctx.ui.notify(msg, "info");
     },
   });
 }

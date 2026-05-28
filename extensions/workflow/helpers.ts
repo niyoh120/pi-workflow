@@ -52,6 +52,7 @@ export function currentStatusText(
     `lastReviewStatus: ${s.lastReviewStatus ?? "none"}`,
     `workStatus: ${workStatusText}`,
     pendingInfo,
+    s.planReviewStatus === "reviewing" ? "⚠ review in progress — do not modify the plan until the review result arrives" : "",
     "",
     "todos:",
     todoText(s),

@@ -109,7 +109,12 @@ console.log("5. Plan review failure transitions");
 assertContains(commandsSrc, 'formatSubagentFailure(result)', "plan review: uses formatSubagentFailure");
 assertContains(commandsSrc, 'planReviewStatus = "fail"', "plan review failure: sets planReviewStatus=fail");
 assertContains(commandsSrc, "planReviewLoops += 1", "plan review failure: increments planReviewLoops");
-assertContains(commandsSrc, "writePlanReview", "plan review failure: writes review notes");
+
+// writePlanReview removed from commands.ts — review notes only delivered via followUp
+assertNotContains(commandsSrc, "writePlanReview(ctx.cwd", "plan review: no direct writePlanReview call in commands.ts (delayed exposure)");
+
+// planReviewNotes no longer written to state by runPlanReviewSubagent
+assertNotContains(commandsSrc, "state.planReviewNotes = diag", "plan review: no state.planReviewNotes assignment in subagent handler");
 
 // Must NOT attempt alternate result retrieval (no inline fallback)
 // The old pattern was to fall back to inline review; check there's no such pattern
@@ -210,6 +215,37 @@ assertContains(commandsSrc, "--force", "/go --force still exists");
 // approve sends followUp via queueApprovedWorkFromTool
 assertContains(toolsSrc, "queueApprovedWorkFromTool", "tools approve calls queueApprovedWorkFromTool");
 assertContains(toolsSrc, "clearPendingWorkHandoff", "tools save calls clearPendingWorkHandoff");
+
+// ── 10. Reviewing state and updatePlan ──────────────────
+
+console.log("10. Reviewing state & updatePlan");
+
+// PlanReviewStatus includes "reviewing"
+assertContains(typesSrc, '"reviewing"', "PlanReviewStatus includes reviewing");
+
+// agent_end sets reviewing before launching subagent
+assertContains(commandsSrc, 'planReviewStatus = "reviewing"', "agent_end: sets reviewing before subagent launch");
+
+// agent_end trigger condition is still "pending" (not reviewing)
+assertContains(commandsSrc, 'planReviewStatus === "pending"', "agent_end: trigger condition checks pending only");
+
+// Crash recovery in save: reviewing → pending
+assertContains(toolsSrc, 'planReviewStatus === "reviewing"', "tools save: crash recovery resets reviewing to pending");
+
+// Crash recovery in before_agent_start: stale reviewing mtime check
+assertContains(commandsSrc, 'REVIEWING_STALE_THRESHOLD_MS', "before_agent_start: stale reviewing mtime threshold");
+
+// updatePlan function exists in state.ts
+const stateSrc = readFileSync("extensions/workflow/state.ts", "utf8");
+assertContains(stateSrc, "export function updatePlan", "state.ts exports updatePlan");
+assertContains(stateSrc, "removeStaleReviewFile", "state.ts exports removeStaleReviewFile");
+
+// updatePlan uses atomic write (rename)
+assertContains(stateSrc, "fs.renameSync", "updatePlan: uses atomic rename");
+
+// tools save distinguishes revision vs new plan
+assertContains(toolsSrc, 'updatePlan(ctx.cwd, state', "tools save: calls updatePlan for revision");
+assertContains(toolsSrc, 'writeNewPlan(\n', "tools save: calls writeNewPlan for first save");
 
 // ── Summary ────────────────────────────────────────────────
 

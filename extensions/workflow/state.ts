@@ -121,6 +121,47 @@ export function writeNewPlan(
   return { planPath: planRel, planReviewPath: reviewRel };
 }
 
+/** Remove the stale review file associated with the current plan, if it exists. */
+export function removeStaleReviewFile(cwd: string, reviewPath: string): void {
+  const file = path.join(cwd, reviewPath);
+  if (fs.existsSync(file)) {
+    fs.unlinkSync(file);
+  }
+}
+
+/**
+ * Update the existing plan file on disk with new content.
+ * Uses atomic write (temp-file + rename) to prevent partial-write corruption.
+ * Removes stale .review.md file and clears planReviewNotes from state.
+ * planPath and planReviewPath remain unchanged.
+ */
+export function updatePlan(
+  cwd: string,
+  state: WorkflowState,
+  content: string
+): void {
+  if (!state.planPath) {
+    throw new Error("updatePlan requires state.planPath to be set");
+  }
+
+  const planAbs = path.join(cwd, state.planPath);
+
+  // Atomic write: write to temp file in same directory, then rename
+  // (renameSync is only atomic on the same filesystem, so we create the
+  // temp file next to the target to avoid EXDEV errors)
+  const tmpFile = path.join(path.dirname(planAbs), `.tmp-plan-update-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  fs.writeFileSync(tmpFile, content, "utf8");
+  fs.renameSync(tmpFile, planAbs);
+
+  // Remove stale review file if it exists
+  if (state.planReviewPath) {
+    removeStaleReviewFile(cwd, state.planReviewPath);
+  }
+
+  // Clear stale review notes from state
+  state.planReviewNotes = undefined;
+}
+
 /** Read the current plan file from disk. Returns empty string if not found. */
 export function readPlan(cwd: string, planPath: string): string {
   const file = path.join(cwd, planPath);
