@@ -152,7 +152,9 @@ export const WORK_PROMPT = `
 - 全部任务完成 → workflow_status({ status: "ready_for_review", runId: currentRunId, summary: "...", tests: "..." })
 - 阻塞无法继续 → workflow_status({ status: "blocked", runId: currentRunId, error: "..." })
 
-不要输出 WORK_STATUS 文本标记。workflow_status 工具是触发自动 code review 的唯一方式。
+不要输出 WORK_STATUS 文本标记。workflow_status 工具记录完成状态：
+- 当自动 code-review 开启时（默认），workflow_status ready_for_review 会触发自动 code review。
+- 当自动 review 关闭时（/work --no-review 或 config.json codeReview.auto=false），workflow_status 只记录完成并转为 idle，用户可手动 /review 或 /commit。
 `;
 
 export const FIX_PROMPT = `
@@ -203,7 +205,9 @@ export const FIX_PROMPT = `
 - 全部修复完成 → workflow_status({ status: "ready_for_review", runId: currentRunId, summary: "...", tests: "..." })
 - 阻塞无法继续 → workflow_status({ status: "blocked", runId: currentRunId, error: "..." })
 
-不要输出 WORK_STATUS 文本标记。workflow_status 工具是触发自动 code review 的唯一方式。
+不要输出 WORK_STATUS 文本标记。workflow_status 工具记录完成状态：
+- 当自动 code-review 开启时（默认），workflow_status ready_for_review 会触发自动 code review。
+- 当自动 review 关闭时，workflow_status 只记录完成并转为 idle，用户可手动 /review 或 /commit。
 `;
 
 export const CODE_REVIEW_PROMPT = `
@@ -360,8 +364,9 @@ If git repo and HEAD exist, review the provided git status, diff stat, diff cont
 If the review context includes a **Previous Code Review** section with a Work/Fix response:
 - The agent already reviewed this diff before.
 - Some issues may have been **rebutted with technical reasoning** by the Work/Fix agent.
-- Do NOT blindly repeat issues that were credibly rebutted unless you have NEW concrete evidence.
-- If an item was disputed as invalid, out of scope, or unfixable without a larger change, only re-flag it if you can refute the rebuttal.
+- **Do NOT blindly repeat issues that were credibly rebutted.** Only re-flag an issue if you have NEW concrete evidence that directly refutes the rebuttal. Repeating a rebutted issue without new evidence wastes tokens and time.
+- If an item was disputed as invalid, out of scope, or unfixable without a larger change, only re-flag it if you can refute the rebuttal with specific code, test, or documentation evidence.
+- The review context uses a **baseline diff** (git diff against a snapshot taken at Work mode entry) — this shows only changes made during the current work session, not cumulative pre-existing changes. Focus on what was actually modified.
 
 ## Calibration
 

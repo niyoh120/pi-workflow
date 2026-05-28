@@ -472,7 +472,7 @@ export function registerWorkflowStatusTool(
     name: "workflow_status",
     label: "Workflow Status",
     description:
-      "Report the completion status of the current Work/Fix run. Must be called at the end of Work/Fix mode to trigger automatic code review. Status: ready_for_review (all tasks done) or blocked (needs user intervention).",
+      "Report the completion status of the current Work/Fix run. Must be called at the end of Work/Fix mode. When auto-review is enabled (default), triggers automatic code review on ready_for_review; when disabled, transitions to idle. Status: ready_for_review (all tasks done) or blocked (needs user intervention).",
     promptSnippet:
       "workflow_status: report work completion status — ready_for_review or blocked.",
     promptGuidelines: [
@@ -480,7 +480,9 @@ export function registerWorkflowStatusTool(
       "Call workflow_status({ status: 'ready_for_review', runId: currentRunId, summary: '...', tests: '...' }) when all planned tasks are complete.",
       "Call workflow_status({ status: 'blocked', runId: currentRunId, error: '...' }) when blocked by missing info, dependencies, or unresolvable issues.",
       "The runId parameter MUST match the current state.workRunId displayed in the workflow state.",
-      "Do NOT print WORK_STATUS: ... in text — this tool is the only trigger for auto review.",
+      "When auto-review is enabled (default): ready_for_review triggers automatic code review.",
+      "When auto-review is disabled (/work --no-review or config.json codeReview.auto=false): workflow_status only records completion and transitions to idle; user can manually /review or /commit.",
+      "Do NOT print WORK_STATUS: ... in text — this tool records completion status.",
     ],
     parameters: Type.Object({
       status: WorkStatusSchema,

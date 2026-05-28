@@ -64,6 +64,10 @@ export function normalizeState(raw: unknown): WorkflowState {
     lastReviewStatus: typeof obj.lastReviewStatus === "string"
       ? (obj.lastReviewStatus as WorkflowState["lastReviewStatus"])
       : undefined,
+    workBaselineRef: typeof obj.workBaselineRef === "string" ? obj.workBaselineRef : undefined,
+    workBaselineUntracked: Array.isArray(obj.workBaselineUntracked)
+      ? (obj.workBaselineUntracked as string[]).filter((p: any) => typeof p === "string")
+      : undefined,
   };
 }
 

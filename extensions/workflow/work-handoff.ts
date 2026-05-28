@@ -12,13 +12,26 @@ import {
   isInvalidHandoffTurn,
 } from "./mode.js";
 import type { WorkflowState } from "./types.js";
+import { createWorkBaseline, captureBaselineUntracked } from "./baseline.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
 export const PENDING_WORK_HANDOFF_TTL_MS = 5 * 60 * 1000;
 
-/** Regex matching handoff markers like `[pi-workflow handoff:UUID]`. */
-export const HANDOFF_MARKER_RE = /^\[pi-workflow handoff:[^\]]+\]/;
+/** Unanchored regex matching handoff markers like `[pi-workflow handoff:UUID]` anywhere in prompt text.
+ *  Capture group 1 extracts the UUID portion for precise matching against pending.marker. */
+export const HANDOFF_MARKER_RE = /\[pi-workflow handoff:([^\]]+)\]/;
+
+/** Extract the first handoff marker from a prompt string.
+ *  Returns the full marker string `[pi-workflow handoff:UUID]` if found, or null if not.
+ *  Used by isPendingWorkHandoffValid to compare against `pending.marker` —
+ *  no longer requires exact full-prompt matching. */
+export function extractHandoffMarker(prompt: string): string | null {
+  const match = HANDOFF_MARKER_RE.exec(prompt);
+  if (!match) return null;
+  // Return the full marker string including brackets, not just the UUID.
+  return `[pi-workflow handoff:${match[1]}]`;
+}
 
 // ── Pending handoff creation / cleanup ─────────────────────────────────────
 
@@ -82,9 +95,14 @@ export function isPendingWorkHandoffValid(
     return `Pending handoff expired at ${pending.expiresAt}.`;
   }
 
-  // Check prompt match.
-  if (eventPrompt !== pending.expectedPrompt) {
-    return `Event prompt does not match expectedPrompt.`;
+  // Check marker presence: extract marker from prompt and compare with pending.marker.
+  // No longer requires exact full-prompt matching (expectedPrompt) — only marker identity.
+  const extractedMarker = extractHandoffMarker(eventPrompt);
+  if (!extractedMarker) {
+    return `No handoff marker found in event prompt.`;
+  }
+  if (extractedMarker !== pending.marker) {
+    return `Extracted marker (${extractedMarker}) does not match pending.marker (${pending.marker}).`;
   }
 
   return null; // valid
@@ -249,6 +267,8 @@ export async function handleWorkPendingBeforeAgentStart(
         state.autoCodeReview = true;
         state.codeReviewLoops = 0;
         state.workRunId = pending.workRunId;
+        state.workBaselineRef = createWorkBaseline(ctx.cwd);
+        state.workBaselineUntracked = captureBaselineUntracked(ctx.cwd);
         state.workStatus = undefined;
         state.workStatusRunId = undefined;
         state.workStatusSummary = undefined;
@@ -319,17 +339,39 @@ export async function handleWorkPendingBeforeAgentStart(
 
   // ── Non-marker prompt branch ──
 
-  // If we're in workPending but user input is non-marker → user interrupted.
+  // If we're in workPending but user input is non-marker:
+  //   - If handoff is expired → clear it, revert to plan
+  //   - If handoff is still valid (just waiting for marker) → preserve it,
+  //     inject safety prompt, and let user continue in plan-read-only mode.
+  //     The marker may arrive in a subsequent turn via the followUp mechanism.
   if (state.mode === "workPending") {
-    clearPendingWorkHandoff(state);
-    state.mode = "plan";
-    try { saveState(ctx.cwd, sessionKey, state); } catch { /* ok */ }
+    const pending = state.pendingWorkHandoff;
+    const isExpired = pending && Date.now() > new Date(pending.expiresAt).getTime();
+
+    if (isExpired) {
+      // TTL expired → clear stale handoff, revert to plan mode.
+      clearPendingWorkHandoff(state);
+      state.mode = "plan";
+      try { saveState(ctx.cwd, sessionKey, state); } catch { /* ok */ }
+      setCurrentTurnGuardMode(sessionKey, "plan");
+      setInvalidHandoffTurn(sessionKey, true);
+      return {
+        systemPrompt: buildInvalidHandoffSafetyPrompt(
+          "Handoff 已过期（超过 5 分钟），pending 已取消。请 /wf-status 查看状态或 /wf-reset 清理。"
+        ),
+        guardMode: "plan",
+        state,
+      };
+    }
+
+    // Handoff still valid (not expired) but marker not yet received.
+    // Preserve handoff — the followUp marker may arrive in a subsequent turn.
+    // Set plan guard mode for this turn (read-only), inject waiting prompt.
     setCurrentTurnGuardMode(sessionKey, "plan");
-    setInvalidHandoffTurn(sessionKey, true);
     return {
-      systemPrompt: buildInvalidHandoffSafetyPrompt(
-        "收到非 handoff 用户输入，pending 已取消。"
-      ),
+      systemPrompt:
+        `⚠️ Work Mode handoff 已排队，等待 followUp marker 到达。当前 turn 为 Plan Mode 只读。\n` +
+        `如需强制执行，使用 /go --force；如需取消，使用 /wf-reset。`,
       guardMode: "plan",
       state,
     };
@@ -352,7 +394,8 @@ export async function startApprovedWorkFromCommand(
   pi: ExtensionAPI,
   ctx: any,
   getAgentDir: () => string,
-  force = false
+  force = false,
+  noReview = false
 ): Promise<{ success: boolean; error?: string; workRunId?: string }> {
   const sessionKey = getSessionKey(ctx.sessionManager);
   const state = loadState(ctx.cwd, sessionKey);
@@ -386,8 +429,10 @@ export async function startApprovedWorkFromCommand(
   // Save Work state.
   try {
     state.mode = "work";
-    state.autoCodeReview = true;
+    state.autoCodeReview = !noReview;
     state.codeReviewLoops = 0;
+    state.workBaselineRef = createWorkBaseline(ctx.cwd);
+    state.workBaselineUntracked = captureBaselineUntracked(ctx.cwd);
     state.workStatus = undefined;
     state.workStatusRunId = undefined;
     state.workStatusSummary = undefined;

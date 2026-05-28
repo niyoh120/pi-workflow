@@ -40,6 +40,7 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
   codeReview: {
     enabled: true,
     maxLoops: 3,
+    auto: true,
   },
   todoOverlay: {
     enabled: true,

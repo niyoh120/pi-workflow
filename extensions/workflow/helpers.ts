@@ -28,7 +28,7 @@ export function modeLabel(mode: string): string {
 
 /** Build the current workflow status text block to inject into the system prompt. */
 export function currentStatusText(
-  config: { planReview: { enabled: boolean; maxLoops: number }; codeReview: { enabled: boolean; maxLoops: number } },
+  config: { planReview: { enabled: boolean; maxLoops: number }; codeReview: { enabled: boolean; maxLoops: number; auto: boolean } },
   s: WorkflowState
 ): string {
   const workStatusText = s.workStatus
@@ -47,6 +47,9 @@ export function currentStatusText(
     `planReviewStatus: ${s.planReviewStatus}`,
     `planReviewLoops: ${s.planReviewLoops}/${config.planReview.maxLoops}`,
     `autoCodeReview: ${s.autoCodeReview}`,
+    `codeReviewAuto: ${config.codeReview.auto}`,
+    `workBaselineRef: ${s.workBaselineRef ?? "none"}`,
+    `workBaselineUntracked: ${s.workBaselineUntracked?.length ?? 0} files`,
     `workRunId: ${s.workRunId ?? "none"}`,
     `codeReviewLoops: ${s.codeReviewLoops}/${config.codeReview.maxLoops}`,
     `lastReviewStatus: ${s.lastReviewStatus ?? "none"}`,

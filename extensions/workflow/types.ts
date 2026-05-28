@@ -76,6 +76,10 @@ export interface WorkflowConfig {
   codeReview: {
     enabled: boolean;
     maxLoops: number;
+    /** Whether to automatically trigger code review after Work/Fix completion.
+     *  When false, workflow_status still records completion but transitions to idle
+     *  instead of launching review. Users can manually /review or /commit. */
+    auto: boolean;
   };
   subagent: SubagentConfig;
   todoOverlay: TodoOverlayConfig;
@@ -125,4 +129,11 @@ export interface WorkflowState {
   lastReviewNotes?: string;
   /** Status marker from the latest code review. */
   lastReviewStatus?: "PASS" | "FAIL";
+  /** Git baseline ref captured at Work mode entry (from git stash create or HEAD).
+   *  Used by code review to diff only changes made during this work session.
+   *  Cleared on review PASS, blocked, reset, new plan, or commit. */
+  workBaselineRef?: string;
+  /** Set of untracked file paths at Work mode entry.
+   *  Used by code review to scope untracked content to only files created during this session. */
+  workBaselineUntracked?: string[];
 }

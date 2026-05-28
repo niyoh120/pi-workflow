@@ -28,6 +28,7 @@ import {
 import { execSync } from "node:child_process";
 import path from "node:path";
 import { syncReviewAgentsToGlobal, getGlobalAgentsDir } from "./agents.js";
+import { createWorkBaseline, collectBaselineDiff, collectUntrackedFiles, formatUntrackedContext, captureBaselineUntracked } from "./baseline.js";
 
 /** Store active subagent client reference set by index.ts. */
 let _subagentsClient: SubagentsClient;
@@ -249,15 +250,15 @@ async function runCodeReviewSubagent(
   if (!gitRepoPreflight(ctx.cwd, ctx)) {
     if (autoFix) {
       state.autoCodeReview = false;
+      state.workBaselineRef = undefined;
+      state.workBaselineUntracked = undefined;
       saveState(ctx.cwd, sessionKey, state);
     }
     return false;
   }
 
-  // Pre-collect git status and diff
+  // Pre-collect git status and baseline diff
   let statusText = "";
-  let diffStatText = "";
-  let diffText = "";
 
   try {
     statusText = execSync("git status --short", {
@@ -268,24 +269,16 @@ async function runCodeReviewSubagent(
   } catch {
     statusText = "(could not run git status)";
   }
-  try {
-    diffStatText = execSync("git diff --stat", {
-      cwd: ctx.cwd,
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024,
-    }).toString();
-  } catch {
-    diffStatText = "(could not run git diff --stat)";
-  }
-  try {
-    diffText = execSync("git diff", {
-      cwd: ctx.cwd,
-      encoding: "utf8",
-      maxBuffer: 10 * 1024 * 1024,
-    }).toString();
-  } catch {
-    diffText = "(could not run git diff)";
-  }
+
+  // Use baseline diff if workBaselineRef is available (session-scoped incremental diff).
+  // Fallback to plain git diff if baseline is missing/invalid.
+  const baselineDiff = collectBaselineDiff(ctx.cwd, state.workBaselineRef);
+  const diffStatText = baselineDiff.diffStat;
+  const diffText = baselineDiff.diff;
+
+  // Collect untracked file contents for review context (scoped to session-new files only).
+  const untracked = collectUntrackedFiles(ctx.cwd, state.workBaselineUntracked);
+  const untrackedContext = formatUntrackedContext(untracked.contents);
 
   // Build context: git info + plan + todo summary
   const planContent = state.planPath ? readPlan(ctx.cwd, state.planPath) : "";
@@ -300,8 +293,11 @@ async function runCodeReviewSubagent(
     `## Git Diff Stat`,
     diffStatText || "(empty)",
     ``,
-    `## Git Diff`,
+    `## Git Diff (baseline: ${state.workBaselineRef ?? "HEAD"})`,
     diffText || "(empty)",
+    ``,
+    `## Untracked Files (new in this session)`,
+    untrackedContext,
     ``,
     `## Plan / Todo Context`,
     planContext,
@@ -321,7 +317,7 @@ async function runCodeReviewSubagent(
       `> should NOT be repeated unless you can refute the rebuttal. Only flag genuinely`,
       `> unresolved or new issues.`,
       ``,
-      state.lastReviewNotes.slice(-6000),
+      state.lastReviewNotes.slice(-20000),
     );
 
     // Include Work/Fix response to the last review if available
@@ -373,6 +369,8 @@ async function runCodeReviewSubagent(
     if (result.statusMarker === "PASS") {
       state.lastReviewNotes = undefined;
       state.lastReviewStatus = undefined;
+      state.workBaselineRef = undefined;
+      state.workBaselineUntracked = undefined;
       state.mode = "idle";
       state.autoCodeReview = false;
       saveState(ctx.cwd, sessionKey, state);
@@ -391,6 +389,8 @@ async function runCodeReviewSubagent(
       // Manual review: just display result, don't increment auto-fix loop counter
       state.mode = "idle";
       state.autoCodeReview = false;
+      state.workBaselineRef = undefined;
+      state.workBaselineUntracked = undefined;
       saveState(ctx.cwd, sessionKey, state);
       ctx.ui.setStatus("lite-sp", undefined);
       const note = result.text ? `\n\n评审意见：\n${result.text.slice(-2000)}` : "";
@@ -407,6 +407,8 @@ async function runCodeReviewSubagent(
     if (state.codeReviewLoops >= config.codeReview.maxLoops) {
       state.mode = "idle";
       state.autoCodeReview = false;
+      // Keep workBaselineRef/workBaselineUntracked — manual /review may still need them.
+      // Clear them only on true terminal events (PASS, blocked, /wf-reset, /plan, commit).
       saveState(ctx.cwd, sessionKey, state);
 
       ctx.ui.setStatus("lite-sp", undefined);
@@ -420,6 +422,7 @@ async function runCodeReviewSubagent(
     state.mode = "fix";
     // Keep same workRunId for fix mode, but clear stale work status
     // so the Fix agent must call workflow_status itself.
+    // Keep workBaselineRef — fix review uses same baseline as original work.
     state.workStatus = undefined;
     state.workStatusRunId = undefined;
     state.workStatusSummary = undefined;
@@ -673,16 +676,13 @@ export function registerAgentEnd(
     // review mode with autoCodeReview: no longer used (inline fallback removed).
     // All code reviews go through isolated subagent.
 
-    // Work / Fix mode: check for workflow_status tool-driven completion.
-    if (
-      (state.mode === "work" || state.mode === "fix") &&
-      state.autoCodeReview &&
-      config.codeReview.enabled
-    ) {
+    // ── Work / Fix mode: completion and review ──────────────────────
+    if (state.mode === "work" || state.mode === "fix") {
+      // Completion: always process workflow_status regardless of auto-review setting.
       // Only act on a workflow_status that matches the current workRunId.
       if (!state.workRunId) {
         ctx.ui.notify(
-          "Work Mode 没有设置 workRunId，无法触发自动 code review。",
+          "Work/Fix Mode 没有设置 workRunId，无法处理完成状态。",
           "warning"
         );
         return;
@@ -690,14 +690,17 @@ export function registerAgentEnd(
 
       if (!state.workStatus || state.workStatusRunId !== state.workRunId) {
         ctx.ui.notify(
-          `Work/Fix Mode 完成但未调用 workflow_status（或 run id 不匹配）。必须调用 workflow_status({ status: "ready_for_review" | "blocked" }) 来触发自动 review。`,
+          `Work/Fix Mode 完成但未调用 workflow_status（或 run id 不匹配）。必须调用 workflow_status({ status: "ready_for_review" | "blocked" }) 来完成工作。`,
           "warning"
         );
         return;
       }
 
+      // ── Blocked path: always → idle + notify ──
       if (state.workStatus === "blocked") {
         state.autoCodeReview = false;
+        state.workBaselineRef = undefined;
+      state.workBaselineUntracked = undefined;
         state.mode = "idle";
         saveState(ctx.cwd, sessionKey, state);
 
@@ -710,13 +713,40 @@ export function registerAgentEnd(
         return;
       }
 
+      // ── Ready for review path ──
       if (state.workStatus === "ready_for_review") {
-        await runCodeReviewSubagent(pi, ctx, getAgentDir);
+        // Determine if auto-review is enabled (three conditions must all be true).
+        const autoReviewEnabled =
+          state.autoCodeReview &&
+          config.codeReview.enabled &&
+          config.codeReview.auto;
+
+        if (autoReviewEnabled) {
+          // Auto-review: launch code review subagent.
+          await runCodeReviewSubagent(pi, ctx, getAgentDir);
+          return;
+        }
+
+        // Auto-review disabled: transition to idle and notify user.
+        // Keep workBaselineRef so manual /review can use session-scoped diff.
+        state.autoCodeReview = false;
+        state.mode = "idle";
+        saveState(ctx.cwd, sessionKey, state);
+
+        ctx.ui.setStatus("lite-sp", undefined);
+        ctx.ui.notify(
+          "工作完成（自动 code review 已关闭）。可手动 /review 或 /commit。",
+          "info"
+        );
+        pi.sendUserMessage(
+          "工作完成（自动 code review 已关闭）。可手动 /review 或 /commit。",
+          { deliverAs: "followUp" }
+        );
         return;
       }
 
       ctx.ui.notify(
-        `Work Mode 的 workflow_status 状态不明确：${state.workStatus}。`,
+        `Work/Fix Mode 的 workflow_status 状态不明确：${state.workStatus}。`,
         "warning"
       );
       return;
@@ -769,7 +799,7 @@ export function registerGoCommand(
 ): void {
   pi.registerCommand("go", {
     description:
-      "手动批准当前计划并交给 Work Mode；如计划评审未通过，需要 /go --force",
+      "手动批准当前计划并交给 Work Mode；如计划评审未通过，需要 /go --force；/go --no-review 关闭自动 code review",
     handler: async (args, ctx) => {
       await ctx.waitForIdle();
       const sessionKey = getSessionKey(ctx.sessionManager);
@@ -777,6 +807,7 @@ export function registerGoCommand(
       const state = loadState(ctx.cwd, sessionKey);
       const config = loadConfig(ctx.cwd, getAgentDir());
       const force = args.includes("--force");
+      const noReview = args.includes("--no-review");
 
       if (!state.planPath) {
         ctx.ui.notify("没有 active plan。请先 /plan 并保存计划。", "error");
@@ -799,7 +830,8 @@ export function registerGoCommand(
         pi,
         ctx,
         getAgentDir,
-        force
+        force,
+        noReview
       );
 
       if (!result.success) {
@@ -808,7 +840,7 @@ export function registerGoCommand(
       }
 
       ctx.ui.notify(
-        `Work Mode started. Work run: ${result.workRunId?.slice(-8)}.`,
+        `Work Mode started. Work run: ${result.workRunId?.slice(-8)}.${noReview ? " 自动 code review 已关闭。" : ""}`,
         "info"
       );
     },
@@ -820,17 +852,22 @@ export function registerWorkCommand(
   getAgentDir: () => string
 ): void {
   pi.registerCommand("work", {
-    description: "跳过计划，直接进入 Work Mode；适合直接实现，完成后自动 code-review",
+    description: "跳过计划，直接进入 Work Mode；/work --no-review 关闭自动 code-review",
     handler: async (args, ctx) => {
       await ctx.waitForIdle();
       const sessionKey = getSessionKey(ctx.sessionManager);
+      const noReview = args.includes("--no-review");
+      // Strip --no-review from args so remaining text becomes work description
+      const workArgs = args.replace(/--no-review\b/g, "").trim();
 
       const state: WorkflowState = {
         ...DEFAULT_STATE,
         mode: "work",
-        autoCodeReview: true,
+        autoCodeReview: !noReview,
         codeReviewLoops: 0,
         workRunId: crypto.randomUUID(),
+        workBaselineRef: createWorkBaseline(ctx.cwd),
+        workBaselineUntracked: captureBaselineUntracked(ctx.cwd),
       };
       saveState(ctx.cwd, sessionKey, state);
 
@@ -843,10 +880,13 @@ export function registerWorkCommand(
       const ok = await applyModeRuntime(pi, ctx, "work", getAgentDir);
       if (!ok) return;
 
-      ctx.ui.notify("已进入 Work Mode。可以直接描述任务。", "info");
+      ctx.ui.notify(
+        `已进入 Work Mode。可以直接描述任务。${noReview ? " 自动 code review 已关闭。" : ""}`,
+        "info"
+      );
 
-      if (args.trim()) {
-        pi.sendUserMessage(args.trim());
+      if (workArgs) {
+        pi.sendUserMessage(workArgs);
       }
     },
   });
@@ -886,6 +926,9 @@ export function registerCommitCommand(
       };
       // Clear any stale pending handoff — commit mode does not execute plans.
       clearPendingWorkHandoff(state);
+      // Clear baseline — after commit, the diff context changes.
+      state.workBaselineRef = undefined;
+      state.workBaselineUntracked = undefined;
       saveState(ctx.cwd, sessionKey, state);
 
       const ok = await applyModeRuntime(pi, ctx, "commit", getAgentDir);
@@ -934,6 +977,8 @@ export function registerWfExitCommand(pi: ExtensionAPI): void {
       const state = loadState(ctx.cwd, sessionKey);
       state.mode = "idle";
       state.autoCodeReview = false;
+      state.workBaselineRef = undefined;
+      state.workBaselineUntracked = undefined;
       clearPendingWorkHandoff(state);
       saveState(ctx.cwd, sessionKey, state);
 

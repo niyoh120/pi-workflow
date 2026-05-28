@@ -211,7 +211,7 @@ console.log("9. isPendingWorkHandoffValid");
 assertContains(workHandoffSrc, "isPendingWorkHandoffValid", "validation function exists");
 assertContains(workHandoffSrc, "planPath !== state.planPath", "validates planPath against current state");
 assertContains(workHandoffSrc, "planRunId !== state.planRunId", "validates planRunId against current state");
-assertContains(workHandoffSrc, "eventPrompt !== pending.expectedPrompt", "validates eventPrompt match");
+assertContains(workHandoffSrc, "extractedMarker !== pending.marker", "validates marker match via extractHandoffMarker");
 assertContains(workHandoffSrc, "expiresAt", "validates expiry");
 
 // ── 10. workflow_plan approve → queues handoff, not just planApproved ──────
