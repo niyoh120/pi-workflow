@@ -166,7 +166,8 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
         }
 
         // Distinguish first save (new plan) vs revision save (update existing plan)
-        if (state.planPath) {
+        const isRevision = !!state.planPath;
+        if (isRevision) {
           // Revision: update existing plan file in-place, do NOT reset loops
           updatePlan(ctx.cwd, state, params.markdown);
           state.planTitle = params.title ?? state.planTitle ?? "Active Plan";
@@ -215,7 +216,9 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
           content: [
             {
               type: "text",
-              text: `Plan saved to ${state.planPath}. Plan review status: ${state.planReviewStatus}.`,
+              text: isRevision
+                ? `Plan updated in-place at ${state.planPath}. Review loop: ${state.planReviewLoops}/${config.planReview.maxLoops}. Plan review status: ${state.planReviewStatus}. 📝 修订计划必须通过 workflow_plan save 传入完整 markdown，不要创建新文件。`
+                : `Plan created at ${state.planPath}. Plan review status: ${state.planReviewStatus}.`,
             },
           ],
           details: { state },

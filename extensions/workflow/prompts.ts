@@ -39,6 +39,7 @@ export const PLAN_PROMPT = `
 权限：
 - 可以读取文件、搜索代码、联网搜索、查询文档、使用 MCP / web / package 查询等辅助工具。
 - 禁止修改业务代码和项目文件。
+- 🚫 禁止使用 write/edit 直接创建或修改 .pi/workflow/plan/ 下的文件。计划文件只能通过 workflow_plan(action='save', markdown='完整计划内容') 更新。修订计划时必须将完整修订后的计划文本作为 markdown 参数传入，不要创建新文件。
 - 允许在系统临时目录下写入临时 scratch 脚本，用于 API/SDK 探测、测试最小示例以辅助方案确定。只允许写绝对路径到 ${tmpdir()}/pi-workflow-plan-scratch/ 下的普通文件。
   约束：不能写项目文件、不能写配置、不能安装依赖、不能 git 写操作、不能执行会修改项目文件的 shell 命令。临时脚本只能帮助制定计划，不能替代实现。
 - 允许通过 workflow_plan 保存计划。
@@ -275,6 +276,11 @@ You are running as an isolated subagent with a fresh context — no parent sessi
 
 You ONLY review the plan content provided below. You do NOT have access to workflow_plan or workflow_todo tools.
 
+## Mandatory Requirements
+
+1. You MUST begin your output with the identity marker \`[pi-workflow-plan-review/v1]\` on the first line, before any review content. This is required for validation — your response will be rejected without it.
+2. Final line MUST be exactly: \`PLAN_REVIEW_STATUS: PASS\` or \`PLAN_REVIEW_STATUS: FAIL\`
+
 ## Your Job
 
 Review the plan independently. Do NOT trust any summary or claim in the task — read the actual plan content.
@@ -310,8 +316,6 @@ Review the plan independently. Do NOT trust any summary or claim in the task —
 ### Assessment
 [1-2 sentence technical assessment]
 
-You MUST include the marker [pi-workflow-plan-review/v1] in your Assessment section for identity verification.
-
 Final line MUST be exactly:
 PLAN_REVIEW_STATUS: PASS
 or:
@@ -331,6 +335,11 @@ export const ISOLATED_CODE_REVIEW_PROMPT = `
 # Code Review Subagent
 
 You are running as an isolated subagent with a fresh context — no parent session history.
+
+## Mandatory Requirements
+
+1. You MUST begin your output with the identity marker \`[pi-workflow-code-review/v1]\` on the first line, before any review content. This is required for validation — your response will be rejected without it.
+2. Final line MUST be exactly: \`REVIEW_STATUS: PASS\` or \`REVIEW_STATUS: FAIL\`
 
 You ONLY review the current working tree changes provided below. You do NOT have access to workflow_plan or workflow_todo tools.
 
@@ -399,8 +408,6 @@ For each issue:
 
 ### Assessment
 [1-2 sentence technical verdict]
-
-You MUST include the marker [pi-workflow-code-review/v1] in your Assessment section for identity verification.
 
 Final line MUST be exactly:
 REVIEW_STATUS: PASS

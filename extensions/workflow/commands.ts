@@ -139,7 +139,7 @@ async function runPlanReviewSubagent(
     }
 
     pi.sendUserMessage(
-      `计划评审未通过。请根据以下意见修订计划，并重新调用 workflow_plan(action="save") 保存。\n\n评审意见：\n${truncate(result.text)}`,
+      `计划评审未通过。请根据以下意见修订计划，并将完整修订后的计划作为 markdown 参数传入 workflow_plan(action="save", markdown="..."). 🚫 不要用 write/edit 创建新的计划文件，必须通过 workflow_plan save 原地更新。\n\n评审意见：\n${truncate(result.text)}`,
       { deliverAs: "followUp" }
     );
   } catch (err: any) {
@@ -586,6 +586,27 @@ export function registerToolCallGuard(
 
     // Use per-turn effective guard mode; fall back to state mode.
     const effectiveMode = getCurrentTurnGuardMode(sessionKey) ?? state.mode;
+
+    // ── Plan directory protection: block write/edit to .pi/workflow/plan/ in all modes ──
+    // Plan files must only be created/updated via workflow_plan(action='save', markdown='...').
+    // This guard prevents models from bypassing workflow_plan save by creating new plan files,
+    // which would break planReview's ability to read the current plan.
+    if (event.toolName === "write" || event.toolName === "edit") {
+      const targetPath: string | undefined =
+        (event.input as any)?.path ?? (event.input as any)?.filePath;
+      if (targetPath) {
+        const resolved = path.resolve(ctx.cwd, targetPath);
+        const planDirAbs = path.resolve(ctx.cwd, ".pi", "workflow", "plan");
+        if (resolved.startsWith(planDirAbs + path.sep) || resolved === planDirAbs) {
+          return {
+            block: true,
+            reason:
+              "Plan files (.pi/workflow/plan/) must be updated via workflow_plan(action='save', markdown='完整计划内容'), " +
+              "not with write/edit. 修订计划时将完整修订后的计划作为 markdown 参数传入 workflow_plan save。",
+          };
+        }
+      }
+    }
 
     // Read-only modes: block local file mutations.
     if (isReadonlyMode(effectiveMode)) {

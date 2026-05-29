@@ -406,25 +406,36 @@ export function createSubagentsClient(pi: ExtensionAPI): SubagentsClient {
     // ── Identity marker validation for custom review agents (successful completions only) ──
     const expectedMarker = IDENTITY_MARKERS[opts.role];
     if (expectedMarker && !text.includes(expectedMarker)) {
-      // Agent output missing pi-workflow identity marker — reject the result
-      const subagentResult: SubagentResult = {
-        role: opts.role,
-        model: event.type ? `${agentType}(${event.type})` : agentType,
-        text: `Review result validation failed. The subagent output did not contain the ` +
-          `required pi-workflow identity marker "${expectedMarker}". ` +
-          `This may mean the review agent was not correctly loaded or the review prompt was not applied. ` +
-          `Try running /wf-install-subagents then /reload, and verify the review agent file includes the managed marker (<!-- managed-by: pi-workflow -->). ` +
-          `Refusing to accept an untrusted or incorrectly prompted review result.`,
-        stopReason: "identity_marker_missing",
-        exitCode: 2,
-        usage: { input: 0, output: 0, turns: 0 },
-        stderr: `Identity marker "${expectedMarker}" not found in agent output.`,
-        statusMarker: null,
-        agentId,
-        durationMs: event.durationMs,
-        eventStatus: event.status,
-      };
-      return subagentResult;
+      // Graceful degradation: if the output contains a valid status marker
+      // (PLAN_REVIEW_STATUS or REVIEW_STATUS), the review was substantive.
+      // Accept the result with a warning instead of hard-rejecting.
+      const hasValidStatusMarker = extractStatusMarker(text) !== null;
+      if (hasValidStatusMarker) {
+        // Identity marker missing but review content is valid — accept with warning.
+        // Let the normal success path proceed. Log for diagnostics.
+        console.warn(`[pi-workflow] Identity marker "${expectedMarker}" missing in subagent output, but valid review content detected (status marker present). Accepting result with warning.`);
+      } else {
+        // No identity marker AND no valid status marker — hard reject.
+        // The output is not a substantive review.
+        const subagentResult: SubagentResult = {
+          role: opts.role,
+          model: event.type ? `${agentType}(${event.type})` : agentType,
+          text: `Review result validation failed. The subagent output did not contain the ` +
+            `required pi-workflow identity marker "${expectedMarker}" and no valid review status was found. ` +
+            `This may mean the review agent was not correctly loaded or the review prompt was not applied. ` +
+            `Try running /wf-install-subagents then /reload, and verify the review agent file includes the managed marker (<!-- managed-by: pi-workflow -->). ` +
+            `Refusing to accept an untrusted or incorrectly prompted review result.`,
+          stopReason: "identity_marker_missing",
+          exitCode: 2,
+          usage: { input: 0, output: 0, turns: 0 },
+          stderr: `Identity marker "${expectedMarker}" not found in agent output and no valid status marker present.`,
+          statusMarker: null,
+          agentId,
+          durationMs: event.durationMs,
+          eventStatus: event.status,
+        };
+        return subagentResult;
+      }
     }
 
     const subagentResult: SubagentResult = {
