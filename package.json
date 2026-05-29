@@ -1,9 +1,21 @@
 {
   "name": "pi-workflow",
   "version": "0.1.0",
+  "type": "module",
   "description": "Lightweight software development workflow extension for pi-coding-agent: plan, review, implementation, code review, and commit orchestration",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
-    "extensions": ["./extensions/workflow/index.ts"]
+    "extensions": [
+      "./extensions/workflow/index.ts"
+    ]
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.77.0",
+    "@earendil-works/pi-coding-agent": "^0.77.0",
+    "@earendil-works/pi-tui": "^0.77.0",
+    "@sinclair/typebox": "^0.34.49",
+    "typescript": "^6.0.3"
   }
 }

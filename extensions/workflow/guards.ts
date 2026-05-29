@@ -7,6 +7,16 @@ import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 const PLAN_SCRATCH_ROOT = path.join(tmpdir(), "pi-workflow-plan-scratch");
 
 /**
+ * Check whether a target path is inside the .pi/workflow/ data directory.
+ * Used to block direct read/write/edit access — agents must use workflow tools instead.
+ */
+export function isWorkflowDataPath(targetPath: string, cwd: string): boolean {
+  const resolved = path.resolve(cwd, targetPath);
+  const workflowRoot = path.resolve(cwd, ".pi", "workflow");
+  return resolved === workflowRoot || resolved.startsWith(workflowRoot + path.sep);
+}
+
+/**
  * Check whether a target path is a safe scratch path for Plan Mode write/edit.
  * Requires: absolute path, under PLAN_SCRATCH_ROOT, no symlinks in path,
  * no path that canonicalizes inside cwd, existing targets must be regular files.
@@ -90,8 +100,6 @@ export function isAllowedPlanScratchPath(
   }
 
   // 5. Walk path segments from scratch root to target.
-  //    Check each existing segment: must not be a symlink, must not resolve inside cwd.
-  //    Final existing target must be a regular file; intermediate paths must be directories.
   const segments = rel.split(path.sep).filter(Boolean);
   if (segments.length === 0) {
     return `Target path must be a file under ${scratchRoot}, not the root itself.`;
@@ -133,15 +141,14 @@ export function isAllowedPlanScratchPath(
         return `Path ${accumulated} resolves to project directory — rejected.`;
       }
     }
-    // Non-existing intermediate or final path: fine; existing ancestors already verified.
   }
 
   return null; // Allowed.
 }
 
-/** Returns true if the given mode does not allow local file mutations. */
+/** Returns true if the given mode is read-only (no local file mutations). */
 export function isReadonlyMode(mode: Mode): boolean {
-  return mode === "plan" || mode === "planReview" || mode === "workPending" || mode === "review";
+  return mode === "plan";
 }
 
 /** Check whether a shell command would modify local files. */
@@ -173,7 +180,6 @@ export function isLocalFileMutatingShell(command: string): boolean {
     /\bblack\b/,
     /\bgofmt\b.*\s-w\b/,
     /\brustfmt\b/,
-
     /^npm\s+(install|i|add|update|dedupe|link|uninstall|remove|rm)\b/,
     /^pnpm\s+(install|add|update|link|remove|rm)\b/,
     /^yarn\s+(install|add|upgrade|link|remove)\b/,
@@ -190,4 +196,3 @@ export function isLocalFileMutatingShell(command: string): boolean {
 
   return mutatingPatterns.some((re) => re.test(cmd));
 }
-

@@ -4,195 +4,37 @@ import fs from "node:fs";
 import { getSessionKey, loadState, saveState, readPlan } from "./state.js";
 import { loadConfig } from "./config.js";
 import { COMMON_PROMPT, promptForMode, promptForSubagentRole } from "./prompts.js";
-import { isReadonlyMode, isLocalFileMutatingShell, isAllowedPlanScratchPath } from "./guards.js";
+import { isWorkflowDataPath, isReadonlyMode, isLocalFileMutatingShell, isAllowedPlanScratchPath } from "./guards.js";
 import { currentStatusText, todoText } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
-import { planDir, sessionStatePath } from "./paths.js";
+import { planDir } from "./paths.js";
 import type { SubagentsClient } from "./subagent.js";
 import { formatSubagentFailure } from "./subagent.js";
 import {
   activateWorkflowToolsIfAllowed,
   applyModeRuntime,
+  setCurrentTurnGuardMode,
   getCurrentTurnGuardMode,
   clearCurrentTurnGuardMode,
-  isInvalidHandoffTurn,
-  clearInvalidHandoffTurn,
 } from "./mode.js";
-import {
-  handleWorkPendingBeforeAgentStart,
-  startApprovedWorkFromCommand,
-  clearPendingWorkHandoff,
-} from "./work-handoff.js";
 import { execSync } from "node:child_process";
 import path from "node:path";
 import { syncReviewAgentsToGlobal, getGlobalAgentsDir } from "./agents.js";
-import { createWorkBaseline, collectBaselineDiff, collectUntrackedFiles, formatUntrackedContext, captureBaselineUntracked } from "./baseline.js";
+import { hasInitialCommit, gitRepoPreflight as gitRepoPreflightFn, createWorkBaseline, collectBaselineDiff, collectUntrackedFiles, formatUntrackedContext, captureBaselineUntracked, collectNoCommitReviewContext, clearWorkBaseline } from "./baseline.js";
 
-/** Store active subagent client reference set by index.ts. */
+// ── Subagent client lazy init ────────────────────────────────────────────────
+
 let _subagentsClient: SubagentsClient;
 export function setSubagentsClient(c: SubagentsClient): void {
   _subagentsClient = c;
 }
-
-/** Run isolated plan-review via pi-subagents. */
-async function runPlanReviewSubagent(
-  pi: ExtensionAPI,
-  ctx: any,
-  getAgentDir: () => string
-): Promise<void> {
-  const sessionKey = getSessionKey(ctx.sessionManager);
-  const state = loadState(ctx.cwd, sessionKey);
-  const config = loadConfig(ctx.cwd, getAgentDir());
-
-  // Read plan content for the child
-  const planContent = state.planPath ? readPlan(ctx.cwd, state.planPath) : "";
-  const planPathText = state.planPath ?? "current plan";
-
-  // Build context for the child: plan file + todo summary
-  const context = [
-    `Plan file: ${planPathText}`,
-    ``,
-    `## Plan Content`,
-    planContent || "(empty plan)",
-    ``,
-    `## Todo Status`,
-    todoText(state),
-  ].join("\n");
-
-  const systemPrompt = promptForSubagentRole("planReview");
-
-  ctx.ui.notify("正在运行 isolated plan review 子代理...", "info");
-
-  // Truncate helper for followUp messages (declared before try so catch can access it)
-  const truncate = (text: string, maxLen: number = 3000): string =>
-    text.length > maxLen ? text.slice(0, maxLen) + "...\n(truncated, full text exceeds limit)" : text;
-
-  try {
-    const result = await _subagentsClient.run({
-      role: "planReview",
-      task: `Review the plan below thoroughly. Check coverage, scope creep, dependencies, compatibility, risks, and todo granularity.\n\n${context}`,
-      systemPrompt,
-      subagentConfig: config.subagent,
-      modelSpec: config.models.planReview,
-      cwd: ctx.cwd,
-      agentDir: getAgentDir(),
-    });
-
-    if (result.exitCode !== 0) {
-      const diag = formatSubagentFailure(result);
-      ctx.ui.notify(
-        `Plan review subagent failed. ${diag}`,
-        "error"
-      );
-      state.planReviewStatus = "fail";
-      state.planReviewLoops += 1;
-      // Do NOT write review notes to state or disk — only delivered via followUp
-      state.mode = "plan";
-      saveState(ctx.cwd, sessionKey, state);
-      await applyModeRuntime(pi, ctx, "plan", getAgentDir);
-      pi.sendUserMessage(
-        `计划评审子代理执行失败。\n\n诊断信息：\n${diag}\n\n子代理输出（截断）：\n${truncate(result.text ?? "")}`,
-        { deliverAs: "followUp" }
-      );
-      return;
-    }
-
-    // Do NOT write review notes to state or disk — only delivered via followUp
-    // (state.planReviewNotes and writePlanReview removed to prevent model
-    //  from reading review results before the followUp arrives)
-
-    if (result.statusMarker === "PASS") {
-      state.planReviewStatus = "pass";
-      state.mode = "plan";
-      saveState(ctx.cwd, sessionKey, state);
-
-      await applyModeRuntime(pi, ctx, "plan", getAgentDir);
-
-      pi.sendUserMessage(
-        `计划评审已通过。请向用户展示最终计划摘要（包含 plan path: ${planPathText}），并等待用户确认。` +
-        (config.askUserQuestion.enabled
-          ? `如果 ask_user_question 工具可用，建议用结构化选项让用户一键确认（如：执行计划 / 修改计划 / 继续讨论），减少打字摩擦。`
-          : ``) +
-        `用户确认后调用 workflow_plan(action="approve")。` +
-        `\n\n评审通过的详细意见：\n${truncate(result.text)}`,
-        { deliverAs: "followUp" }
-      );
-      return;
-    }
-
-    // FAIL or no status marker → fail
-    state.planReviewStatus = "fail";
-    state.planReviewLoops += 1;
-    state.mode = "plan";
-    saveState(ctx.cwd, sessionKey, state);
-
-    await applyModeRuntime(pi, ctx, "plan", getAgentDir);
-
-    if (state.planReviewLoops >= config.planReview.maxLoops) {
-      pi.sendUserMessage(
-        `计划评审未通过，且已达到最大评审轮数（${config.planReview.maxLoops}）。请向用户展示评审意见并等待用户决定。\n\n评审意见：\n${truncate(result.text)}`,
-        { deliverAs: "followUp" }
-      );
-      return;
-    }
-
-    pi.sendUserMessage(
-      `计划评审未通过。请根据以下意见修订计划，并将完整修订后的计划作为 markdown 参数传入 workflow_plan(action="save", markdown="..."). 🚫 不要用 write/edit 创建新的计划文件，必须通过 workflow_plan save 原地更新。\n\n评审意见：\n${truncate(result.text)}`,
-      { deliverAs: "followUp" }
-    );
-  } catch (err: any) {
-    const errMsg = err?.message ?? String(err);
-    ctx.ui.notify(
-      `Plan review subagent error: ${errMsg}`,
-      "error"
-    );
-    state.planReviewStatus = "fail";
-    state.planReviewLoops += 1;
-    // Do NOT write review notes to state or disk
-    state.mode = "plan";
-    saveState(ctx.cwd, sessionKey, state);
-    await applyModeRuntime(pi, ctx, "plan", getAgentDir);
-    pi.sendUserMessage(
-      `计划评审子代理异常：${truncate(errMsg ?? String(err))}`,
-      { deliverAs: "followUp" }
-    );
-    return;
-  }
+function getSubagentsClient(): SubagentsClient {
+  return _subagentsClient;
 }
 
-/**
- * Check that the working directory is a git repo with a reachable HEAD.
- * Returns true if preflight passes; otherwise prints a warning and returns false.
- */
-function gitRepoPreflight(cwd: string, ctx: any): boolean {
-  try {
-    execSync("git rev-parse --is-inside-work-tree", { cwd, stdio: "pipe" });
-  } catch {
-    ctx.ui.notify(
-      "无法执行 code review：当前目录不是 git 仓库。请先 git init 并创建 baseline commit，或在已有 git 仓库根目录运行 pi。",
-      "error"
-    );
-    return false;
-  }
-
-  try {
-    execSync("git rev-parse --verify HEAD", { cwd, stdio: "pipe" });
-  } catch {
-    ctx.ui.notify(
-      "无法执行 code review：git 仓库中没有 HEAD commit。请先创建 baseline commit（git add -A && git commit）。",
-      "error"
-    );
-    return false;
-  }
-
-  return true;
-}
-
-// ──────────────────────────────────────────────
-// /wf-init helpers
-// ──────────────────────────────────────────────
+// ── /wf-init helpers ─────────────────────────────────────────────────────────
 
 function isGitRepo(cwd: string): boolean {
   try {
@@ -232,242 +74,28 @@ function isProjectEmpty(root: string): boolean {
   return meaningful.length === 0;
 }
 
-/** Run isolated code-review via pi-subagents.
- *  Parent pre-collects git status and diff, passes to child.
- *  When autoFix is true (auto review loop), FAIL triggers fix mode.
- *  When autoFix is false (manual /review), FAIL only notifies.
- *  Returns true if review was performed, false if skipped (no git). */
-async function runCodeReviewSubagent(
-  pi: ExtensionAPI,
-  ctx: any,
-  getAgentDir: () => string,
-  autoFix = true
-): Promise<boolean> {
-  const sessionKey = getSessionKey(ctx.sessionManager);
-  const state = loadState(ctx.cwd, sessionKey);
-  const config = loadConfig(ctx.cwd, getAgentDir());
+// ── Session key helper ───────────────────────────────────────────────────────
 
-  if (!gitRepoPreflight(ctx.cwd, ctx)) {
-    if (autoFix) {
-      state.autoCodeReview = false;
-      state.workBaselineRef = undefined;
-      state.workBaselineUntracked = undefined;
-      saveState(ctx.cwd, sessionKey, state);
-    }
-    return false;
-  }
-
-  // Pre-collect git status and baseline diff
-  let statusText = "";
-
-  try {
-    statusText = execSync("git status --short", {
-      cwd: ctx.cwd,
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024,
-    }).toString();
-  } catch {
-    statusText = "(could not run git status)";
-  }
-
-  // Use baseline diff if workBaselineRef is available (session-scoped incremental diff).
-  // Fallback to plain git diff if baseline is missing/invalid.
-  const baselineDiff = collectBaselineDiff(ctx.cwd, state.workBaselineRef);
-  const diffStatText = baselineDiff.diffStat;
-  const diffText = baselineDiff.diff;
-
-  // Collect untracked file contents for review context (scoped to session-new files only).
-  const untracked = collectUntrackedFiles(ctx.cwd, state.workBaselineUntracked);
-  const untrackedContext = formatUntrackedContext(untracked.contents);
-
-  // Build context: git info + plan + todo summary
-  const planContent = state.planPath ? readPlan(ctx.cwd, state.planPath) : "";
-  const planContext = state.planPath
-    ? [`Plan file: ${state.planPath}`, planContent].join("\n\n")
-    : "(no plan)";
-
-  const context = [
-    `## Git Status`,
-    statusText || "(no changes)",
-    ``,
-    `## Git Diff Stat`,
-    diffStatText || "(empty)",
-    ``,
-    `## Git Diff (baseline: ${state.workBaselineRef ?? "HEAD"})`,
-    diffText || "(empty)",
-    ``,
-    `## Untracked Files (new in this session)`,
-    untrackedContext,
-    ``,
-    `## Plan / Todo Context`,
-    planContext,
-    ``,
-    `## Todo Status`,
-    todoText(state),
-  ];
-
-  // ── Review dialogue: include prior review notes + fix/work response ──
-  if (state.lastReviewNotes && state.lastReviewStatus === "FAIL") {
-    context.push(
-      ``,
-      `## Previous Code Review`,
-      `Status: ${state.lastReviewStatus}`,
-      ``,
-      `> The review below already ran. Issues that were rebutted with technical reasoning`,
-      `> should NOT be repeated unless you can refute the rebuttal. Only flag genuinely`,
-      `> unresolved or new issues.`,
-      ``,
-      state.lastReviewNotes.slice(-20000),
-    );
-
-    // Include Work/Fix response to the last review if available
-    const fixResponse = state.workStatusSummary || state.workStatusError;
-    if (fixResponse) {
-      context.push(
-        ``,
-        `## Work / Fix Response to Previous Review`,
-        state.workStatusSummary ? `Summary: ${state.workStatusSummary}` : "",
-        state.workStatusError ? `Error: ${state.workStatusError}` : "",
-        state.workStatusTests ? `Tests: ${state.workStatusTests}` : "",
-        ``,
-        `If the Work/Fix agent argued that an item is invalid, out of scope, or cannot be fixed:`,
-        `do NOT repeat that item unless you have new concrete evidence to refute the rebuttal.`,
-      );
-    }
-  }
-
-  const fullContext = context.join("\n");
-
-  const systemPrompt = promptForSubagentRole("review");
-
-  ctx.ui.notify("正在运行 isolated code review 子代理...", "info");
-
-  try {
-    const result = await _subagentsClient.run({
-      role: "review",
-      task: `Review the current working tree changes (git diff) provided below. Check the diff against the plan and todo context.\n\n${fullContext}`,
-      systemPrompt,
-      subagentConfig: config.subagent,
-      modelSpec: config.models.review,
-      cwd: ctx.cwd,
-      agentDir: getAgentDir(),
-    });
-
-    if (result.exitCode !== 0) {
-      const diag = formatSubagentFailure(result);
-      ctx.ui.notify(
-        `Code review subagent failed. ${diag}`,
-        "error"
-      );
-      if (autoFix) {
-        state.autoCodeReview = false;
-        saveState(ctx.cwd, sessionKey, state);
-      }
-      return false;
-    }
-
-    if (result.statusMarker === "PASS") {
-      state.lastReviewNotes = undefined;
-      state.lastReviewStatus = undefined;
-      state.workBaselineRef = undefined;
-      state.workBaselineUntracked = undefined;
-      state.mode = "idle";
-      state.autoCodeReview = false;
-      saveState(ctx.cwd, sessionKey, state);
-
-      ctx.ui.setStatus("lite-sp", undefined);
-      ctx.ui.notify(
-        `代码评审通过。现在你可以手动跑测试，确认后 /commit。`,
-        "info"
-      );
-      return true;
-    }
-
-    // FAIL or no marker → fail
-
-    if (!autoFix) {
-      // Manual review: just display result, don't increment auto-fix loop counter
-      state.mode = "idle";
-      state.autoCodeReview = false;
-      state.workBaselineRef = undefined;
-      state.workBaselineUntracked = undefined;
-      saveState(ctx.cwd, sessionKey, state);
-      ctx.ui.setStatus("lite-sp", undefined);
-      const note = result.text ? `\n\n评审意见：\n${result.text.slice(-2000)}` : "";
-      ctx.ui.notify(`代码评审未通过。${note}`, "warning");
-      return true;
-    }
-
-    state.codeReviewLoops += 1;
-
-    // Store review result for dialogue context in the next review loop.
-    state.lastReviewNotes = result.text;
-    state.lastReviewStatus = "FAIL";
-
-    if (state.codeReviewLoops >= config.codeReview.maxLoops) {
-      state.mode = "idle";
-      state.autoCodeReview = false;
-      // Keep workBaselineRef/workBaselineUntracked — manual /review may still need them.
-      // Clear them only on true terminal events (PASS, blocked, /wf-reset, /plan, commit).
-      saveState(ctx.cwd, sessionKey, state);
-
-      ctx.ui.setStatus("lite-sp", undefined);
-      ctx.ui.notify(
-        `达到最大 code review 修复轮数（${config.codeReview.maxLoops}），请手动介入。\n\n评审意见：\n${result.text.slice(-2000)}`,
-        "warning"
-      );
-      return true;
-    }
-
-    state.mode = "fix";
-    // Keep same workRunId for fix mode, but clear stale work status
-    // so the Fix agent must call workflow_status itself.
-    // Keep workBaselineRef — fix review uses same baseline as original work.
-    state.workStatus = undefined;
-    state.workStatusRunId = undefined;
-    state.workStatusSummary = undefined;
-    state.workStatusTests = undefined;
-    state.workStatusError = undefined;
-    state.workStatusUpdatedAt = undefined;
-    saveState(ctx.cwd, sessionKey, state);
-
-    await applyModeRuntime(pi, ctx, "fix", getAgentDir);
-
-    if (ctx.isIdle?.()) {
-      pi.sendUserMessage(
-        `请修复上一轮 reviewer 指出的 Critical / Important 问题。修复后调用 workflow_status 工具。\n\n评审意见：\n${result.text.slice(-4000)}`
-      );
-    } else {
-      pi.sendUserMessage(
-        `请修复上一轮 reviewer 指出的 Critical / Important 问题。修复后调用 workflow_status 工具。\n\n评审意见：\n${result.text.slice(-4000)}`,
-        { deliverAs: "followUp" }
-      );
-    }
-    return true;
-  } catch (err: any) {
-    ctx.ui.notify(
-      `Code review subagent error: ${err.message ?? String(err)}`,
-      "error"
-    );
-    if (autoFix) {
-      state.autoCodeReview = false;
-      saveState(ctx.cwd, sessionKey, state);
-    }
-    return false;
-  }
+/**
+ * Extract session key from ctx, bridging the ReadonlySessionManager → SessionKeySource gap.
+ * ReadonlySessionManager.getSessionFile returns string | undefined,
+ * but SessionKeySource expects string | null.
+ */
+function ctxSessionKey(ctx: any): string {
+  return getSessionKey({
+    getSessionId: () => ctx.sessionManager?.getSessionId?.(),
+    getSessionFile: () => ctx.sessionManager?.getSessionFile?.() ?? null,
+  });
 }
 
-// ──────────────────────────────────────────────
-// Event handlers registered by the extension
-// ──────────────────────────────────────────────
+// ── Event handlers ────────────────────────────────────────────────────────────
 
 export function registerBeforeAgentStart(
   pi: ExtensionAPI,
   getAgentDir: () => string
 ): void {
   pi.on("before_agent_start", async (event, ctx) => {
-    const sessionKey = getSessionKey(ctx.sessionManager);
-    const config = loadConfig(ctx.cwd, getAgentDir());
+    const sessionKey = ctxSessionKey(ctx);
 
     activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir);
 
@@ -477,67 +105,31 @@ export function registerBeforeAgentStart(
       overlay.hideDoneFromLastTurn();
     }
 
-    // ── Handoff detection / finalize ──
-    const handoffResult = await handleWorkPendingBeforeAgentStart(
-      pi,
-      ctx,
-      getAgentDir,
-      event
-    );
+    // Load current state
+    const state = loadState(ctx.cwd, sessionKey);
 
-    // Refresh state after handoff may have mutated it.
-    const currentState = handoffResult.state;
-
-    // ── Crash recovery: stale reviewing state ──
-    // If planReviewStatus is stuck at "reviewing" for more than 5 minutes,
-    // it means the subagent process crashed without writing the final result.
-    // Reset to "pending" so the next agent_end will re-trigger the review.
-    {
-      const spath = sessionStatePath(ctx.cwd, sessionKey);
-      if (currentState.planReviewStatus === "reviewing" && fs.existsSync(spath)) {
-        const stat = fs.statSync(spath);
-        const ageMs = Date.now() - stat.mtimeMs;
-        const REVIEWING_STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
-        if (ageMs > REVIEWING_STALE_THRESHOLD_MS) {
-          currentState.planReviewStatus = "pending";
-          saveState(ctx.cwd, sessionKey, currentState);
-          ctx.ui.notify(
-            `Recovered stale reviewing state (stuck for ${Math.round(ageMs / 1000)}s). Reset to pending for re-review.`,
-            "warn"
-          );
-        }
-      }
+    // Set per-turn guard mode from persisted state
+    if (state.mode !== "idle") {
+      setCurrentTurnGuardMode(sessionKey, state.mode);
     }
 
-    // Overlay setup.
+    // Overlay setup
     if (overlay) {
-      if (currentState.mode === "idle") {
+      if (state.mode === "idle") {
         overlay.dispose();
         return;
       }
-      overlay.update(currentState.todos);
+      overlay.update(state.todos);
     }
 
-    // If handoff returned a safety system prompt, inject it and stop.
-    if (handoffResult.systemPrompt) {
-      return {
-        systemPrompt:
-          event.systemPrompt +
-          "\n\n" +
-          COMMON_PROMPT +
-          "\n\n" +
-          handoffResult.systemPrompt +
-          "\n\n" +
-          `# Current Workflow State\n` +
-          currentStatusText(config, currentState) +
-          "\n",
-      };
-    }
+    if (state.mode === "idle") return;
 
-    if (currentState.mode === "idle") return;
+    // Apply mode runtime (model/tools/status) for non-idle modes
+    await applyModeRuntime(pi, ctx, state.mode, getAgentDir);
 
-    // Normal mode prompt.
-    const modePrompt = promptForMode(currentState.mode);
+    // Inject system prompt
+    const modePrompt = promptForMode(state.mode);
+    if (!modePrompt) return;
 
     return {
       systemPrompt:
@@ -548,7 +140,7 @@ export function registerBeforeAgentStart(
         modePrompt +
         "\n\n" +
         `# Current Workflow State\n` +
-        currentStatusText(config, currentState) +
+        currentStatusText(state) +
         "\n",
     };
   });
@@ -559,28 +151,15 @@ export function registerToolCallGuard(
   getAgentDir: () => string
 ): void {
   pi.on("tool_call", async (event, ctx) => {
-    const sessionKey = getSessionKey(ctx.sessionManager);
+    const sessionKey = ctxSessionKey(ctx);
     const state = loadState(ctx.cwd, sessionKey);
 
     // Allow workflow's own tools through.
     if (
       event.toolName === "workflow_plan" ||
       event.toolName === "workflow_todo" ||
-      event.toolName === "workflow_status"
+      event.toolName === "workflow_subagent"
     ) {
-      // Block approve in invalid handoff turns.
-      if (
-        event.toolName === "workflow_plan" &&
-        isInvalidHandoffTurn(sessionKey)
-      ) {
-        const params = (event.input as any) ?? {};
-        if (params.action === "approve") {
-          return {
-            block: true,
-            reason: "Handoff 已失效，在当前 turn 中不能再次批准计划。请检查 /wf-status 状态，或 /wf-reset 重新开始。",
-          };
-        }
-      }
       return;
     }
 
@@ -588,13 +167,21 @@ export function registerToolCallGuard(
     const effectiveMode = getCurrentTurnGuardMode(sessionKey) ?? state.mode;
 
     // ── Plan directory protection: block write/edit to .pi/workflow/plan/ in all modes ──
-    // Plan files must only be created/updated via workflow_plan(action='save', markdown='...').
-    // This guard prevents models from bypassing workflow_plan save by creating new plan files,
-    // which would break planReview's ability to read the current plan.
     if (event.toolName === "write" || event.toolName === "edit") {
       const targetPath: string | undefined =
         (event.input as any)?.path ?? (event.input as any)?.filePath;
+
       if (targetPath) {
+        // Block writes to .pi/workflow/ data directory
+        if (isWorkflowDataPath(targetPath, ctx.cwd)) {
+          return {
+            block: true,
+            reason:
+              "Workflow data files (.pi/workflow/) must be operated via workflow tools, not with write/edit.",
+          };
+        }
+
+        // Block writes to plan directory specifically
         const resolved = path.resolve(ctx.cwd, targetPath);
         const planDirAbs = path.resolve(ctx.cwd, ".pi", "workflow", "plan");
         if (resolved.startsWith(planDirAbs + path.sep) || resolved === planDirAbs) {
@@ -602,7 +189,7 @@ export function registerToolCallGuard(
             block: true,
             reason:
               "Plan files (.pi/workflow/plan/) must be updated via workflow_plan(action='save', markdown='完整计划内容'), " +
-              "not with write/edit. 修订计划时将完整修订后的计划作为 markdown 参数传入 workflow_plan save。",
+              "not with write/edit.",
           };
         }
       }
@@ -610,6 +197,19 @@ export function registerToolCallGuard(
 
     // Read-only modes: block local file mutations.
     if (isReadonlyMode(effectiveMode)) {
+      if (event.toolName === "read") {
+        const filePath: string | undefined =
+          (event.input as any)?.path ?? (event.input as any)?.filePath;
+
+        if (filePath && isWorkflowDataPath(filePath, ctx.cwd)) {
+          return {
+            block: true,
+            reason: "Workflow data files (.pi/workflow/) must be read via workflow tools, not directly.",
+          };
+        }
+        return;
+      }
+
       if (event.toolName === "write" || event.toolName === "edit") {
         if (effectiveMode === "plan") {
           const targetPath: string | undefined =
@@ -647,9 +247,7 @@ export function registerToolCallGuard(
       return;
     }
 
-    // Commit mode: prevent direct code file edits. Other tools (bash, RTK git
-    // wrappers, etc.) are allowed — git command restrictions are guided by the
-    // mode prompt (no push, no code edits, no formatting).
+    // Commit mode: prevent direct code file edits.
     if (state.mode === "commit") {
       if (event.toolName === "write" || event.toolName === "edit") {
         return {
@@ -668,116 +266,21 @@ export function registerAgentEnd(
   getAgentDir: () => string
 ): void {
   pi.on("agent_end", async (event, ctx) => {
-    const sessionKey = getSessionKey(ctx.sessionManager);
+    const sessionKey = ctxSessionKey(ctx);
     const state = loadState(ctx.cwd, sessionKey);
-    const config = loadConfig(ctx.cwd, getAgentDir());
-
-    if (state.mode === "plan") {
-      if (
-        config.planReview.enabled &&
-        state.planPath &&
-        state.planReviewStatus === "pending" &&
-        state.planReviewLoops < config.planReview.maxLoops
-      ) {
-        // Set reviewing status before launching subagent to prevent re-triggering
-        state.planReviewStatus = "reviewing";
-        saveState(ctx.cwd, sessionKey, state);
-        await runPlanReviewSubagent(pi, ctx, getAgentDir);
-      }
-      // NOTE: planApproved has been removed. Handoff uses workPending + before_agent_start finalize.
-    }
 
     // Clean up per-turn in-memory state.
     clearCurrentTurnGuardMode(sessionKey);
-    clearInvalidHandoffTurn(sessionKey);
 
-    // planReview mode: no longer used (inline fallback removed).
-    // All plan reviews go through isolated subagent.
-
-    // review mode with autoCodeReview: no longer used (inline fallback removed).
-    // All code reviews go through isolated subagent.
-
-    // ── Work / Fix mode: completion and review ──────────────────────
-    if (state.mode === "work" || state.mode === "fix") {
-      // Completion: always process workflow_status regardless of auto-review setting.
-      // Only act on a workflow_status that matches the current workRunId.
-      if (!state.workRunId) {
-        ctx.ui.notify(
-          "Work/Fix Mode 没有设置 workRunId，无法处理完成状态。",
-          "warning"
-        );
-        return;
-      }
-
-      if (!state.workStatus || state.workStatusRunId !== state.workRunId) {
-        ctx.ui.notify(
-          `Work/Fix Mode 完成但未调用 workflow_status（或 run id 不匹配）。必须调用 workflow_status({ status: "ready_for_review" | "blocked" }) 来完成工作。`,
-          "warning"
-        );
-        return;
-      }
-
-      // ── Blocked path: always → idle + notify ──
-      if (state.workStatus === "blocked") {
-        state.autoCodeReview = false;
-        state.workBaselineRef = undefined;
-      state.workBaselineUntracked = undefined;
-        state.mode = "idle";
-        saveState(ctx.cwd, sessionKey, state);
-
-        const blockedMsg = `Work/Fix Mode blocked: ${state.workStatusError ?? "(no details)"}。已停止自动 review，等待用户决策。`;
-        ctx.ui.notify(blockedMsg, "warning");
-        ctx.ui.setStatus("lite-sp", undefined);
-
-        // Also deliver as a chat message for visibility.
-        pi.sendUserMessage(blockedMsg, { deliverAs: "followUp" });
-        return;
-      }
-
-      // ── Ready for review path ──
-      if (state.workStatus === "ready_for_review") {
-        // Determine if auto-review is enabled (three conditions must all be true).
-        const autoReviewEnabled =
-          state.autoCodeReview &&
-          config.codeReview.enabled &&
-          config.codeReview.auto;
-
-        if (autoReviewEnabled) {
-          // Auto-review: launch code review subagent.
-          await runCodeReviewSubagent(pi, ctx, getAgentDir);
-          return;
-        }
-
-        // Auto-review disabled: transition to idle and notify user.
-        // Keep workBaselineRef so manual /review can use session-scoped diff.
-        state.autoCodeReview = false;
-        state.mode = "idle";
-        saveState(ctx.cwd, sessionKey, state);
-
-        ctx.ui.setStatus("lite-sp", undefined);
-        ctx.ui.notify(
-          "工作完成（自动 code review 已关闭）。可手动 /review 或 /commit。",
-          "info"
-        );
-        pi.sendUserMessage(
-          "工作完成（自动 code review 已关闭）。可手动 /review 或 /commit。",
-          { deliverAs: "followUp" }
-        );
-        return;
-      }
-
-      ctx.ui.notify(
-        `Work/Fix Mode 的 workflow_status 状态不明确：${state.workStatus}。`,
-        "warning"
-      );
-      return;
+    // Update overlay with current todos
+    const overlay = getWorkflowOverlay();
+    if (overlay && state.mode !== "idle") {
+      overlay.update(state.todos);
     }
   });
 }
 
-// ──────────────────────────────────────────────
-// Command registrations
-// ──────────────────────────────────────────────
+// ── Command registrations ────────────────────────────────────────────────────
 
 export function registerPlanCommand(
   pi: ExtensionAPI,
@@ -787,12 +290,11 @@ export function registerPlanCommand(
     description: "进入计划模式：头脑风暴、产出计划、等待确认",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
-      const sessionKey = getSessionKey(ctx.sessionManager);
+      const sessionKey = ctxSessionKey(ctx);
 
       const state: WorkflowState = {
         ...DEFAULT_STATE,
         mode: "plan",
-        autoCodeReview: false,
         planRunId: crypto.randomUUID(),
       };
       saveState(ctx.cwd, sessionKey, state);
@@ -814,78 +316,21 @@ export function registerPlanCommand(
   });
 }
 
-export function registerGoCommand(
-  pi: ExtensionAPI,
-  getAgentDir: () => string
-): void {
-  pi.registerCommand("go", {
-    description:
-      "手动批准当前计划并交给 Work Mode；如计划评审未通过，需要 /go --force；/go --no-review 关闭自动 code review",
-    handler: async (args, ctx) => {
-      await ctx.waitForIdle();
-      const sessionKey = getSessionKey(ctx.sessionManager);
-
-      const state = loadState(ctx.cwd, sessionKey);
-      const config = loadConfig(ctx.cwd, getAgentDir());
-      const force = args.includes("--force");
-      const noReview = args.includes("--no-review");
-
-      if (!state.planPath) {
-        ctx.ui.notify("没有 active plan。请先 /plan 并保存计划。", "error");
-        return;
-      }
-
-      if (
-        config.planReview.enabled &&
-        state.planReviewStatus !== "pass" &&
-        !force
-      ) {
-        ctx.ui.notify(
-          `计划评审未通过或未完成：${state.planReviewStatus}。如确认要跳过，使用 /go --force。`,
-          "warning"
-        );
-        return;
-      }
-
-      const result = await startApprovedWorkFromCommand(
-        pi,
-        ctx,
-        getAgentDir,
-        force,
-        noReview
-      );
-
-      if (!result.success) {
-        ctx.ui.notify(`自动启动 Work Mode 失败：${result.error}`, "error");
-        return;
-      }
-
-      ctx.ui.notify(
-        `Work Mode started. Work run: ${result.workRunId?.slice(-8)}.${noReview ? " 自动 code review 已关闭。" : ""}`,
-        "info"
-      );
-    },
-  });
-}
-
 export function registerWorkCommand(
   pi: ExtensionAPI,
   getAgentDir: () => string
 ): void {
   pi.registerCommand("work", {
-    description: "跳过计划，直接进入 Work Mode；/work --no-review 关闭自动 code-review",
+    description: "跳过计划，直接进入 Work Mode",
     handler: async (args, ctx) => {
       await ctx.waitForIdle();
-      const sessionKey = getSessionKey(ctx.sessionManager);
-      const noReview = args.includes("--no-review");
-      // Strip --no-review from args so remaining text becomes work description
-      const workArgs = args.replace(/--no-review\b/g, "").trim();
+      const sessionKey = ctxSessionKey(ctx);
+
+      const workArgs = args.trim();
 
       const state: WorkflowState = {
         ...DEFAULT_STATE,
         mode: "work",
-        autoCodeReview: !noReview,
-        codeReviewLoops: 0,
         workRunId: crypto.randomUUID(),
         workBaselineRef: createWorkBaseline(ctx.cwd),
         workBaselineUntracked: captureBaselineUntracked(ctx.cwd),
@@ -902,7 +347,7 @@ export function registerWorkCommand(
       if (!ok) return;
 
       ctx.ui.notify(
-        `已进入 Work Mode。可以直接描述任务。${noReview ? " 自动 code review 已关闭。" : ""}`,
+        "已进入 Work Mode。可以直接描述任务。",
         "info"
       );
 
@@ -921,10 +366,114 @@ export function registerReviewCommand(
     description: "使用 isolated subagent 检查当前 diff",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
+      const sessionKey = ctxSessionKey(ctx);
+      const state = loadState(ctx.cwd, sessionKey);
+      const config = loadConfig(ctx.cwd, getAgentDir());
 
-      const performed = await runCodeReviewSubagent(pi, ctx, getAgentDir, false);
-      if (!performed) {
-        ctx.ui.notify("Code review aborted (no git repo or subagent error).", "warning");
+      if (!gitRepoPreflightFn(ctx.cwd, ctx)) {
+        ctx.ui.notify("Code review aborted: no git repo.", "warning");
+        return;
+      }
+
+      // Build review context differently based on repo state
+      let reviewContext: string[];
+
+      if (hasInitialCommit(ctx.cwd)) {
+        // Standard repo with initial commit: use baseline diff
+        let statusText = "";
+        try {
+          statusText = execSync("git status --short", {
+            cwd: ctx.cwd,
+            encoding: "utf8",
+            maxBuffer: 1024 * 1024,
+          }).toString();
+        } catch {
+          statusText = "(could not run git status)";
+        }
+
+        const baselineDiff = collectBaselineDiff(ctx.cwd, state.workBaselineRef);
+        const untracked = collectUntrackedFiles(ctx.cwd, state.workBaselineUntracked);
+        const untrackedContext = formatUntrackedContext(untracked.contents);
+
+        reviewContext = [
+          `## Git Status`,
+          statusText || "(no changes)",
+          ``,
+          `## Git Diff Stat`,
+          baselineDiff.diffStat || "(empty)",
+          ``,
+          `## Git Diff (baseline: ${state.workBaselineRef ?? "HEAD"})`,
+          baselineDiff.diff || "(empty)",
+          ``,
+          `## Untracked Files (new in this session)`,
+          untrackedContext,
+        ];
+      } else {
+        // No initial commit: use no-commit review context
+        const noCommitCtx = collectNoCommitReviewContext(ctx.cwd, state.workBaselineUntracked);
+
+        reviewContext = [
+          `## Git Status`,
+          noCommitCtx.statusText,
+          ``,
+          `## Staged Diff (all changes, no HEAD to diff against)`,
+          noCommitCtx.stagedDiff,
+          ``,
+          `## Untracked Files`,
+          noCommitCtx.untrackedContext,
+        ];
+      }
+
+      // Include plan context
+      const planContent = state.planPath ? readPlan(ctx.cwd, state.planPath) : "";
+      const planContext = state.planPath
+        ? [`Plan file: ${state.planPath}`, planContent].join("\n\n")
+        : "(no plan)";
+
+      reviewContext.push(
+        ``,
+        `## Plan / Todo Context`,
+        planContext,
+        ``,
+        `## Todo Status`,
+        todoText(state),
+      );
+
+      const fullContext = reviewContext.join("\n");
+      const systemPrompt = promptForSubagentRole("review");
+
+      ctx.ui.notify("正在运行 isolated code review 子代理...", "info");
+
+      try {
+        const result = await getSubagentsClient().run({
+          role: "review",
+          task: `Review the current working tree changes provided below. Check the diff against the plan and todo context.\n\n${fullContext}`,
+          systemPrompt,
+          subagentConfig: config.subagent,
+          modelSpec: config.models.review,
+          cwd: ctx.cwd,
+          agentDir: getAgentDir(),
+        });
+
+        if (result.exitCode !== 0) {
+          const diag = formatSubagentFailure(result);
+          ctx.ui.notify(`Code review subagent failed. ${diag}`, "error");
+          pi.sendUserMessage(`Code review subagent execution failed.\n\nDiagnostic:\n${diag}\n\nSubagent output (truncated):\n${(result.text ?? "").slice(0, 3000)}`);
+          return;
+        }
+
+        // Deliver results directly to user
+        ctx.ui.notify(
+          result.text.trim().length > 0
+            ? "Code review completed."
+            : "Code review completed (empty response).",
+          "info"
+        );
+        pi.sendUserMessage(`Code Review Result:\n\n${result.text || "(empty response)"}`);
+      } catch (err: any) {
+        const errMsg = err?.message ?? String(err);
+        ctx.ui.notify(`Code review subagent error: ${errMsg}`, "error");
+        pi.sendUserMessage(`Code review subagent error: ${errMsg}`);
       }
     },
   });
@@ -938,18 +487,15 @@ export function registerCommitCommand(
     description: "切到 commit 模型，根据当前 diff 生成 commit message 并直接提交",
     handler: async (args, ctx) => {
       await ctx.waitForIdle();
-      const sessionKey = getSessionKey(ctx.sessionManager);
+      const sessionKey = ctxSessionKey(ctx);
 
       const state = {
         ...loadState(ctx.cwd, sessionKey),
         mode: "commit" as const,
-        autoCodeReview: false,
       };
-      // Clear any stale pending handoff — commit mode does not execute plans.
-      clearPendingWorkHandoff(state);
+
       // Clear baseline — after commit, the diff context changes.
-      state.workBaselineRef = undefined;
-      state.workBaselineUntracked = undefined;
+      clearWorkBaseline(state);
       saveState(ctx.cwd, sessionKey, state);
 
       const ok = await applyModeRuntime(pi, ctx, "commit", getAgentDir);
@@ -974,15 +520,11 @@ export function registerWfStatusCommand(
     description: "显示当前轻量 workflow 状态",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
-      const sessionKey = getSessionKey(ctx.sessionManager);
+      const sessionKey = ctxSessionKey(ctx);
 
       const state = loadState(ctx.cwd, sessionKey);
-      const config = loadConfig(ctx.cwd, getAgentDir());
 
-      let msg = currentStatusText(config, state);
-      if (state.planReviewStatus === "reviewing") {
-        msg += "\n\n⚠ planReviewStatus is stuck at 'reviewing'. This means a plan review subagent may have crashed.\nOptions: call workflow_plan(action='save') to reset to 'pending' and re-trigger review, or use /wf-reset to clear all state.";
-      }
+      let msg = currentStatusText(state);
       ctx.ui.notify(msg, "info");
     },
   });
@@ -993,14 +535,10 @@ export function registerWfExitCommand(pi: ExtensionAPI): void {
     description: "退出 workflow mode，恢复普通 Pi",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
-      const sessionKey = getSessionKey(ctx.sessionManager);
+      const sessionKey = ctxSessionKey(ctx);
 
       const state = loadState(ctx.cwd, sessionKey);
       state.mode = "idle";
-      state.autoCodeReview = false;
-      state.workBaselineRef = undefined;
-      state.workBaselineUntracked = undefined;
-      clearPendingWorkHandoff(state);
       saveState(ctx.cwd, sessionKey, state);
 
       const overlay = getWorkflowOverlay();
@@ -1017,7 +555,7 @@ export function registerWfResetCommand(pi: ExtensionAPI): void {
     description: "清空 workflow 状态、plan 目录和 todo",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
-      const sessionKey = getSessionKey(ctx.sessionManager);
+      const sessionKey = ctxSessionKey(ctx);
 
       const state: WorkflowState = { ...DEFAULT_STATE };
       saveState(ctx.cwd, sessionKey, state);
@@ -1060,10 +598,7 @@ export function registerWfInstallSubagentsCommand(
           encoding: "utf8",
           timeout: 60000,
         });
-        ctx.ui.notify(
-          "@tintinweb/pi-subagents 已安装。",
-          "info"
-        );
+        ctx.ui.notify("@tintinweb/pi-subagents 已安装。", "info");
       } catch (err: any) {
         ctx.ui.notify(
           `安装 pi-subagents 失败：${err?.stderr ?? err?.message ?? String(err)}\n请手动执行：pi install npm:@tintinweb/pi-subagents`,
@@ -1136,8 +671,7 @@ export function registerWfInitCommand(pi: ExtensionAPI): void {
           `当前仓库已存在 ${existingFile} (${filePath})。\n\n` +
             `是否需要更新 AGENTS.md？如果需要，请回复确认，` +
             `我会读取当前的 ${existingFile} 内容和项目上下文，帮你更新内容。\n\n` +
-            `确认前不会修改已有文件。`,
-          { deliverAs: "followUp" }
+            `确认前不会修改已有文件。`
         );
         return;
       }
@@ -1150,8 +684,7 @@ export function registerWfInitCommand(pi: ExtensionAPI): void {
             `3. 如何构建和运行测试（例如 npm test、cargo test、pytest 等）？\n` +
             `4. 提交信息需要遵循什么规范（例如 conventional commits）？\n` +
             `5. 其他需要 agent 遵守的约定或限制？\n\n` +
-            `了解这些信息后，我会在仓库根目录生成 AGENTS.md。`,
-          { deliverAs: "followUp" }
+            `了解这些信息后，我会在仓库根目录生成 AGENTS.md。`
         );
         return;
       }
@@ -1166,11 +699,10 @@ export function registerWfInitCommand(pi: ExtensionAPI): void {
           `- 构建/测试命令\n` +
           `- 代码风格/规范\n` +
           `- 目录约定\n` +
-          `- 工作流规则\n` +
+          `- 工作流规则（v2 模式：idle/plan/work/commit）\n` +
           `- 提交规范\n` +
           `- 安全/禁止事项\n\n` +
-          `使用 write 工具将内容写入 ${path.join(root, "AGENTS.md")}。`,
-        { deliverAs: "followUp" }
+          `使用 write 工具将内容写入 ${path.join(root, "AGENTS.md")}。`
       );
     },
   });

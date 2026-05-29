@@ -1,15 +1,16 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { getSessionKey, loadState, saveState, writeNewPlan, updatePlan, readPlan, writePlanReview } from "./state.js";
+import crypto from "node:crypto";
+import { getSessionKey, loadState, saveState, writeNewPlan, updatePlan, readPlan } from "./state.js";
 import { loadConfig } from "./config.js";
 import { todoText } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
-import type { WorkflowState, SubagentRole, WorkStatus } from "./types.js";
+import { createWorkBaseline, captureBaselineUntracked } from "./baseline.js";
+import type { WorkflowState, SubagentRole } from "./types.js";
 import type { SubagentsClient } from "./subagent.js";
 import { formatSubagentFailure } from "./subagent.js";
 import { promptForSubagentRole } from "./prompts.js";
-import { queueApprovedWorkFromTool, clearPendingWorkHandoff } from "./work-handoff.js";
 
 const TodoStatusSchema = StringEnum([
   "pending",
@@ -18,12 +19,14 @@ const TodoStatusSchema = StringEnum([
   "blocked",
 ] as const);
 
+// ── workflow_todo tool ────────────────────────────────────
+
 export function registerTodoTool(pi: ExtensionAPI, getAgentDir: () => string): void {
   pi.registerTool({
     name: "workflow_todo",
     label: "Workflow Todo",
     description:
-      "Maintain the lightweight workflow todo list for plan/work/review alignment.",
+      "Maintain the lightweight workflow todo list for plan/work alignment.",
     promptSnippet:
       "workflow_todo: maintain the workflow todo list so implementation stays aligned with the plan.",
     promptGuidelines: [
@@ -50,7 +53,6 @@ export function registerTodoTool(pi: ExtensionAPI, getAgentDir: () => string): v
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const sessionKey = getSessionKey(ctx.sessionManager);
       const state = loadState(ctx.cwd, sessionKey);
-      const agentDir = getAgentDir();
 
       if (params.action === "reset") {
         const overlay = getWorkflowOverlay();
@@ -109,99 +111,53 @@ export function registerTodoTool(pi: ExtensionAPI, getAgentDir: () => string): v
   });
 }
 
-type WorkflowPlanParams = {
-  action: "save" | "approve" | "review_pass" | "review_fail" | "read" | "clear";
-  title?: string;
-  markdown?: string;
-  reviewNotes?: string;
-};
+// ── workflow_plan tool ────────────────────────────────────
 
 export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): void {
   pi.registerTool({
     name: "workflow_plan",
     label: "Workflow Plan",
     description:
-      "Save, review, approve, read, or clear the active lightweight workflow plan.",
+      "Save, approve, read, or clear the active workflow plan.",
     promptSnippet:
-      "workflow_plan: save the active plan, record plan-review results, or approve the plan for implementation.",
+      "workflow_plan: save the active plan or approve it for implementation.",
     promptGuidelines: [
       "Use workflow_plan save after producing a final implementation plan.",
       "Use workflow_plan approve only after the user explicitly confirms the final plan.",
-      "Use workflow_plan review_pass or review_fail only in Plan Review Mode.",
+      "Use workflow_plan read to view the current plan.",
+      "Use workflow_plan clear to reset workflow state.",
     ],
     parameters: Type.Object({
-      action: StringEnum([
-        "save",
-        "approve",
-        "review_pass",
-        "review_fail",
-        "read",
-        "clear",
-      ] as const),
+      action: StringEnum(["save", "approve", "read", "clear"] as const),
       title: Type.Optional(Type.String()),
       markdown: Type.Optional(Type.String()),
-      reviewNotes: Type.Optional(Type.String()),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const sessionKey = getSessionKey(ctx.sessionManager);
       const state = loadState(ctx.cwd, sessionKey);
-      const config = loadConfig(ctx.cwd, getAgentDir());
-      const { action } = params as WorkflowPlanParams;
+      const { action } = params;
 
       if (action === "save") {
         if (!params.markdown) {
           return {
             isError: true,
-            content: [
-              { type: "text", text: "workflow_plan save requires markdown." },
-            ],
+            content: [{ type: "text", text: "workflow_plan save requires markdown." }],
             details: { state },
           };
-        }
-
-        // Crash recovery: if planReviewStatus is stuck at "reviewing", reset to "pending"
-        // so the next agent_end will re-trigger the review.
-        if (state.planReviewStatus === "reviewing") {
-          state.planReviewStatus = "pending";
         }
 
         // Distinguish first save (new plan) vs revision save (update existing plan)
         const isRevision = !!state.planPath;
         if (isRevision) {
-          // Revision: update existing plan file in-place, do NOT reset loops
-          updatePlan(ctx.cwd, state, params.markdown);
+          // Revision: update existing plan file in-place
+          updatePlan(ctx.cwd, state.planPath!, params.markdown);
           state.planTitle = params.title ?? state.planTitle ?? "Active Plan";
-          state.planReviewStatus = config.planReview.enabled ? "pending" : "none";
-          // Do NOT reset planReviewLoops on revision — loops track the entire plan cycle
-          state.lastReviewNotes = undefined;
-          state.lastReviewStatus = undefined;
-          state.todos = [];
-          clearPendingWorkHandoff(state);
-          // If we were in workPending (stale handoff), revert to plan.
-          if (state.mode === "workPending") {
-            state.mode = "plan";
-          }
         } else {
-          // First save: create new plan file, reset loops
-          const { planPath, planReviewPath } = writeNewPlan(
-            ctx.cwd,
-            state,
-            params.markdown
-          );
-          state.planTitle = params.title ?? "Active Plan";
-          state.planReviewStatus = config.planReview.enabled ? "pending" : "none";
-          state.planReviewLoops = 0;
-          state.planReviewNotes = undefined;
-          state.lastReviewNotes = undefined;
-          state.lastReviewStatus = undefined;
+          // First save: create new plan file
+          const planPath = writeNewPlan(ctx.cwd, params.markdown);
           state.planPath = planPath;
-          state.planReviewPath = planReviewPath;
-          state.todos = [];
-          clearPendingWorkHandoff(state);
-          // If we were in workPending (stale handoff), revert to plan.
-          if (state.mode === "workPending") {
-            state.mode = "plan";
-          }
+          state.planTitle = params.title ?? "Active Plan";
+          state.planRunId = crypto.randomUUID();
         }
 
         saveState(ctx.cwd, sessionKey, state);
@@ -217,8 +173,8 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
             {
               type: "text",
               text: isRevision
-                ? `Plan updated in-place at ${state.planPath}. Review loop: ${state.planReviewLoops}/${config.planReview.maxLoops}. Plan review status: ${state.planReviewStatus}. 📝 修订计划必须通过 workflow_plan save 传入完整 markdown，不要创建新文件。`
-                : `Plan created at ${state.planPath}. Plan review status: ${state.planReviewStatus}.`,
+                ? `Plan updated at ${state.planPath}.`
+                : `Plan created at ${state.planPath}.`,
             },
           ],
           details: { state },
@@ -234,82 +190,34 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
           };
         }
 
-        if (state.mode === "workPending" || state.pendingWorkHandoff) {
+        if (state.mode !== "plan") {
           return {
             isError: true,
-            content: [{ type: "text", text: "Work handoff is already pending." }],
+            content: [{ type: "text", text: `Approve only allowed in Plan Mode (current: ${state.mode}).` }],
             details: { state },
           };
         }
 
-        if (config.planReview.enabled && state.planReviewStatus !== "pass") {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text:
-                  `Plan review is enabled but status is ${state.planReviewStatus}. ` +
-                  `Wait for review_pass, revise the plan, or use /go --force manually.`,
-              },
-            ],
-            details: { state },
-          };
-        }
+        // Direct transition: plan → work (no handoff mechanism)
+        state.mode = "work";
+        state.workRunId = crypto.randomUUID();
+        // Capture baseline for code review diff scope
+        state.workBaselineRef = createWorkBaseline(ctx.cwd);
+        state.workBaselineUntracked = captureBaselineUntracked(ctx.cwd);
 
-        const result = await queueApprovedWorkFromTool(pi, ctx, getAgentDir);
-
-        if (!result.success) {
-          return {
-            isError: true,
-            content: [{ type: "text", text: `Approve failed: ${result.error}` }],
-            details: { state },
-          };
-        }
-
-        // Reload state so details reflects the saved workPending + pendingWorkHandoff.
-        const updatedState = loadState(ctx.cwd, sessionKey);
+        saveState(ctx.cwd, sessionKey, state);
 
         return {
           content: [
             {
               type: "text",
               text:
-                `Plan approved. Work Mode kickoff queued. ` +
-                `Handoff: ${result.handoffId?.slice(-8)}, Work: ${result.workRunId?.slice(-8)}.`,
+                `Plan approved. Transitioning to Work Mode.\n` +
+                `Work run: ${state.workRunId.slice(-8)}.\n` +
+                `Baseline: ${state.workBaselineRef ?? "none"}.\n` +
+                `The next turn will activate Work Mode runtime (model/tools/status).`,
             },
           ],
-          details: { state: updatedState },
-        };
-      }
-
-      if (action === "review_pass") {
-        state.planReviewStatus = "pass";
-        state.planReviewNotes = params.reviewNotes ?? "Plan review passed.";
-        if (state.planReviewPath) {
-          writePlanReview(ctx.cwd, state.planReviewPath, state.planReviewNotes);
-        }
-        saveState(ctx.cwd, sessionKey, state);
-
-        return {
-          content: [{ type: "text", text: "Plan review recorded: PASS." }],
-          details: { state },
-        };
-      }
-
-      if (action === "review_fail") {
-        state.planReviewStatus = "fail";
-        state.planReviewLoops += 1;
-        state.planReviewNotes = params.reviewNotes ?? "Plan review failed.";
-        if (state.planReviewPath) {
-          writePlanReview(ctx.cwd, state.planReviewPath, state.planReviewNotes);
-        }
-        // Plan review failure invalidates any pending handoff.
-        clearPendingWorkHandoff(state);
-        saveState(ctx.cwd, sessionKey, state);
-
-        return {
-          content: [{ type: "text", text: "Plan review recorded: FAIL." }],
           details: { state },
         };
       }
@@ -338,11 +246,8 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
       if (action === "clear") {
         const cleared: WorkflowState = {
           mode: "idle",
-          planReviewStatus: "none",
-          planReviewLoops: 0,
-          codeReviewLoops: 0,
-          autoCodeReview: false,
           todos: [],
+          hiddenDoneIds: [],
         };
         saveState(ctx.cwd, sessionKey, cleared);
 
@@ -380,9 +285,9 @@ export function registerSubagentTool(
     name: "workflow_subagent",
     label: "Workflow Subagent",
     description:
-      "Spawn a role-shaped child Pi process with no parent session history. Supported roles: planReview (isolated plan review), review (isolated code review), explore (fast read-only codebase exploration). Review agents have full built-in tool access — only workflow tools (workflow_subagent, workflow_plan, workflow_todo, workflow_status) are blocked. Child returns a structured result with text, status marker, exit code, and usage.",
+      "Spawn a role-shaped child Pi process with no parent session history. Supported roles: planReview (isolated plan review), review (isolated code review), explore (fast read-only codebase exploration). Review agents can use read, bash (non-mutating), and extension tools — only workflow tools (workflow_plan, workflow_todo, workflow_subagent) are blocked. Child returns its full text output with structured feedback.",
     promptSnippet:
-      "workflow_subagent: spawn a child Pi process to handle review or exploration with a clean session. The child has no parent context — pass everything it needs explicitly.",
+      "workflow_subagent: spawn a child Pi process to handle review or exploration with a clean session.",
     promptGuidelines: [
       "Use workflow_subagent to get an objective review or explore the codebase without parent session history.",
       "Provide role (planReview, review, or explore), task, and relevant context.",
@@ -399,8 +304,6 @@ export function registerSubagentTool(
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const config = loadConfig(ctx.cwd, getAgentDir());
       const client = getSubagentsClient();
-
-      // Client is always non-null after init. Detection happens inside run().
 
       const role = params.role as SubagentRole;
       const task = params.task as string;
@@ -419,6 +322,7 @@ export function registerSubagentTool(
         return {
           isError: true,
           content: [{ type: "text", text: `Unknown subagent role: ${role}` }],
+          details: {},
         };
       }
 
@@ -457,130 +361,9 @@ export function registerSubagentTool(
               text: `Subagent execution error: ${err.message ?? String(err)}`,
             },
           ],
+          details: {},
         };
       }
-    },
-  });
-}
-
-// ── workflow_status tool ────────────────────────
-
-const WorkStatusSchema = StringEnum(["ready_for_review", "blocked"] as const);
-
-export function registerWorkflowStatusTool(
-  pi: ExtensionAPI,
-  getAgentDir: () => string
-): void {
-  pi.registerTool({
-    name: "workflow_status",
-    label: "Workflow Status",
-    description:
-      "Report the completion status of the current Work/Fix run. Must be called at the end of Work/Fix mode. When auto-review is enabled (default), triggers automatic code review on ready_for_review; when disabled, transitions to idle. Status: ready_for_review (all tasks done) or blocked (needs user intervention).",
-    promptSnippet:
-      "workflow_status: report work completion status — ready_for_review or blocked.",
-    promptGuidelines: [
-      "You MUST call workflow_status at the end of Work/Fix mode with either ready_for_review or blocked.",
-      "Call workflow_status({ status: 'ready_for_review', runId: currentRunId, summary: '...', tests: '...' }) when all planned tasks are complete.",
-      "Call workflow_status({ status: 'blocked', runId: currentRunId, error: '...' }) when blocked by missing info, dependencies, or unresolvable issues.",
-      "The runId parameter MUST match the current state.workRunId displayed in the workflow state.",
-      "When auto-review is enabled (default): ready_for_review triggers automatic code review.",
-      "When auto-review is disabled (/work --no-review or config.json codeReview.auto=false): workflow_status only records completion and transitions to idle; user can manually /review or /commit.",
-      "Do NOT print WORK_STATUS: ... in text — this tool records completion status.",
-    ],
-    parameters: Type.Object({
-      status: WorkStatusSchema,
-      runId: Type.String({ description: "The current workRunId from the workflow state. Must match exactly." }),
-      summary: Type.Optional(Type.String()),
-      tests: Type.Optional(Type.String()),
-      error: Type.Optional(Type.String()),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const sessionKey = getSessionKey(ctx.sessionManager);
-      const state = loadState(ctx.cwd, sessionKey);
-      const config = loadConfig(ctx.cwd, getAgentDir());
-      const runId = params.runId as string;
-
-      // Only valid in work or fix mode.
-      if (state.mode !== "work" && state.mode !== "fix") {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text:
-                `workflow_status is only valid in Work or Fix mode (current: ${state.mode}). ` +
-                `Report completion directly if in another mode.`,
-            },
-          ],
-          details: { state },
-        };
-      }
-
-      // Validate run id: the tool must be called for the current work run.
-      if (!state.workRunId) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text:
-                "No active work run. workflow_status requires a current workRunId. " +
-                "Enter Work/Fix mode first.",
-            },
-          ],
-          details: { state },
-        };
-      }
-
-      // Reject stale run IDs
-      if (runId !== state.workRunId) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text:
-                `Stale run ID rejected. Provided: ${runId.slice(-8)}…, current: ${state.workRunId.slice(-8)}…. ` +
-                `This workflow_status call belongs to a previous Work/Fix run and has been ignored. ` +
-                `Re-call with the current run ID from the workflow state.`,
-            },
-          ],
-          details: { state },
-        };
-      }
-
-      const status = params.status as WorkStatus;
-
-      // Reset code-review loop counter at the start of a new automatic review
-      // sequence triggered by Work mode (not Fix mode retries).
-      if (status === "ready_for_review" && state.mode === "work") {
-        state.codeReviewLoops = 0;
-      }
-
-      state.workStatus = status;
-      state.workStatusRunId = state.workRunId;
-      state.workStatusSummary = (params.summary as string | undefined) ?? "";
-      state.workStatusTests = (params.tests as string | undefined) ?? "";
-      state.workStatusError = (params.error as string | undefined) ?? "";
-      state.workStatusUpdatedAt = new Date().toISOString();
-      saveState(ctx.cwd, sessionKey, state);
-
-      const modeLabel = state.mode === "fix" ? "Fix Mode" : "Work Mode";
-
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              `${modeLabel} status recorded: ${status.toUpperCase()}.\n` +
-              `Run: ${state.workRunId.slice(-8)}.\n` +
-              (state.workStatusSummary ? `Summary: ${state.workStatusSummary}\n` : "") +
-              (state.workStatusTests ? `Tests: ${state.workStatusTests}\n` : "") +
-              (state.workStatusError ? `Error: ${state.workStatusError}\n` : ""),
-          },
-        ],
-        details: { state },
-      };
     },
   });
 }

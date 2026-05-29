@@ -1,10 +1,9 @@
 /**
- * Pi Workflow Extension
+ * Pi Workflow Extension (v2)
  *
- * A lightweight software development workflow that layers plan,
- * plan review, implementation, code review, and commit phases on top
- * of pi-coding-agent. Supports pi install, global config merge, and
- * multi-plan document management under .pi/workflow/plan/.
+ * A lightweight software development workflow with simplified mode flow:
+ * idle → plan → work → commit. Review subagents are called synchronously
+ * within plan and work modes — no async state transitions or handoff markers.
  *
  * Subagents are powered by @tintinweb/pi-subagents (required).
  */
@@ -24,11 +23,9 @@ import {
   registerTodoTool,
   registerPlanTool,
   registerSubagentTool,
-  registerWorkflowStatusTool,
 } from "./tools.js";
 import {
   registerPlanCommand,
-  registerGoCommand,
   registerWorkCommand,
   registerReviewCommand,
   registerCommitCommand,
@@ -45,8 +42,8 @@ import {
 
 export default function (pi: ExtensionAPI) {
   // ═══════════════════════════════════════════════════
-  // Try to detect pi-subagents. It must be loaded as a
-  // separate extension before pi-workflow.
+  // Detect pi-subagents. Must be loaded as a separate
+  // extension before pi-workflow.
   // ═══════════════════════════════════════════════════
   let subagentsClient: SubagentsClient = createSubagentsClient(pi);
   setSubagentsClient(subagentsClient);
@@ -55,11 +52,9 @@ export default function (pi: ExtensionAPI) {
   registerTodoTool(pi, getAgentDir);
   registerPlanTool(pi, getAgentDir);
   registerSubagentTool(pi, getAgentDir, () => subagentsClient);
-  registerWorkflowStatusTool(pi, getAgentDir);
 
   // ── Commands ───────────────────────────────
   registerPlanCommand(pi, getAgentDir);
-  registerGoCommand(pi, getAgentDir);
   registerWorkCommand(pi, getAgentDir);
   registerReviewCommand(pi, getAgentDir);
   registerCommitCommand(pi, getAgentDir);

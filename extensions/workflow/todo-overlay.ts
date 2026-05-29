@@ -9,7 +9,7 @@
  * implementation or depending on it as a package.
  */
 
-import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionUIContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import type { TodoItem, TodoStatus } from "./types.js";
 
@@ -23,7 +23,7 @@ const STATUS_SYMBOL: Record<TodoStatus, string> = {
   blocked: "⊘",
 };
 
-const STATUS_COLOR: Record<TodoStatus, string> = {
+const STATUS_COLOR: Record<TodoStatus, ThemeColor> = {
   pending: "dim",
   in_progress: "accent",
   done: "success",

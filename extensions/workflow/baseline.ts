@@ -11,20 +11,45 @@ const UNTRACKED_FILE_SIZE_LIMIT = 100 * 1024;
 /** Regex for valid baseline refs: 40-char hex SHA or literal "HEAD". */
 const VALID_BASELINE_REF_RE = /^(?:[0-9a-f]{40}|HEAD)$/;
 
+// ── Git repo state detection ───────────────────────────────────────────────
+
+/** Check whether the repo has at least one commit (HEAD resolves). */
+export function hasInitialCommit(cwd: string): boolean {
+  try {
+    execSync("git rev-parse HEAD", { cwd, encoding: "utf8", timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Check whether the directory has a git repo at all. */
+export function gitRepoPreflight(cwd: string, ctx?: any): boolean {
+  try {
+    execSync("git rev-parse --git-dir", { cwd, encoding: "utf8", timeout: 5000 });
+    return true;
+  } catch {
+    if (ctx?.ui?.notify) {
+      ctx.ui.notify("当前目录不是 git 仓库。Code review 需要 git 支持。", "warn");
+    }
+    return false;
+  }
+}
+
 // ── Baseline creation ──────────────────────────────────────────────────────
 
 /**
  * Create a work baseline snapshot using `git stash create`.
- * This captures the current tracked working tree content (both staged and unstaged)
- * as a dangling commit object, without modifying the stash ref stack.
- *
- * Returns the commit SHA, or "HEAD" as fallback if worktree is clean or stash create fails.
- * The returned ref is validated against a strict safe pattern before use.
+ * Returns the commit SHA, or "HEAD" as fallback.
+ * Returns undefined if the repo has no initial commit (no HEAD to baseline against).
  */
-export function createWorkBaseline(cwd: string): string {
+export function createWorkBaseline(cwd: string): string | undefined {
+  // No initial commit → no baseline needed (all files are new)
+  if (!hasInitialCommit(cwd)) {
+    return undefined;
+  }
+
   try {
-    // git stash create returns a commit SHA for the current working tree state,
-    // or empty string if the worktree is clean (no changes to stash).
     const stashRef = execSync("git stash create", {
       cwd,
       encoding: "utf8",
@@ -35,7 +60,6 @@ export function createWorkBaseline(cwd: string): string {
       return stashRef;
     }
 
-    // Clean worktree or stash create returned nothing — fallback to HEAD.
     const headRef = execSync("git rev-parse HEAD", {
       cwd,
       encoding: "utf8",
@@ -46,11 +70,8 @@ export function createWorkBaseline(cwd: string): string {
       return headRef;
     }
 
-    // HEAD also failed — return HEAD literal as last resort
-    // (git diff HEAD will still work if repo exists).
     return "HEAD";
   } catch {
-    // git stash create or rev-parse failed — try HEAD as fallback.
     try {
       const headRef = execSync("git rev-parse HEAD", {
         cwd,
@@ -68,8 +89,7 @@ export function createWorkBaseline(cwd: string): string {
   }
 }
 
-/** Capture the current set of untracked file paths at Work mode entry.
- *  Returns an array of relative paths for later scoping. */
+/** Capture the current set of untracked file paths at Work mode entry. */
 export function captureBaselineUntracked(cwd: string): string[] {
   const rawPaths = safeExecGit(cwd, ["ls-files", "-o", "--exclude-standard"]);
   return rawPaths
@@ -78,15 +98,12 @@ export function captureBaselineUntracked(cwd: string): string[] {
     .filter(Boolean);
 }
 
-/** Validate a persisted baseline ref.
- *  Must be a 40-char hex SHA or the literal string "HEAD".
- *  Prevents command injection when refs are persisted in state and
- *  later used in git commands. */
+/** Validate a persisted baseline ref. */
 export function isValidBaselineRef(ref: string): boolean {
   return VALID_BASELINE_REF_RE.test(ref);
 }
 
-/** Clear both work baseline fields from state (used at workflow exit points). */
+/** Clear both work baseline fields from state. */
 export function clearWorkBaseline(state: WorkflowState): void {
   state.workBaselineRef = undefined;
   state.workBaselineUntracked = undefined;
@@ -94,10 +111,41 @@ export function clearWorkBaseline(state: WorkflowState): void {
 
 // ── Review diff collection ─────────────────────────────────────────────────
 
+/** Context for code review when the repo has no initial commit. */
+export interface NoCommitReviewContext {
+  statusText: string;
+  stagedDiff: string;
+  untrackedContext: string;
+}
+
+/**
+ * Collect review context for a repo with no initial commit.
+ * Uses git status + git diff --cached + untracked file contents
+ * (no HEAD to diff against — everything is new).
+ */
+export function collectNoCommitReviewContext(
+  cwd: string,
+  baselineUntracked?: string[],
+): NoCommitReviewContext {
+  const statusText = safeExecGit(cwd, ["status", "--short"]);
+
+  // git diff --cached shows staged files' full content (all new)
+  const stagedDiff = safeExecGit(cwd, ["diff", "--cached"]);
+
+  // Untracked files
+  const untracked = collectUntrackedFiles(cwd, baselineUntracked);
+
+  return {
+    statusText: statusText || "(no changes)",
+    stagedDiff: stagedDiff || "(empty)",
+    untrackedContext: formatUntrackedContext(untracked.contents),
+  };
+}
+
 /**
  * Collect the diff for code review using the work baseline ref.
- * Uses argv-based execution (execFileSync) to prevent command injection
- * from persisted refs. Falls back to `git diff HEAD` if baseline is invalid/missing.
+ * Uses argv-based execution to prevent command injection.
+ * Falls back to `git diff HEAD` if baseline is invalid/missing.
  */
 export function collectBaselineDiff(cwd: string, baselineRef?: string): {
   diffStat: string;
@@ -106,14 +154,12 @@ export function collectBaselineDiff(cwd: string, baselineRef?: string): {
   const effectiveRef = baselineRef && isValidBaselineRef(baselineRef) ? baselineRef : undefined;
 
   if (!effectiveRef) {
-    // Fallback: git diff HEAD includes both staged and unstaged changes.
     return {
       diffStat: safeExecGit(cwd, ["diff", "--stat", "HEAD"]),
       diff: safeExecGit(cwd, ["diff", "HEAD"]),
     };
   }
 
-  // Baseline-based diff: only changes since work session start.
   return {
     diffStat: safeExecGit(cwd, ["diff", "--stat", effectiveRef]),
     diff: safeExecGit(cwd, ["diff", effectiveRef]),
@@ -128,14 +174,12 @@ export function collectUntrackedFiles(cwd: string, baselineUntracked?: string[])
   paths: string[];
   contents: Array<{ path: string; content: string; binary: boolean; large: boolean }>;
 } {
-  // List current untracked files (excluding .gitignored).
   const rawPaths = safeExecGit(cwd, ["ls-files", "-o", "--exclude-standard"]);
   const paths = rawPaths
     .split("\n")
     .map((p) => p.trim())
     .filter(Boolean);
 
-  // Scope to only files that were NOT present at baseline time.
   const baselineSet = new Set(baselineUntracked ?? []);
   const sessionNewPaths = paths.filter((p) => !baselineSet.has(p));
 
@@ -147,25 +191,20 @@ export function collectUntrackedFiles(cwd: string, baselineUntracked?: string[])
     try {
       const lstat = fs.lstatSync(absPath);
 
-      // Security: skip symlinks to prevent leaking files outside the repo.
-      // Only read regular non-symlink files.
       if (lstat.isSymbolicLink()) {
         contents.push({ path: relPath, content: "", binary: true, large: false });
         continue;
       }
       if (!lstat.isFile()) {
-        // Skip directories, FIFOs, sockets, etc.
         contents.push({ path: relPath, content: "", binary: true, large: false });
         continue;
       }
 
-      // Skip large files.
       if (lstat.size > UNTRACKED_FILE_SIZE_LIMIT) {
         contents.push({ path: relPath, content: "", binary: false, large: true });
         continue;
       }
 
-      // Security: verify realpath stays under cwd (prevents symlink escape via realpath).
       const realAbsPath = fs.realpathSync(absPath);
       const realCwd = fs.realpathSync(cwd);
       const relToCwd = path.relative(realCwd, realAbsPath);
@@ -174,7 +213,6 @@ export function collectUntrackedFiles(cwd: string, baselineUntracked?: string[])
         continue;
       }
 
-      // Skip binary files (heuristic: check for null bytes in first 8KB).
       const buf = fs.readFileSync(absPath);
       const sampleSize = Math.min(buf.length, 8192);
       const isBinary = buf.subarray(0, sampleSize).some((b) => b === 0);
@@ -183,7 +221,6 @@ export function collectUntrackedFiles(cwd: string, baselineUntracked?: string[])
         continue;
       }
 
-      // Text file — read content.
       const text = buf.toString("utf8");
       contents.push({ path: relPath, content: text, binary: false, large: false });
     } catch {

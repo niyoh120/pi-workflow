@@ -4,19 +4,10 @@ export type Role = "plan" | "planReview" | "work" | "review" | "commit" | "explo
 
 export type SubagentRole = "planReview" | "review" | "explore";
 
-export type Mode =
-  | "idle"
-  | "plan"
-  | "planReview"
-  | "workPending"
-  | "work"
-  | "review"
-  | "fix"
-  | "commit";
+/** Simplified mode: only 4 workflow states. */
+export type Mode = "idle" | "plan" | "work" | "commit";
 
 export type TodoStatus = "pending" | "in_progress" | "done" | "blocked";
-
-export type WorkStatus = "ready_for_review" | "blocked";
 
 export interface TodoItem {
   id: string;
@@ -69,16 +60,18 @@ export interface AskUserQuestionConfig {
 
 export interface WorkflowConfig {
   models: Record<Role, ModelSpec>;
+  /** Plan review config. Review is always enabled (builtin step); this only
+   *  controls model/thinking overrides and is kept for backward compat. */
   planReview: {
     enabled: boolean;
     maxLoops: number;
   };
+  /** Code review config. Review is always enabled (builtin step);
+   *  maxLoops and auto are kept for backward compat but no longer
+   *  enforce hard limits — prompt constraints guide loop termination. */
   codeReview: {
     enabled: boolean;
     maxLoops: number;
-    /** Whether to automatically trigger code review after Work/Fix completion.
-     *  When false, workflow_status still records completion but transitions to idle
-     *  instead of launching review. Users can manually /review or /commit. */
     auto: boolean;
   };
   subagent: SubagentConfig;
@@ -86,54 +79,25 @@ export interface WorkflowConfig {
   askUserQuestion: AskUserQuestionConfig;
 }
 
-export type PlanReviewStatus = "none" | "pending" | "reviewing" | "pass" | "fail";
-
-export interface PendingWorkHandoff {
-  id: string;
-  marker: string;
-  planPath: string;
-  planRunId?: string;
-  workRunId: string;
-  createdAt: string;
-  expiresAt: string;
-  expectedPrompt: string;
-}
-
 export interface WorkflowState {
   mode: Mode;
+  /** Path to the current plan file (relative to cwd). */
   planPath?: string;
-  planReviewPath?: string;
+  /** Plan title. */
   planTitle?: string;
-
-  planReviewStatus: PlanReviewStatus;
-  planReviewLoops: number;
-  planReviewNotes?: string;
-  /** Plan run id — identifies a plan document lifecycle (not the review trigger). */
+  /** Plan run id — identifies a plan document lifecycle. */
   planRunId?: string;
-  /** Work run id — identifies a work session (not the auto-review trigger). */
+  /** Work run id — identifies a work session. */
   workRunId?: string;
-  codeReviewLoops: number;
-  autoCodeReview: boolean;
-  todos: TodoItem[];
-  /** Pending plan→work handoff (plan approved, waiting for before_agent_start finalize). */
-  pendingWorkHandoff?: PendingWorkHandoff;
-  /** Work status set by workflow_status tool. */
-  workStatus?: WorkStatus;
-  /** The run id this work status was set for. */
-  workStatusRunId?: string;
-  workStatusSummary?: string;
-  workStatusTests?: string;
-  workStatusUpdatedAt?: string;
-  workStatusError?: string;
-  /** Latest code review result text (stored when review fails, cleared on plan save / new work run). */
-  lastReviewNotes?: string;
-  /** Status marker from the latest code review. */
-  lastReviewStatus?: "PASS" | "FAIL";
-  /** Git baseline ref captured at Work mode entry (from git stash create or HEAD).
+  /** Git baseline ref captured at Work mode entry.
    *  Used by code review to diff only changes made during this work session.
-   *  Cleared on review PASS, blocked, reset, new plan, or commit. */
+   *  Cleared on review PASS, reset, new plan, or commit. */
   workBaselineRef?: string;
   /** Set of untracked file paths at Work mode entry.
    *  Used by code review to scope untracked content to only files created during this session. */
   workBaselineUntracked?: string[];
+  /** Todo items tracking work progress. */
+  todos: TodoItem[];
+  /** IDs of completed todos that have been hidden from the overlay. */
+  hiddenDoneIds: string[];
 }

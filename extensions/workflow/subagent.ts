@@ -3,17 +3,17 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ModelSpec, SubagentConfig, SubagentRole } from "./types.js";
 import { isReviewAgentAvailable, reviewAgentMissingHint } from "./agents.js";
 
-// ── Public result type (backward-compatible shape) ──
+// ── Public result type (v2: raw text, no status marker) ──
 
 export interface SubagentResult {
   role: string;
   model: string | null;
+  /** Raw text output from the subagent (no PASS/FAIL extraction). */
   text: string;
   stopReason: string | null;
   exitCode: number;
   usage: { input: number; output: number; turns: number };
   stderr: string;
-  statusMarker?: "PASS" | "FAIL" | null;
   /** Child agent id when known (populated after successful spawn). */
   agentId?: string;
   /** Subagent wall-clock duration in ms (derived from pi-subagents event). */
@@ -48,16 +48,6 @@ interface CompletionEvent {
   tokens?: { input: number; output: number; total: number };
 }
 
-// ── Status marker extraction ─────────────────────
-
-export function extractStatusMarker(text: string): "PASS" | "FAIL" | null {
-  const planMatch = text.match(/PLAN_REVIEW_STATUS:\s*(PASS|FAIL)/);
-  if (planMatch) return planMatch[1] as "PASS" | "FAIL";
-  const reviewMatch = text.match(/REVIEW_STATUS:\s*(PASS|FAIL)/);
-  if (reviewMatch) return reviewMatch[1] as "PASS" | "FAIL";
-  return null;
-}
-
 // ── Error classes ────────────────────────────────
 
 export class SubagentNotAvailableError extends Error {
@@ -83,15 +73,14 @@ export class SubagentTimeoutError extends Error {
   }
 }
 
-// ── Internal diagnostic formatter (not a public API contract) ──
+// ── Failure formatter ────────────────────────────
 
 /**
  * Build a human-readable failure summary from a SubagentResult.
  *
- * This is an internal helper — the string it produces is used in UI
- * notifications, plan review notes, and workflow_subagent tool error
- * content.  It must always return a string and must tolerate missing
- * optional fields.
+ * Internal helper — used in UI notifications, plan review notes,
+ * and workflow_subagent tool error content.  Always returns a string
+ * and tolerates missing optional fields.
  */
 export function formatSubagentFailure(result: SubagentResult): string {
   const parts: string[] = [];
@@ -99,7 +88,7 @@ export function formatSubagentFailure(result: SubagentResult): string {
   // Header
   parts.push(`Subagent "${result.role}" failed (exit ${result.exitCode}).`);
 
-  // Optional metadata (additive-only — consumers of details.result are unaffected)
+  // Optional metadata
   if (result.agentId) parts.push(`Agent ID: ${result.agentId}.`);
   if (result.model) parts.push(`Model: ${result.model}.`);
   if (result.eventStatus) parts.push(`Status: ${result.eventStatus}.`);
@@ -109,7 +98,7 @@ export function formatSubagentFailure(result: SubagentResult): string {
   const stderrTrimmed = (result.stderr ?? "").trim().slice(0, 500);
   if (stderrTrimmed) parts.push(`stderr: ${stderrTrimmed}`);
 
-  // text for exitCode != 0 is usually an explanation (identity-marker validation, etc.)
+  // text for non-zero exit is usually an explanation
   const textTrimmed = (result.text ?? "").trim().slice(0, 1000);
   if (result.exitCode !== 0 && textTrimmed) {
     const prefix = result.exitCode === 2 ? "Validation result: " : "Result: ";
@@ -383,7 +372,7 @@ export function createSubagentsClient(pi: ExtensionAPI): SubagentsClient {
 
     // ── Terminal error events: surface immediately, skip identity-marker validation ──
     if (isError) {
-      const subagentResult: SubagentResult = {
+      return {
         role: opts.role,
         model: event.type ? `${agentType}(${event.type})` : agentType,
         text,
@@ -395,50 +384,49 @@ export function createSubagentsClient(pi: ExtensionAPI): SubagentsClient {
           turns: event.toolUses ?? 0,
         },
         stderr: event.error ?? `status: ${event.status}`,
-        statusMarker: null,
         agentId,
         durationMs: event.durationMs,
         eventStatus: event.status,
       };
-      return subagentResult;
     }
 
-    // ── Identity marker validation for custom review agents (successful completions only) ──
+    // ── Identity marker validation (v2: simplified) ──
+    // 1. Identity marker present → accept (success, exitCode 0)
+    // 2. Identity marker missing, but text non-empty → accept with warning (exitCode 0)
+    // 3. Identity marker missing AND text empty → reject (exitCode 2)
     const expectedMarker = IDENTITY_MARKERS[opts.role];
+
     if (expectedMarker && !text.includes(expectedMarker)) {
-      // Graceful degradation: if the output contains a valid status marker
-      // (PLAN_REVIEW_STATUS or REVIEW_STATUS), the review was substantive.
-      // Accept the result with a warning instead of hard-rejecting.
-      const hasValidStatusMarker = extractStatusMarker(text) !== null;
-      if (hasValidStatusMarker) {
-        // Identity marker missing but review content is valid — accept with warning.
-        // Let the normal success path proceed. Log for diagnostics.
-        console.warn(`[pi-workflow] Identity marker "${expectedMarker}" missing in subagent output, but valid review content detected (status marker present). Accepting result with warning.`);
-      } else {
-        // No identity marker AND no valid status marker — hard reject.
-        // The output is not a substantive review.
-        const subagentResult: SubagentResult = {
+      if (text.trim().length === 0) {
+        // No identity marker AND empty output → hard reject
+        return {
           role: opts.role,
           model: event.type ? `${agentType}(${event.type})` : agentType,
-          text: `Review result validation failed. The subagent output did not contain the ` +
-            `required pi-workflow identity marker "${expectedMarker}" and no valid review status was found. ` +
+          text:
+            `Review result validation failed. The subagent output did not contain the ` +
+            `required pi-workflow identity marker "${expectedMarker}" and the output was empty. ` +
             `This may mean the review agent was not correctly loaded or the review prompt was not applied. ` +
             `Try running /wf-install-subagents then /reload, and verify the review agent file includes the managed marker (<!-- managed-by: pi-workflow -->). ` +
             `Refusing to accept an untrusted or incorrectly prompted review result.`,
           stopReason: "identity_marker_missing",
           exitCode: 2,
           usage: { input: 0, output: 0, turns: 0 },
-          stderr: `Identity marker "${expectedMarker}" not found in agent output and no valid status marker present.`,
-          statusMarker: null,
+          stderr: `Identity marker "${expectedMarker}" not found in agent output and output was empty.`,
           agentId,
           durationMs: event.durationMs,
           eventStatus: event.status,
         };
-        return subagentResult;
       }
+
+      // Identity marker missing but text non-empty → accept with warning
+      console.warn(
+        `[pi-workflow] Identity marker "${expectedMarker}" missing in subagent output, ` +
+        `but output text is non-empty. Accepting result with warning.`,
+      );
     }
 
-    const subagentResult: SubagentResult = {
+    // ── Success path ──
+    return {
       role: opts.role,
       model: event.type ? `${agentType}(${event.type})` : agentType,
       text,
@@ -450,13 +438,10 @@ export function createSubagentsClient(pi: ExtensionAPI): SubagentsClient {
         turns: event.toolUses ?? 0,
       },
       stderr: "",
-      statusMarker: extractStatusMarker(text),
       agentId,
       durationMs: event.durationMs,
       eventStatus: event.status,
     };
-
-    return subagentResult;
   }
 
   function installHint(): string {
