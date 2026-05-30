@@ -7,10 +7,8 @@ import { loadConfig } from "./config.js";
 import { todoText } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import { createWorkBaseline, captureBaselineUntracked } from "./baseline.js";
-import type { WorkflowState, SubagentRole } from "./types.js";
-import type { SubagentsClient } from "./subagent.js";
-import { formatSubagentFailure } from "./subagent.js";
-import { promptForSubagentRole } from "./prompts.js";
+import type { WorkflowState } from "./types.js";
+import { executePlanReviewSidecall } from "./sidecall.js";
 
 const TodoStatusSchema = StringEnum([
   "pending",
@@ -268,102 +266,64 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
   });
 }
 
-// ── workflow_subagent tool ─────────────────────
+// ── workflow_subagent tool (sidecall-based) ─────────────────
 
-const SubagentRoleSchema = StringEnum([
-  "planReview",
-  "review",
-  "explore",
-] as const);
+/** Only planReview role remains — review and explore removed. */
+const SubagentRoleSchema = StringEnum(["planReview"] as const);
 
 export function registerSubagentTool(
   pi: ExtensionAPI,
   getAgentDir: () => string,
-  getSubagentsClient: () => SubagentsClient
 ): void {
   pi.registerTool({
     name: "workflow_subagent",
-    label: "Workflow Subagent",
+    label: "Workflow Plan Review",
     description:
-      "Spawn a role-shaped child Pi process with no parent session history. Supported roles: planReview (isolated plan review), review (isolated code review), explore (fast read-only codebase exploration). Review agents can use read, bash (non-mutating), and extension tools — only workflow tools (workflow_plan, workflow_todo, workflow_subagent) are blocked. Child returns its full text output with structured feedback.",
+      "Request an independent plan review from a separately-configured reviewer model via a single LLM side-call. The reviewer receives the full plan text plus auto-extracted key file snippets, conversation summary, and tool inventory. Returns structured feedback with Critical/Important/Minor severity ratings.",
     promptSnippet:
-      "workflow_subagent: spawn a child Pi process to handle review or exploration with a clean session.",
+      "workflow_subagent: get an objective plan review from a reviewer model.",
     promptGuidelines: [
-      "Use workflow_subagent to get an objective review or explore the codebase without parent session history.",
-      "Provide role (planReview, review, or explore), task, and relevant context.",
-      "Use instructions for extra preferences (depth, format, focus).",
+      "Use workflow_subagent (role=planReview) to get an objective plan review after saving a plan.",
+      "Provide the plan content or a brief task description.",
+      "Use context for extra background (user constraints, discussion points).",
+      "Use instructions for review preferences (depth, focus areas).",
     ],
     parameters: Type.Object({
       role: SubagentRoleSchema,
       task: Type.String({
-        description: "The focused task for the subagent.",
+        description: "Description of what to review (plan content or brief summary).",
       }),
       context: Type.Optional(Type.String()),
       instructions: Type.Optional(Type.String()),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const config = loadConfig(ctx.cwd, getAgentDir());
-      const client = getSubagentsClient();
 
-      const role = params.role as SubagentRole;
-      const task = params.task as string;
-      const rawContext = (params.context as string | undefined) ?? "";
-      const instructions = (params.instructions as string | undefined) ?? "";
+      // Read the active plan from file if available
+      const state = loadState(ctx.cwd, getSessionKey(ctx.sessionManager));
+      const planMarkdown = state.planPath
+        ? readPlan(ctx.cwd, state.planPath)
+        : params.task;
 
-      // Build full task text: context + task
-      let fullTask = task;
-      if (rawContext.trim()) {
-        fullTask = `Context provided by parent:\n${rawContext.trim()}\n\nTask:\n${task}`;
-      }
-
-      // Get isolated system prompt
-      const systemPrompt = promptForSubagentRole(role);
-      if (!systemPrompt) {
+      if (!planMarkdown) {
         return {
           isError: true,
-          content: [{ type: "text", text: `Unknown subagent role: ${role}` }],
+          content: [{ type: "text", text: "No plan content to review. Save a plan first or provide task text." }],
           details: {},
         };
       }
 
-      try {
-        const result = await client.run({
-          role,
-          task: fullTask,
-          systemPrompt,
-          instructions,
-          subagentConfig: config.subagent,
-          modelSpec: config.models[role],
-          signal,
-          cwd: ctx.cwd,
-          agentDir: getAgentDir(),
-        });
+      const extraContext = [
+        (params.context as string | undefined) ?? "",
+        (params.instructions as string | undefined) ?? "",
+      ].filter(Boolean).join("\n\n");
 
-        if (result.exitCode !== 0) {
-          const diag = formatSubagentFailure(result);
-          return {
-            content: [{ type: "text", text: diag }],
-            details: { result },
-            isError: true,
-          };
-        }
-
-        return {
-          content: [{ type: "text", text: result.text || "(empty response)" }],
-          details: { result },
-        };
-      } catch (err: any) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: `Subagent execution error: ${err.message ?? String(err)}`,
-            },
-          ],
-          details: {},
-        };
-      }
+      return executePlanReviewSidecall(ctx, pi, {
+        planMarkdown,
+        extraContext: extraContext || undefined,
+        modelSpec: config.models.planReview,
+        signal,
+      });
     },
   });
 }

@@ -1,16 +1,16 @@
 /**
- * Pi Workflow Extension (v2)
+ * Pi Workflow Extension (v3)
  *
  * A lightweight software development workflow with simplified mode flow:
- * idle → plan → work → commit. Review subagents are called synchronously
- * within plan and work modes — no async state transitions or handoff markers.
+ * idle → plan → work → commit.
  *
- * Subagents are powered by @tintinweb/pi-subagents (required).
+ * Plan review uses completeSimple sidecall (no subprocess).
+ * Code review uses alibaba/open-code-review CLI.
+ * No external extension dependency required.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { createSubagentsClient, type SubagentsClient } from "./subagent.js";
 import { loadState, getSessionKey } from "./state.js";
 import { loadConfig } from "./config.js";
 import {
@@ -24,7 +24,11 @@ import {
   registerPlanTool,
   registerSubagentTool,
 } from "./tools.js";
+
 import {
+  registerBeforeAgentStart,
+  registerToolCallGuard,
+  registerAgentEnd,
   registerPlanCommand,
   registerWorkCommand,
   registerReviewCommand,
@@ -33,25 +37,13 @@ import {
   registerWfExitCommand,
   registerWfResetCommand,
   registerWfInitCommand,
-  registerWfInstallSubagentsCommand,
-  registerBeforeAgentStart,
-  registerToolCallGuard,
-  registerAgentEnd,
-  setSubagentsClient,
 } from "./commands.js";
 
 export default function (pi: ExtensionAPI) {
-  // ═══════════════════════════════════════════════════
-  // Detect pi-subagents. Must be loaded as a separate
-  // extension before pi-workflow.
-  // ═══════════════════════════════════════════════════
-  let subagentsClient: SubagentsClient = createSubagentsClient(pi);
-  setSubagentsClient(subagentsClient);
-
   // ── Tools ──────────────────────────────────
   registerTodoTool(pi, getAgentDir);
   registerPlanTool(pi, getAgentDir);
-  registerSubagentTool(pi, getAgentDir, () => subagentsClient);
+  registerSubagentTool(pi, getAgentDir);
 
   // ── Commands ───────────────────────────────
   registerPlanCommand(pi, getAgentDir);
@@ -62,36 +54,13 @@ export default function (pi: ExtensionAPI) {
   registerWfExitCommand(pi);
   registerWfResetCommand(pi);
   registerWfInitCommand(pi);
-  registerWfInstallSubagentsCommand(pi, getAgentDir);
 
-  // ── Lifecycle events ───────────────────────
+  // ── Event handlers ─────────────────────────
   registerBeforeAgentStart(pi, getAgentDir);
   registerToolCallGuard(pi, getAgentDir);
   registerAgentEnd(pi, getAgentDir);
 
-  // ── Overlay lifecycle ──────────────────────
-  pi.on("session_start", async (_event, ctx) => {
-    if (!ctx.hasUI) return;
-    const config = loadConfig(ctx.cwd, getAgentDir());
-    if (!config.todoOverlay?.enabled) return;
-
-    const sessionKey = getSessionKey(ctx.sessionManager);
-    const state = loadState(ctx.cwd, sessionKey);
-
-    let overlay = getWorkflowOverlay();
-    if (!overlay) {
-      overlay = new WorkflowTodoOverlay();
-      setWorkflowOverlay(overlay);
-    }
-    overlay.setUICtx(ctx.ui);
-    overlay.update(state.todos);
-  });
-
-  pi.on("session_shutdown", async () => {
-    const overlay = getWorkflowOverlay();
-    if (overlay) {
-      overlay.dispose();
-      setWorkflowOverlay(undefined);
-    }
-  });
+  // ── Overlay setup ──────────────────────────
+  const overlay = new WorkflowTodoOverlay();
+  setWorkflowOverlay(overlay);
 }

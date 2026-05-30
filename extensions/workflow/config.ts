@@ -53,9 +53,8 @@ export function loadConfig(cwd: string, agentDir: string): WorkflowConfig {
     }
   }
 
-  // Normalize: restrict subagent to known keys so removed/stale fields like
-  // enabled/timeoutMs/extensionMode/extensions/fallbackToInlineReview do not
-  // survive from old user configs.
+  // Normalize: strip stale fields from old configs (e.g. the removed
+  // subagent section, old planReview.maxLoops/codeReview.maxLoops/codeReview.auto).
   merged = normalizeConfig(merged);
 
   return merged;
@@ -63,16 +62,38 @@ export function loadConfig(cwd: string, agentDir: string): WorkflowConfig {
 
 /**
  * Normalize a config object to the current schema.
- * Removes unknown subagent keys such as the old enabled/timeoutMs/extensionMode
- * fields that no longer have any runtime effect.
+ * Removes stale sections that no longer exist in the types (e.g. subagent),
+ * and strips unknown keys from codeReview/planReview.
  */
-function normalizeConfig(cfg: WorkflowConfig): WorkflowConfig {
-  const sa = cfg.subagent as any;
-  if (!sa) return cfg;
-  const allowedSubagent = ["installSource", "rpcTimeoutMs", "resultTimeoutMs", "autoInstall", "agentTypes", "maxTurns"];
-  const cleaned: any = {};
-  for (const k of allowedSubagent) {
-    if (k in sa) cleaned[k] = sa[k];
+function normalizeConfig(cfg: any): WorkflowConfig {
+  // Remove the old `subagent` section entirely — it no longer exists.
+  if ("subagent" in cfg) {
+    delete cfg.subagent;
   }
-  return { ...cfg, subagent: cleaned as WorkflowConfig["subagent"] };
+
+  // Remove stale planReview fields (maxLoops no longer used)
+  if (cfg.planReview && typeof cfg.planReview === "object") {
+    const pr: any = {};
+    if ("enabled" in cfg.planReview) pr.enabled = cfg.planReview.enabled;
+    cfg.planReview = pr;
+  }
+
+  // Remove stale codeReview fields (maxLoops, auto)
+  if (cfg.codeReview && typeof cfg.codeReview === "object") {
+    const cr: any = {};
+    if ("enabled" in cfg.codeReview) cr.enabled = cfg.codeReview.enabled;
+    if ("ocrBinary" in cfg.codeReview) cr.ocrBinary = cfg.codeReview.ocrBinary;
+    if ("timeoutMs" in cfg.codeReview) cr.timeoutMs = cfg.codeReview.timeoutMs;
+    if ("maxLoops" in cfg.codeReview) cr.maxLoops = cfg.codeReview.maxLoops;
+    cfg.codeReview = cr;
+  }
+
+  // Remove stale models entries (explore)
+  if (cfg.models && typeof cfg.models === "object") {
+    if ("explore" in cfg.models) {
+      delete cfg.models.explore;
+    }
+  }
+
+  return cfg as WorkflowConfig;
 }

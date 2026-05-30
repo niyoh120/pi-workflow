@@ -27,39 +27,18 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
       model: "gpt-5.1-mini",
       thinking: "low",
     },
-    explore: {
-      provider: "openai",
-      model: "gpt-5.1",
-      thinking: "high",
-    },
   },
   planReview: {
     enabled: true,
-    maxLoops: 2,
   },
   codeReview: {
     enabled: true,
+    ocrBinary: "ocr",
+    timeoutMs: 300_000,
     maxLoops: 3,
-    auto: true,
   },
   todoOverlay: {
     enabled: true,
-  },
-  subagent: {
-    installSource: "npm:@tintinweb/pi-subagents",
-    rpcTimeoutMs: 5000,
-    resultTimeoutMs: 600_000,
-    autoInstall: false,
-    agentTypes: {
-      planReview: "pi-workflow-plan-review",
-      review: "pi-workflow-code-review",
-      explore: "Explore",
-    },
-    maxTurns: {
-      planReview: 30,
-      review: 30,
-      explore: 30,
-    },
   },
   askUserQuestion: {
     enabled: true,

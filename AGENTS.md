@@ -6,15 +6,14 @@
 
 ### 核心能力
 - **Plan Mode** (`/plan`) — 生成实现计划
-- **Plan Review Mode** (自动) — 隔离环境审查计划
+- **Plan Review Mode** (自动) — same-turn `completeSimple()` 侧调用审查计划，无需子进程
 - **Work Mode** (`/work`) — 执行已批准的计划
 - **Fix Mode** (自动) — 修复 Code Review 发现的问题
-- **Code Review Mode** (`/review`) — 基于 git diff 的隔离代码审查
+- **Code Review Mode** (`/review`) — 基于 alibaba/open-code-review CLI (`ocr review`) 的代码审查
 - **Commit Mode** (`/commit`) — 生成符合 Conventional Commits 的提交信息
-- **Explore** — 只读代码库探索 (由 `@tintinweb/pi-subagents` 提供)
 
 ### 依赖
-- **必须**: `@tintinweb/pi-subagents` (隔离子代理运行时)
+- **必须**: 无外部 Pi 扩展依赖。Plan Review 使用内置 `completeSimple()` 侧调用；Code Review 使用外部 `ocr` CLI（需单独安装）
 - **可选**: `@juicesharp/rpiv-ask-user-question` (结构化问答对话框)
 
 ### 技术栈
@@ -28,24 +27,20 @@
 
 ### 安装
 ```bash
-# 安装依赖子代理
-pi install npm:@tintinweb/pi-subagents
-
 # 安装本扩展（从项目根目录）
 pi install .
 
-# 同步审查容器 & 重载
-/wf-install-subagents
+# 重载
 /reload
+
+# (可选) 安装 alibaba/open-code-review CLI 用于 Code Review
+# go install github.com/alibaba/open-code-review/cmd/ocr@latest
 ```
 
 ### 验证
 ```bash
 # todo 状态生命周期回归验证
 node scripts/validate-todo-regression.mjs
-
-# 子代理诊断检查
-node scripts/check-subagent-diagnostics.mjs
 ```
 
 ### 工作流命令（Pi 内）
@@ -54,13 +49,12 @@ node scripts/check-subagent-diagnostics.mjs
 | `/plan` | 进入 Plan Mode |
 | `/go [--force]` | 批准计划并交予 Work Mode |
 | `/work [task]` | 跳过计划，直接实现 |
-| `/review` | 手动触发 Code Review |
+| `/review` | 手动触发 Code Review (调用 `ocr review`) |
 | `/commit [notes]` | 生成并执行 Conventional Commit |
 | `/wf-status` | 查看当前工作流状态 |
 | `/wf-exit` | 退出工作流模式 |
 | `/wf-reset` | 清空工作流状态和计划目录 |
 | `/wf-init` | 初始化 git 仓库并生成/更新 AGENTS.md |
-| `/wf-install-subagents` | 安装子代理并同步审查容器 |
 
 ## 代码风格/规范
 
@@ -92,32 +86,28 @@ node scripts/check-subagent-diagnostics.mjs
 pi-workflow/
 ├── extensions/
 │   └── workflow/                     # 扩展核心源码
-│       ├── agents/                   # 审查容器定义（.md 文件）
-│       │   ├── pi-workflow-code-review.md
-│       │   └── pi-workflow-plan-review.md
 │       ├── index.ts                  # 扩展入口，注册所有命令/工具
 │       ├── types.ts                  # 核心类型定义
 │       ├── state.ts                  # 工作流运行时状态管理
 │       ├── paths.ts                  # 文件系统路径工具
 │       ├── config.ts                 # 配置加载与合并
 │       ├── defaults.ts               # 默认配置/状态常量
-│       ├── tools.ts                  # 工具注册（workflow_todo / workflow_plan / workflow_subagent / workflow_status）
-│       ├── commands.ts               # 命令注册（/plan /go /work /review /commit /wf-*）
-│       ├── subagent.ts               # 子代理客户端（@tintinweb/pi-subagents 集成）
+│       ├── tools.ts                  # 工具注册（workflow_todo / workflow_plan / workflow_subagent）
+│       ├── commands.ts               # 命令注册（/plan /work /review /commit /wf-*）
+│       ├── sidecall.ts               # Plan Review sidecall（completeSimple 侧调用）
 │       ├── prompts.ts                # 提示词和审查指令
 │       ├── todo-overlay.ts           # 进度叠加层（widget）
 │       ├── guards.ts                 # 守卫函数（模式控制、状态验证）
-│       └── helpers.ts                # 通用辅助函数
-├── scripts/                          # 回归验证和诊断脚本
-│   ├── validate-todo-regression.mjs
-│   └── check-subagent-diagnostics.mjs
+│       ├── mode.ts                   # 运行时模式切换
+│       ├── helpers.ts                # 通用辅助函数
+│       └── baseline.ts               # git baseline 工具（Work mode entry 快照）
+├── scripts/                          # 回归验证脚本
+│   └── validate-todo-regression.mjs
 ├── .pi/
-│   ├── agents/                       # 本地代理定义（审查容器副本）
-│   ├── workflow/                     # 工作流运行时数据（gitignored，除 agents/ 外）
+│   ├── workflow/                     # 工作流运行时数据（gitignored）
 │   │   ├── config.json               # 项目级配置（可选）
 │   │   ├── plan/                     # 计划文档（自动生成，随机命名）
 │   │   └── sessions/                 # 会话隔离状态存储
-│   └── subagent-schedules/
 ├── .gitignore
 ├── package.json                      # pi 扩展注册
 └── README.md
@@ -126,9 +116,9 @@ pi-workflow/
 ### 关键约定
 - **会话隔离**: 运行时工作流状态存储在 `.pi/workflow/sessions/<safeSessionKey>/`，每个 Pi 进程独立
 - **计划文件**: 共享 `.pi/workflow/plan/` 目录，文件名随机化
-- **审查容器**: agent `.md` 文件仅声明工具权限，不含模型配置（模型由 `config.json` 统一控制）
+- **Plan Review**: 使用 `completeSimple()` 同一 turn 内 LLM 侧调用，无子进程、无 agent 容器
+- **Code Review**: 使用 alibaba/open-code-review CLI (`ocr review`)，独立进程运行
 - **配置合并**: `DEFAULT_CONFIG` ← `~/.pi/agent/workflow/config.json` ← `.pi/workflow/config.json`
-- **gitignore**: `.pi/*` 但不是 `.pi/agents/*` 和 `.pi/agents/*`
 
 ## 工作流规则
 
@@ -139,29 +129,25 @@ idle → plan → planReview → work → review ↔ fix → commit → idle
 ```
 
 - **Plan Mode**: 用户发起 `/plan`，AI 探索、讨论、确认需求充分后产出计划文档并保存。保存后自动触发 plan-review，评审通过后由用户确认执行
-- **Plan Review Mode**: 计划保存后自动进入，最⼤ loop 次数由 `config.planReview.maxLoops` 控制
+- **Plan Review Mode**: 计划保存后自动进入，通过 `completeSimple()` 侧调用审查（同一 turn 内完成），最大 loop 由 prompt 自约束
 - **Work Mode**: 执行批准的计划，使用 `workflow_todo` 跟踪进度
-- **Code Review Mode**: Work 完成后或手动 `/review`，触发隔离子代理审查
+- **Code Review Mode**: Work 完成后或手动 `/review`，调用 `ocr review` CLI
 - **Fix Mode**: 审查发现 critical/important 问题后自动进入，修复后重新触发 review
 - **Commit Mode**: review 通过后，生成 Conventional Commit
 
 ### 核心规则
 1. **状态持久化**: 每次状态变更必须调用 `saveState()` 写盘
 2. **计划批准先行**: Work Mode 前必须通过 `workflow_plan approve` 排队 handoff（`mode=workPending + pendingWorkHandoff`），由 `before_agent_start` 最终确认进入 Work Mode。Approval 以持久化状态（`mode`、`pendingWorkHandoff`、review status）为准，不依赖当前 turn 的 in-memory guard。除非 `/work` 跳过计划。
-3. **审查隔离**: Plan Review 和 Code Review 必须在独立子代理中执行，使用 `workflow_subagent` 工具
+3. **审查隔离**: Plan Review 使用 same-turn `completeSimple()` 侧调用（`workflow_subagent` 工具）；Code Review 使用 OCR CLI 独立进程
 4. **Review 循环防死锁**: Review loop 计数器作用域为每次 trigger，非全局 session
 5. **Todo 管理**: 计划开始后通过 `workflow_todo` 跟踪每步进度，Work 完成后 todo 列表在 `workflow_plan save` 时自动清空
 6. **进度叠加层**: 非 idle 模式下显示 todo 进度 widget，所有任务完成后自动隐藏（保留已隐藏的任务 ID，避免跨计划残留）
-7. **子代理超时**: `resultTimeoutMs` 默认 10 分钟，超时或失败需调用诊断脚本定位问题
-8. **会话无泄漏**: 同一项目目录下两个 Pi 进程使用独立状态路径，互不影响
+7. **会话无泄漏**: 同一项目目录下两个 Pi 进程使用独立状态路径，互不影响
 
 ### 安全/禁止事项
 
 #### 禁止
-- **禁止** 在审查容器 agent `.md` 中嵌入模型/thinking 配置 — 这些值必须在 `config.json` 中集中管理
 - **禁止** 直接写入 `.pi/workflow` 下的 session 状态文件 — 必须通过 `saveState()` 操作
-- **禁止** 修改扩展的 `.md` 文件中 `<!-- managed-by: pi-workflow -->` 标记
-- **禁止** 在审查子代理中启用 `write`、`edit` 或 `extensions` 工具 — 审查代理必须是只读的
 - **禁止** 在 Work Mode 中跳过 todo 进度追踪 — 每项任务必须至少标记一次 `in_progress` 和 `completed`
 - **禁止** 在跨计划场景中重用未清理的 `hiddenDoneIds` — 必须调用 `clearBookkeeping()` 重置
 
@@ -212,11 +198,10 @@ chore: update gitignore
 ## 启动/开发指引
 
 1. 克隆仓库后使用 `pi install .` 安装扩展
-2. 安装必须依赖：`pi install npm:@tintinweb/pi-subagents`
-3. 在 Pi 中执行 `/wf-install-subagents` 同步审查容器
-4. 执行 `/reload` 重载扩展
-5. 执行 `node scripts/validate-todo-regression.mjs` 验证基础功能
-6. 使用 `/wf-status` 确认工作流状态正常
+2. 执行 `/reload` 重载扩展
+3. 执行 `node scripts/validate-todo-regression.mjs` 验证基础功能
+4. 使用 `/wf-status` 确认工作流状态正常
+5. (可选) 安装 `ocr` CLI 以启用 Code Review 功能
 
 ---
 

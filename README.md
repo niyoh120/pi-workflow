@@ -1,37 +1,47 @@
 # pi-workflow
 
-Lightweight software development workflow extension for pi-coding-agent: plan, isolated plan review, implementation, isolated code review, codebase exploration subagents, and commit orchestration.
+Lightweight software development workflow extension for pi-coding-agent: plan, built-in plan review (sidecall), implementation, code review via alibaba/open-code-review CLI, and commit orchestration.
 
-**Requirements:** `@tintinweb/pi-subagents` must be installed and loaded before pi-workflow. Without it, subagent-backed features (plan review, code review, `workflow_subagent`) will fail with an install/reload hint.
+**Zero external Pi extension dependencies.** Plan review uses `completeSimple()` — a same-turn LLM sidecall with no subprocess. Code review runs via the standalone `ocr review` CLI. No `@tintinweb/pi-subagents` required.
 
 ## Installation
 
 ```bash
-# 1. Install required dependency
-pi install npm:@tintinweb/pi-subagents
-
-# 2. (Optional) Structured user-question dialog — enables tabbed option selectors in plan/approval flows
+# 1. (Optional) Structured user-question dialog — enables tabbed option selectors in plan/approval flows
 pi install npm:@juicesharp/rpiv-ask-user-question
 
-# 3. Install pi-workflow globally
+# 2. Install pi-workflow
 pi install .
 
-# 4. Inside Pi, sync minimal review containers and reload
-/wf-install-subagents
+# 3. (For code review) Install alibaba/open-code-review CLI
+#    See: https://github.com/alibaba/open-code-review#install
+#    e.g.: go install github.com/alibaba/open-code-review/cmd/ocr@latest
+
+# 4. Reload
 /reload
 ```
 
 > **Note:** `@juicesharp/rpiv-ask-user-question` is optional. Without it, Plan Mode uses normal chat for clarifying questions and approval confirmation. Install it for a richer tabbed-dialog experience (multi-select, side-by-side previews, typed notes). As with any third-party Pi package, review the source before installing.
+
+## Architecture
+
+```
+idle → plan → planReview → work → review ⟷ fix → commit → idle
+```
+
+- **Plan Review**: Same-turn `completeSimple()` sidecall with curated context (plan text + auto-extracted key file snippets + conversation summary + tool inventory). The reviewer model sees exactly what it needs — no subprocess, no isolation overhead.
+- **Code Review**: Runs `ocr review --from <baselineRef> --to HEAD` via alibaba/open-code-review CLI. Delivers structured results with severity classification.
+- **Explore**: Not included. Install `@tintinweb/pi-subagents` separately if you want its built-in explore agent.
 
 ## Modes
 
 | Mode | Command | Description |
 |------|---------|-------------|
 | Plan Mode | `/plan` | Brainstorm and produce an implementation plan |
-| Plan Review Mode | (auto) | Review the plan before execution |
+| Plan Review Mode | (auto) | Same-turn plan review via completeSimple sidecall |
 | Work Mode | `/work` | Implement the approved plan |
 | Fix | (auto) | Fix critical/important issues from code review |
-| Code Review Mode | `/review` | Review the current git diff |
+| Code Review Mode | `/review` | Run `ocr review` on current diff |
 | Commit Mode | `/commit` | Generate and execute a conventional commit |
 
 ## Configuration
@@ -71,36 +81,16 @@ pi install .
       "provider": "openai",
       "model": "gpt-5.1-mini",
       "thinking": "low"
-    },
-    "explore": {
-      "provider": "openai",
-      "model": "gpt-5.1",
-      "thinking": "high"
     }
   },
   "planReview": {
-    "enabled": true,
-    "maxLoops": 2
+    "enabled": true
   },
   "codeReview": {
     "enabled": true,
+    "ocrBinary": "ocr",
+    "timeoutMs": 300000,
     "maxLoops": 3
-  },
-  "subagent": {
-    "installSource": "npm:@tintinweb/pi-subagents",
-    "rpcTimeoutMs": 5000,
-    "resultTimeoutMs": 600000,
-    "autoInstall": false,
-    "agentTypes": {
-      "planReview": "pi-workflow-plan-review",
-      "review": "pi-workflow-code-review",
-      "explore": "Explore"
-    },
-    "maxTurns": {
-      "planReview": 30,
-      "review": 30,
-      "explore": 30
-    }
   },
   "askUserQuestion": {
     "enabled": true,
@@ -113,16 +103,40 @@ pi install .
 }
 ```
 
-### Subagent timeout configuration
+### Plan review sidecall
 
-- `rpcTimeoutMs` — Timeout for the initial RPC ping that detects whether `@tintinweb/pi-subagents` is loaded (default 5 s).
-- `resultTimeoutMs` — Maximum total time to wait for a spawned subagent to complete, measured from the spawn request (default 10 min).
-  - Set to `0` to disable the result timeout entirely (the parent will wait indefinitely).
-  - Override in global (`~/.pi/agent/workflow/config.json`) or project (`.pi/workflow/config.json`) config; the project value takes precedence.
+The plan review sidecall uses `completeSimple()` — a single LLM API call with no tools and no subprocess. The reviewer receives:
+
+- The full plan text
+- Auto-extracted file snippets from paths referenced in the plan
+- The executor's tool inventory (so it can assess whether the right tools are available)
+- (Future) A conversation summary capturing key user constraints and decisions
+
+**Configuration** only needs the model spec (`models.planReview`) — no agent containers, RPC timeouts, or subprocess management.
+
+**Thinking level "off"**: When `thinking` is set to `"off"`, the reasoning parameter is omitted from the completeSimple call entirely. The reviewer model runs without extended thinking.
+
+### Code review via OCR CLI
+
+Code review runs `ocr review --from <baselineRef> --to HEAD`. The `ocr` binary is expected in `PATH` or at the configured `ocrBinary` path.
+
+- `ocrBinary` — Path to the `ocr` binary (default: `"ocr"` — assumes in PATH).
+- `timeoutMs` — Maximum execution time in ms (default: 300,000 = 5 min).
+- `maxLoops` — Max review-then-fix loops. Prompt-constrained soft upper bound.
+
+The OCR CLI uses its own LLM configuration. Set it up with `ocr config set` or environment variables as described in the [open-code-review docs](https://github.com/alibaba/open-code-review).
 
 ### Project config
 
 `.pi/workflow/config.json` — same structure as the global config. Project values override global values.
+
+### Stale config cleanup
+
+On load, pi-workflow strips stale config keys from old versions:
+- Removed `subagent` section (no longer exists)
+- Removed `planReview.maxLoops` (no longer used)
+- Removed `codeReview.auto` (no longer used)
+- Removed `models.explore` (Explore removed)
 
 ## Plan Document Management
 
@@ -136,14 +150,13 @@ Each `workflow_plan save` creates a new plan file with a random name:
 
 ```
 .pi/workflow/plan/plan-a3b9f2c1.md          ← plan document
-.pi/workflow/plan/plan-a3b9f2c1.review.md   ← plan review notes
 ```
 
 This allows multiple plans to coexist in the same project without conflicts.
 
 ### Plan Path Visibility
 
-Every plan save, read, review, and `/wf-status` explicitly shows the plan file path (e.g., `.pi/workflow/plan/plan-a3b9f2c1.md`) so you can easily find and inspect the document.
+Every plan save, read, and `/wf-status` explicitly shows the plan file path (e.g., `.pi/workflow/plan/plan-a3b9f2c1.md`) so you can easily find and inspect the document.
 
 ### Plan Mode Confirmation Gate
 
@@ -153,7 +166,7 @@ Before producing and saving the final plan (which triggers automatic plan review
 
 Only after the user confirms the discussion is complete does the agent:
 1. Write the final plan document.
-2. Call `workflow_plan(action="save")` and `workflow_todo(action="reset")` — which triggers automatic plan review.
+2. Call `workflow_plan(action="save")` and `workflow_todo(action="reset")` — which triggers automatic plan review via sidecall.
 
 This prevents wasting tokens on auto-review when the user still wants to refine the design. Ordinary clarification replies or approach confirmations are NOT treated as permission to save.
 
@@ -164,85 +177,45 @@ This prevents wasting tokens on auto-review when the user still wants to refine 
 | `/plan` | Enter Plan Mode |
 | `/go [--force]` | Approve current plan and hand off to Work Mode |
 | `/work [task]` | Skip Plan Mode, go straight to implementation |
-| `/review` | Manual code review on current diff |
+| `/review` | Run `ocr review` on current diff |
 | `/commit [notes]` | Generate commit message and commit |
 | `/wf-status` | Show current workflow state (includes plan path and run IDs) |
 | `/wf-exit` | Exit workflow mode |
 | `/wf-reset` | Clear workflow state and plan directory |
 | `/wf-init` | Initialize agent workspace: ensure git repo, generate/update AGENTS.md |
-| `/wf-install-subagents` | Install @tintinweb/pi-subagents and sync review containers |
 
-## Subagents
+## Plan Review (Sidecall)
 
-Plan review, code review, and exploration run as **fresh-context subagents via @tintinweb/pi-subagents**. This provides:
+Plan review runs as a **same-turn `completeSimple()` sidecall** — no subprocess, no agent containers, no RPC. This provides:
 
-- **Clean context** — the reviewer sees only the plan or diff, not your full conversation.
-- **Parallel execution** — multiple subagents can run concurrently.
-- **Live widget UI** — see agent progress, tool usage, and token counts.
-- **Minimal containers** — `planReview` and `review` use lightweight pi-workflow custom agent files that only declare tool permissions; the actual review rules come from workflow-injected prompts.
-- **Tool blocking** — review agents block `workflow_subagent`, `workflow_todo`, `workflow_plan`, and `workflow_status` to prevent recursive workflow/subagent use and workflow state mutation.
-- **Exploration** — `explore` uses the built-in `Explore` agent type.
+- **Curated context** — the reviewer sees the plan text, auto-extracted file snippets, conversation summary, and executor tool inventory. No irrelevant conversation history.
+- **Fast & reliable** — single LLM API call, no subprocess communication risk.
+- **Zero config** — just set `models.planReview` in your config. No agent `.md` files to sync.
+- **Structured output** — `[pi-workflow-plan-review/v1]` identity marker + Critical/Important/Minor severity classification.
+- **Identity marker validation** — the sidecall validates the marker and returns an error if the reviewer model didn't follow the prompt correctly.
 
-Review agents run as **fresh sessions** without parent conversation history. By default they inherit the pi-subagents default tool set plus extensions and skills — the only blocked tools are the workflow family. The review prompts (not tool restrictions) are what enforce read-only discipline during review.
+## Code Review (OCR CLI)
 
-### Agent Types
+Code review uses alibaba/open-code-review's `ocr review` CLI:
 
-| Role | Agent Type | Source |
-|------|-----------|--------|
-| `planReview` | `pi-workflow-plan-review` | Review container (workflow tools blocked) — bundled and synced via `/wf-install-subagents` |
-| `review` | `pi-workflow-code-review` | Review container (workflow tools blocked) — bundled and synced via `/wf-install-subagents` |
-| `explore` | `Explore` | Built-in (from `@tintinweb/pi-subagents`) |
+- **Deterministic rules** — Built-in detectors for NPE, thread safety, XSS, SQL injection, etc. Not LLM-dependent.
+- **Dedicated review tools** — `code_search` for cross-file reference checking, `code_comment` for line-level annotations.
+- **Parallel execution** — Per-file goroutines (default 8 concurrent).
+- **Line-level comments** — Precise issue locations, not vague text descriptions.
+- **Severity classification** — Security/Defect → Critical, Maintainability/Quality → Important.
 
-Custom review agents are defined under `extensions/workflow/agents/` in the pi-workflow package. `/wf-install-subagents` syncs them to the global agents directory (`~/.pi/agent/agents/`) so pi-subagents discovers them in any project.
-
-If custom review agents are missing from both project (`.pi/agents/`) and global paths, review operations will fail with a clear error and install instructions — there is no silent fallback.
-
-Custom review agent files are **minimal containers** — they only declare tool permissions and a short neutral prompt. The complete review rules and output format requirements come from pi-workflow's isolated review prompts, which are injected at runtime. This means:
-
-- **Model, thinking level, and turn limits are controlled exclusively by your workflow config** (`config.json`), not by the agent `.md` file.
-- The `.md` files contain no model configuration — there is no conflict between frontmatter and workflow config.
-
-Custom review agent frontmatter:
-
-```yaml
-disallowed_tools: workflow_subagent, workflow_plan, workflow_todo, workflow_status
-```
-
-Only workflow tools are blocked — review agents have full access to built-in tools, extensions, and skills. The review prompts enforce read-only discipline during review.
-
-### Early Exit (Blocked)
-
-Fix Mode can stop the auto review loop early when remaining review issues are invalid, out of scope, or require a user decision:
-
-```
-workflow_status({ status: "blocked", runId: currentRunId, error: "Issue #3 is invalid — the reviewer misread X. See tests at Y." })
-```
-
-This halts the review loop immediately and presents the rationale to the user for a decision. It prevents the wasteful pattern of repeated review cycles where the Fix agent cannot or should not address certain reviewer feedback.
-
-## Workflow Status (auto review trigger)
-
-Work/Fix mode no longer uses text markers (`WORK_STATUS: READY_FOR_REVIEW`). Instead, the agent must call:
-
-```
-workflow_status({ status: "ready_for_review", runId: currentRunId, summary: "...", tests: "..." })
-```
-
-or:
-
-```
-workflow_status({ status: "blocked", runId: currentRunId, error: "..." })
-```
-
-This is the **only** way to trigger automatic code review. The tool validates the current mode and run ID. If not called, or called with a stale run ID, auto review does not start and a diagnostic is shown.
+The `/review` command:
+1. Checks git repo and ocr CLI availability
+2. Runs `ocr review --from <workBaselineRef or HEAD~1> --to HEAD`
+3. Parses output and delivers results to the agent
 
 ## Trigger-Scoped Review Counters
 
 Plan review and code review loop counters limit review retries per trigger, not across the whole session.
 
 - `planReviewLoops` resets to `0` on every `workflow_plan save`. A save is a fresh plan-review trigger.
-- If plan review is enabled, each save creates a `pending` review status. Review failures increment `planReviewLoops` within that save-trigger only. When `planReviewLoops` reaches `maxLoops`, auto review stops and the user must decide manually.
-- `codeReviewLoops` resets to `0` when the Work-mode agent reports `ready_for_review` via `workflow_status`. This starts a fresh automatic review/fix sequence.
+- If plan review is enabled, each save creates a `pending` review status. Review failures increment `planReviewLoops` within that save-trigger only.
+- `codeReviewLoops` resets to `0` when the Work-mode agent reports `ready_for_review`. This starts a fresh automatic review/fix sequence.
 - Fix-mode `ready_for_review` does **not** reset `codeReviewLoops` — retries in the same auto sequence accumulate.
 - Manual `/review` never increments `codeReviewLoops` and does not consume the automatic fix-loop budget.
 - A prior trigger's review failures never block a later trigger in the same session.
@@ -266,35 +239,18 @@ Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) ar
 | Tool | Purpose |
 |------|---------|
 | `workflow_todo` | Maintain the todo list (reset, add, set, list) |
-| `workflow_plan` | Manage plans (save, approve, review, read, clear) — responses include plan path |
-| `workflow_subagent` | Spawn a read-only subagent via pi-subagents for review or exploration |
-| `workflow_status` | Report Work/Fix completion status — triggers auto code review |
+| `workflow_plan` | Manage plans (save, approve, read, clear) — responses include plan path |
+| `workflow_subagent` | Run a plan review sidecall via completeSimple (role=planReview only) |
 
 ### workflow_subagent
 
-Spawn a role-shaped, read-only subagent via @tintinweb/pi-subagents.
+Run a same-turn plan review via `completeSimple()` sidecall. The reviewer receives curated context (plan + file snippets + conversation summary + tool inventory) and returns structured feedback.
 
 **Parameters:**
-- `role` (required): `planReview` | `review` | `explore`
-- `task` (required): the focused task for the subagent
-- `context` (optional): explicit context for the subagent (parent session history is NOT available)
-- `instructions` (optional): additional preferences — depth, format, focus, search strategy
-
-**Roles:**
-- `planReview`: Isolated plan review using pi-workflow custom agent. Subagent outputs `PLAN_REVIEW_STATUS: PASS|FAIL`.
-- `review`: Isolated code diff review using pi-workflow custom agent. Subagent outputs `REVIEW_STATUS: PASS|FAIL`.
-- `explore`: Fast read-only codebase exploration using built-in `Explore` agent. Returns findings — no status marker required.
-
-### workflow_status
-
-Report completion status of Work/Fix mode. Must be called to trigger auto code review.
-
-**Parameters:**
-- `status` (required): `ready_for_review` | `blocked`
-- `runId` (required): the current `workRunId` from the workflow state — must match exactly
-- `summary` (optional): short summary of what was done
-- `tests` (optional): test results
-- `error` (optional): reason if blocked
+- `role` (required): `planReview` (the only supported role)
+- `task` (required): the plan content or a brief task description
+- `context` (optional): extra background (user constraints, discussion points)
+- `instructions` (optional): review preferences (depth, focus areas)
 
 ## Structured User Questions
 
@@ -320,7 +276,7 @@ Disable `enabled` to prevent activation even when the package is installed. Chan
 
 ## Built-in Todo Overlay
 
-pi-workflow includes a built-in progress overlay displayed above the editor in non-idle workflow modes (plan, work, fix, review). It does **not** require `@juicesharp/rpiv-todo` — the overlay reads `workflow_todo` state directly through extension code, so there is no manual sync step and no risk of two todo lists drifting apart.
+pi-workflow includes a built-in progress overlay displayed above the editor in non-idle workflow modes (plan, work). It does **not** require `@juicesharp/rpiv-todo` — the overlay reads `workflow_todo` state directly through extension code, so there is no manual sync step and no risk of two todo lists drifting apart.
 
 **Behavior:**
 - Shows pending, in-progress, done, and blocked tasks with status symbols (○ ◐ ✓ ⊘).
@@ -343,6 +299,6 @@ Set `todoOverlay.enabled` to `false` in the global or project config to hide the
 | Path | Purpose |
 |------|---------|
 | `.pi/workflow/config.json` | Project-level config |
-| `.pi/workflow/plan/` | Plan documents and review notes (shared, randomized filenames) |
+| `.pi/workflow/plan/` | Plan documents (shared, randomized filenames) |
 | `.pi/workflow/sessions/<key>/state.json` | Session-scoped runtime state |
 | `~/.pi/agent/workflow/config.json` | Global config |

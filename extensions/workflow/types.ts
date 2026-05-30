@@ -1,8 +1,7 @@
 export type Thinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
-export type Role = "plan" | "planReview" | "work" | "review" | "commit" | "explore";
-
-export type SubagentRole = "planReview" | "review" | "explore";
+/** Workflow roles — only the ones we actively configure models for. */
+export type Role = "plan" | "planReview" | "work" | "review" | "commit";
 
 /** Simplified mode: only 4 workflow states. */
 export type Mode = "idle" | "plan" | "work" | "commit";
@@ -22,26 +21,6 @@ export interface ModelSpec {
   thinking?: Thinking;
 }
 
-/** pi-subagents integration config. */
-export interface SubagentConfig {
-  /** Source for pi install, e.g. "npm:@tintinweb/pi-subagents". */
-  installSource?: string;
-  /** Timeout for RPC ping detection (ms). */
-  rpcTimeoutMs?: number;
-  /** Timeout waiting for subagent result (ms). 0 = no timeout. */
-  resultTimeoutMs?: number;
-  /** Opt-in auto-install. Off by default. */
-  autoInstall?: boolean;
-  /** Agent type names for workflow roles. */
-  agentTypes?: {
-    planReview?: string;
-    review?: string;
-    explore?: string;
-  };
-  /** Max turn limits per subagent role. Undefined or 0 = unlimited. */
-  maxTurns?: Partial<Record<SubagentRole, number>>;
-}
-
 /** Built-in workflow todo overlay config. Displayed above the editor in non-idle workflow modes. */
 export interface TodoOverlayConfig {
   /** Enable the workflow todo progress overlay. */
@@ -58,23 +37,27 @@ export interface AskUserQuestionConfig {
   installSource: string;
 }
 
+/** Code review via alibaba/open-code-review CLI. */
+export interface CodeReviewConfig {
+  /** Enable code review as a built-in workflow step. */
+  enabled: boolean;
+  /** Path to the ocr binary. Defaults to "ocr" (assumes in PATH). */
+  ocrBinary?: string;
+  /** Timeout for ocr CLI execution in ms. Default: 300_000 (5 min). */
+  timeoutMs?: number;
+  /** Max review-then-fix loops. Prompt-constrained; this is a soft upper bound. */
+  maxLoops?: number;
+}
+
 export interface WorkflowConfig {
   models: Record<Role, ModelSpec>;
-  /** Plan review config. Review is always enabled (builtin step); this only
-   *  controls model/thinking overrides and is kept for backward compat. */
+  /** Plan review config. Review is always enabled (builtin step);
+   *  this controls the model/thinking override for the sidecall. */
   planReview: {
     enabled: boolean;
-    maxLoops: number;
   };
-  /** Code review config. Review is always enabled (builtin step);
-   *  maxLoops and auto are kept for backward compat but no longer
-   *  enforce hard limits — prompt constraints guide loop termination. */
-  codeReview: {
-    enabled: boolean;
-    maxLoops: number;
-    auto: boolean;
-  };
-  subagent: SubagentConfig;
+  /** Code review via alibaba/open-code-review CLI. */
+  codeReview: CodeReviewConfig;
   todoOverlay: TodoOverlayConfig;
   askUserQuestion: AskUserQuestionConfig;
 }

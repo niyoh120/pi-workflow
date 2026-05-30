@@ -143,5 +143,3 @@ vite.config.ts.timestamp-*
 .vite/
 
 .pi/*
-!.pi/agents/
-!.pi/agents/*

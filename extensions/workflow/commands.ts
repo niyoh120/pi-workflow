@@ -3,15 +3,13 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import { getSessionKey, loadState, saveState, readPlan } from "./state.js";
 import { loadConfig } from "./config.js";
-import { COMMON_PROMPT, promptForMode, promptForSubagentRole } from "./prompts.js";
+import { COMMON_PROMPT, promptForMode } from "./prompts.js";
 import { isWorkflowDataPath, isReadonlyMode, isLocalFileMutatingShell, isAllowedPlanScratchPath } from "./guards.js";
 import { currentStatusText, todoText } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
 import { planDir } from "./paths.js";
-import type { SubagentsClient } from "./subagent.js";
-import { formatSubagentFailure } from "./subagent.js";
 import {
   activateWorkflowToolsIfAllowed,
   applyModeRuntime,
@@ -21,18 +19,7 @@ import {
 } from "./mode.js";
 import { execSync } from "node:child_process";
 import path from "node:path";
-import { syncReviewAgentsToGlobal, getGlobalAgentsDir } from "./agents.js";
-import { hasInitialCommit, gitRepoPreflight as gitRepoPreflightFn, createWorkBaseline, collectBaselineDiff, collectUntrackedFiles, formatUntrackedContext, captureBaselineUntracked, collectNoCommitReviewContext, clearWorkBaseline } from "./baseline.js";
-
-// ── Subagent client lazy init ────────────────────────────────────────────────
-
-let _subagentsClient: SubagentsClient;
-export function setSubagentsClient(c: SubagentsClient): void {
-  _subagentsClient = c;
-}
-function getSubagentsClient(): SubagentsClient {
-  return _subagentsClient;
-}
+import { hasInitialCommit, gitRepoPreflight as gitRepoPreflightFn, createWorkBaseline, captureBaselineUntracked, clearWorkBaseline } from "./baseline.js";
 
 // ── /wf-init helpers ─────────────────────────────────────────────────────────
 
@@ -72,6 +59,73 @@ function isProjectEmpty(root: string): boolean {
   const entries = fs.readdirSync(root, { withFileTypes: true });
   const meaningful = entries.filter((e) => !e.name.startsWith("."));
   return meaningful.length === 0;
+}
+
+// ── OCR CLI helpers ──────────────────────────────────────────────────────────
+
+/** Check whether the `ocr` CLI is available in PATH or at a configured path. */
+function checkOcrAvailable(binary: string): boolean {
+  try {
+    execSync(`${binary} version`, { stdio: "pipe", timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Run `ocr review` CLI and return its stdout. */
+function runOcrReview(
+  binary: string,
+  cwd: string,
+  fromRef: string,
+  timeoutMs: number,
+): string {
+  const args = ["review", "--from", fromRef, "--to", "HEAD"];
+  return execSync(`${binary} ${args.join(" ")}`, {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 10 * 1024 * 1024,
+    timeout: timeoutMs,
+  }).toString();
+}
+
+/**
+ * Parse OCR output into a structured format compatible with workflow's
+ * Critical/Important/Minor severity classification.
+ *
+ * OCR produces line-level comments and a summary. We extract severity
+ * from the comment category labels when present, and map:
+ *   Security/Defect → Critical
+ *   Maintainability/Quality → Important
+ *   everything else → Minor
+ *
+ * If OCR output doesn't have structured categories, we fall back to
+ * delivering the raw text directly.
+ */
+function parseOcrOutput(raw: string): {
+  hasCritical: boolean;
+  hasImportant: boolean;
+  formatted: string;
+} {
+  // OCR output is typically a structured report with line comments.
+  // For now, deliver it as-is and let the executor model classify severity.
+  // A more sophisticated parser can be added later based on OCR's JSON output format.
+  const lines = raw.split("\n");
+  let hasCritical = false;
+  let hasImportant = false;
+
+  // Heuristic: check for common severity indicators in OCR output
+  for (const line of lines) {
+    const lower = line.toLowerCase();
+    if (/\b(security|critical|bug|defect|npe|dead\s*loop|sql\s*injection|xss|buffer\s*overflow)\b/.test(lower)) {
+      hasCritical = true;
+    }
+    if (/\b(important|maintainability|quality|error\s*handling|edge\s*case|test\s*gap)\b/.test(lower)) {
+      hasImportant = true;
+    }
+  }
+
+  return { hasCritical, hasImportant, formatted: raw };
 }
 
 // ── Session key helper ───────────────────────────────────────────────────────
@@ -363,117 +417,71 @@ export function registerReviewCommand(
   getAgentDir: () => string
 ): void {
   pi.registerCommand("review", {
-    description: "使用 isolated subagent 检查当前 diff",
+    description: "使用 alibaba/open-code-review (ocr) CLI 检查当前 diff",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
       const sessionKey = ctxSessionKey(ctx);
       const state = loadState(ctx.cwd, sessionKey);
       const config = loadConfig(ctx.cwd, getAgentDir());
 
+      // 1. Git repo check
       if (!gitRepoPreflightFn(ctx.cwd, ctx)) {
         ctx.ui.notify("Code review aborted: no git repo.", "warning");
         return;
       }
 
-      // Build review context differently based on repo state
-      let reviewContext: string[];
-
-      if (hasInitialCommit(ctx.cwd)) {
-        // Standard repo with initial commit: use baseline diff
-        let statusText = "";
-        try {
-          statusText = execSync("git status --short", {
-            cwd: ctx.cwd,
-            encoding: "utf8",
-            maxBuffer: 1024 * 1024,
-          }).toString();
-        } catch {
-          statusText = "(could not run git status)";
-        }
-
-        const baselineDiff = collectBaselineDiff(ctx.cwd, state.workBaselineRef);
-        const untracked = collectUntrackedFiles(ctx.cwd, state.workBaselineUntracked);
-        const untrackedContext = formatUntrackedContext(untracked.contents);
-
-        reviewContext = [
-          `## Git Status`,
-          statusText || "(no changes)",
-          ``,
-          `## Git Diff Stat`,
-          baselineDiff.diffStat || "(empty)",
-          ``,
-          `## Git Diff (baseline: ${state.workBaselineRef ?? "HEAD"})`,
-          baselineDiff.diff || "(empty)",
-          ``,
-          `## Untracked Files (new in this session)`,
-          untrackedContext,
-        ];
-      } else {
-        // No initial commit: use no-commit review context
-        const noCommitCtx = collectNoCommitReviewContext(ctx.cwd, state.workBaselineUntracked);
-
-        reviewContext = [
-          `## Git Status`,
-          noCommitCtx.statusText,
-          ``,
-          `## Staged Diff (all changes, no HEAD to diff against)`,
-          noCommitCtx.stagedDiff,
-          ``,
-          `## Untracked Files`,
-          noCommitCtx.untrackedContext,
-        ];
+      if (!hasInitialCommit(ctx.cwd)) {
+        ctx.ui.notify("Code review aborted: no HEAD commit to diff against. Commit at least once first.", "warning");
+        return;
       }
 
-      // Include plan context
-      const planContent = state.planPath ? readPlan(ctx.cwd, state.planPath) : "";
-      const planContext = state.planPath
-        ? [`Plan file: ${state.planPath}`, planContent].join("\n\n")
-        : "(no plan)";
-
-      reviewContext.push(
-        ``,
-        `## Plan / Todo Context`,
-        planContext,
-        ``,
-        `## Todo Status`,
-        todoText(state),
-      );
-
-      const fullContext = reviewContext.join("\n");
-      const systemPrompt = promptForSubagentRole("review");
-
-      ctx.ui.notify("正在运行 isolated code review 子代理...", "info");
-
-      try {
-        const result = await getSubagentsClient().run({
-          role: "review",
-          task: `Review the current working tree changes provided below. Check the diff against the plan and todo context.\n\n${fullContext}`,
-          systemPrompt,
-          subagentConfig: config.subagent,
-          modelSpec: config.models.review,
-          cwd: ctx.cwd,
-          agentDir: getAgentDir(),
-        });
-
-        if (result.exitCode !== 0) {
-          const diag = formatSubagentFailure(result);
-          ctx.ui.notify(`Code review subagent failed. ${diag}`, "error");
-          pi.sendUserMessage(`Code review subagent execution failed.\n\nDiagnostic:\n${diag}\n\nSubagent output (truncated):\n${(result.text ?? "").slice(0, 3000)}`);
-          return;
-        }
-
-        // Deliver results directly to user
+      // 2. Check OCR availability
+      const ocrBinary = config.codeReview.ocrBinary ?? "ocr";
+      if (!checkOcrAvailable(ocrBinary)) {
         ctx.ui.notify(
-          result.text.trim().length > 0
-            ? "Code review completed."
-            : "Code review completed (empty response).",
-          "info"
+          `ocr CLI not found. Install alibaba/open-code-review:\n` +
+          `  https://github.com/alibaba/open-code-review\n` +
+          `  Download binary or: go install github.com/alibaba/open-code-review/cmd/ocr@latest`,
+          "error"
         );
-        pi.sendUserMessage(`Code Review Result:\n\n${result.text || "(empty response)"}`);
+        pi.sendUserMessage(
+          "Code review 无法执行：ocr CLI 未安装。\n" +
+          "请安装 alibaba/open-code-review 后再运行 /review。\n" +
+          "安装指南：https://github.com/alibaba/open-code-review#install"
+        );
+        return;
+      }
+
+      // 3. Determine baseline ref
+      const fromRef = state.workBaselineRef ?? "HEAD~1";
+
+      ctx.ui.notify(`正在运行 ocr review (--from ${fromRef} --to HEAD)...`, "info");
+
+      // 4. Run OCR review
+      const timeoutMs = config.codeReview.timeoutMs ?? 300_000;
+      try {
+        const rawOutput = runOcrReview(ocrBinary, ctx.cwd, fromRef, timeoutMs);
+        const parsed = parseOcrOutput(rawOutput);
+
+        // 5. Deliver results
+        ctx.ui.notify(
+          parsed.hasCritical ? "Code review 发现 Critical 问题。" :
+          parsed.hasImportant ? "Code review 发现 Important 问题。" :
+          "Code review 完成。",
+          parsed.hasCritical ? "warning" : "info"
+        );
+
+        pi.sendUserMessage(
+          `Code Review Result (via ocr review --from ${fromRef} --to HEAD):\n\n${parsed.formatted || "(empty output)"}`
+        );
       } catch (err: any) {
         const errMsg = err?.message ?? String(err);
-        ctx.ui.notify(`Code review subagent error: ${errMsg}`, "error");
-        pi.sendUserMessage(`Code review subagent error: ${errMsg}`);
+        const stderr = err?.stderr ?? "";
+        ctx.ui.notify(`ocr review 执行失败: ${errMsg}`, "error");
+        pi.sendUserMessage(
+          `Code review 执行失败。\n\n错误：${errMsg}\nstderr：${stderr.slice(0, 2000)}\n\n` +
+          `请检查 ocr 配置和 LLM 连接。运行 ocr llm test 验证 LLM 连通性。`
+        );
       }
     },
   });
@@ -572,71 +580,6 @@ export function registerWfResetCommand(pi: ExtensionAPI): void {
 
       ctx.ui.setStatus("lite-sp", undefined);
       ctx.ui.notify("已清空 workflow 状态。", "info");
-    },
-  });
-}
-
-/** Register the /wf-install-subagents command. */
-export function registerWfInstallSubagentsCommand(
-  pi: ExtensionAPI,
-  getAgentDir: () => string,
-): void {
-  pi.registerCommand("wf-install-subagents", {
-    description: "安装 @tintinweb/pi-subagents 并同步 review containers",
-    handler: async (_args, ctx) => {
-      await ctx.waitForIdle();
-
-      const agentDir = getAgentDir();
-
-      // 1. Install pi-subagents dependency
-      ctx.ui.notify("正在安装 @tintinweb/pi-subagents...", "info");
-
-      try {
-        execSync("pi install npm:@tintinweb/pi-subagents", {
-          cwd: ctx.cwd,
-          stdio: "pipe",
-          encoding: "utf8",
-          timeout: 60000,
-        });
-        ctx.ui.notify("@tintinweb/pi-subagents 已安装。", "info");
-      } catch (err: any) {
-        ctx.ui.notify(
-          `安装 pi-subagents 失败：${err?.stderr ?? err?.message ?? String(err)}\n请手动执行：pi install npm:@tintinweb/pi-subagents`,
-          "error"
-        );
-        return;
-      }
-
-      // 2. Sync review containers to global agents directory
-      const targetDir = getGlobalAgentsDir(agentDir);
-      ctx.ui.notify(`正在同步 review containers 到 ${targetDir}...`, "info");
-
-      const syncResult = syncReviewAgentsToGlobal(agentDir);
-
-      const messages: string[] = [];
-      if (syncResult.copied.length > 0) {
-        messages.push(`已同步：${syncResult.copied.join(", ")}`);
-      }
-      if (syncResult.skipped.length > 0) {
-        messages.push(`已跳过（用户文件）：${syncResult.skipped.join(", ")}`);
-      }
-      if (syncResult.errors.length > 0) {
-        messages.push(`错误：${syncResult.errors.join("; ")}`);
-      }
-
-      ctx.ui.notify(messages.join("\n"), syncResult.errors.length > 0 ? "warning" : "info");
-
-      // 3. Prompt reload
-      ctx.ui.notify(
-        "Review containers 已同步。请执行 /reload 或重启 Pi 使 pi-subagents 加载新 containers。",
-        "info"
-      );
-
-      // 4. Hint about optional ask-user-question
-      ctx.ui.notify(
-        "可选：安装 @juicesharp/rpiv-ask-user-question 可在 Plan Mode 中获得结构化确认对话框。执行 pi install npm:@juicesharp/rpiv-ask-user-question 然后 /reload。",
-        "info"
-      );
     },
   });
 }
