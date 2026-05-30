@@ -355,6 +355,7 @@ console.log("\n=== Check 6: Source verification ===");
   nsBody = nsBody.replace(/\bas\s+string\[\]/g, "");
   nsBody = nsBody.replace(/\(t:\s*any\)/g, "(t)");
   nsBody = nsBody.replace(/\(p:\s*any\)/g, "(p)");
+  nsBody = nsBody.replace(/\(id:\s*any\)/g, "(id)");
   nsBody = nsBody.replace(/:\s*(WorkflowState|string|number|boolean|unknown)\b/g, "");
   nsBody = nsBody.replace(/:\s*NonNullable<[^>]*>/g, "");
   const nsFnStr = "function normalizeState(raw) {" + nsBody + "\n}";

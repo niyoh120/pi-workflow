@@ -17,7 +17,7 @@ import {
   getCurrentTurnGuardMode,
   clearCurrentTurnGuardMode,
 } from "./mode.js";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync, execFile } from "node:child_process";
 import path from "node:path";
 import { hasInitialCommit, gitRepoPreflight as gitRepoPreflightFn, createWorkBaseline, captureBaselineUntracked, clearWorkBaseline } from "./baseline.js";
 
@@ -63,30 +63,51 @@ function isProjectEmpty(root: string): boolean {
 
 // ── OCR CLI helpers ──────────────────────────────────────────────────────────
 
+// ── OCR review helpers ───────────────────────────────────────────────────────
+
+import {
+  type ReviewScope,
+  buildScopeArgv,
+  ocrCommandSummary,
+  scopeSelectorComponent,
+  scopeInputComponent,
+  fixConfirmationComponent,
+} from "./review-tui.js";
+
 /** Check whether the `ocr` CLI is available in PATH or at a configured path. */
 function checkOcrAvailable(binary: string): boolean {
   try {
-    execSync(`${binary} version`, { stdio: "pipe", timeout: 5000 });
+    execFileSync(binary, ["version"], { stdio: "pipe", timeout: 5000 });
     return true;
   } catch {
     return false;
   }
 }
 
-/** Run `ocr review` CLI and return its stdout. */
-function runOcrReview(
+/** Run `ocr review` with an argv array asynchronously (no shell interpolation, non-blocking). */
+async function runOcrReviewArgv(
   binary: string,
   cwd: string,
-  fromRef: string,
+  argv: string[],
   timeoutMs: number,
-): string {
-  const args = ["review", "--from", fromRef, "--to", "HEAD"];
-  return execSync(`${binary} ${args.join(" ")}`, {
-    cwd,
-    encoding: "utf8",
-    maxBuffer: 10 * 1024 * 1024,
-    timeout: timeoutMs,
-  }).toString();
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(binary, argv, {
+      cwd,
+      encoding: "utf8",
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: timeoutMs,
+    }, (err, stdout, stderr) => {
+      if (err) {
+        // Attach stderr to the error for the caller to inspect
+        const errorWithStderr = err as Error & { stderr?: string };
+        errorWithStderr.stderr = stderr;
+        reject(errorWithStderr);
+        return;
+      }
+      resolve(stdout);
+    });
+  });
 }
 
 /**
@@ -417,7 +438,7 @@ export function registerReviewCommand(
   getAgentDir: () => string
 ): void {
   pi.registerCommand("review", {
-    description: "使用 alibaba/open-code-review (ocr) CLI 检查当前 diff",
+    description: "Interactive OCR code review — choose scope and options via TUI",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
       const sessionKey = ctxSessionKey(ctx);
@@ -430,57 +451,194 @@ export function registerReviewCommand(
         return;
       }
 
-      if (!hasInitialCommit(ctx.cwd)) {
-        ctx.ui.notify("Code review aborted: no HEAD commit to diff against. Commit at least once first.", "warning");
-        return;
-      }
-
       // 2. Check OCR availability
       const ocrBinary = config.codeReview.ocrBinary ?? "ocr";
       if (!checkOcrAvailable(ocrBinary)) {
         ctx.ui.notify(
           `ocr CLI not found. Install alibaba/open-code-review:\n` +
-          `  https://github.com/alibaba/open-code-review\n` +
-          `  Download binary or: go install github.com/alibaba/open-code-review/cmd/ocr@latest`,
-          "error"
+            `  https://github.com/alibaba/open-code-review\n` +
+            `  Download binary or: go install github.com/alibaba/open-code-review/cmd/ocr@latest`,
+          "error",
         );
         pi.sendUserMessage(
           "Code review 无法执行：ocr CLI 未安装。\n" +
-          "请安装 alibaba/open-code-review 后再运行 /review。\n" +
-          "安装指南：https://github.com/alibaba/open-code-review#install"
+            "请安装 alibaba/open-code-review 后再运行 /review。\n" +
+            "安装指南：https://github.com/alibaba/open-code-review#install",
         );
         return;
       }
 
-      // 3. Determine baseline ref
-      const fromRef = state.workBaselineRef ?? "HEAD~1";
+      // 3. TUI wizard: step 1 — select scope
+      const scopeKind = await ctx.ui.custom<ReviewScope["kind"] | null>(
+        (_tui, theme, _kb, done) =>
+          scopeSelectorComponent(theme, done),
+        { overlay: true },
+      );
 
-      ctx.ui.notify(`正在运行 ocr review (--from ${fromRef} --to HEAD)...`, "info");
+      if (scopeKind === null) {
+        ctx.ui.notify("Review cancelled.", "info");
+        return;
+      }
 
-      // 4. Run OCR review
+      // 4. TUI wizard: step 2 — scope inputs (if needed)
+      let scopeValues: Record<string, string> | null = null;
+      if (scopeKind === "baseline" || scopeKind === "range" || scopeKind === "commit") {
+        // Non-workspace modes need a HEAD commit to diff against
+        if (!hasInitialCommit(ctx.cwd)) {
+          ctx.ui.notify(
+            "Code review aborted: no HEAD commit to diff against. Commit at least once first.",
+            "warning",
+          );
+          return;
+        }
+
+        // Baseline mode needs a workflow baseline; abort now to avoid showing an empty form
+        if (scopeKind === "baseline" && !state.workBaselineRef) {
+          ctx.ui.notify(
+            "Review aborted: no workflow baseline available. Use workspace or custom range mode.",
+            "warning",
+          );
+          pi.sendUserMessage(
+            "Code review 未执行：baseline 模式缺少可用的 workflow baseline，请改用 workspace 或 custom range 模式。",
+          );
+          return;
+        }
+
+        scopeValues = await ctx.ui.custom<Record<string, string> | null>(
+          (_tui, theme, _kb, done) =>
+            scopeInputComponent(scopeKind, theme, state.workBaselineRef, done),
+          { overlay: true },
+        );
+
+        if (scopeValues === null) {
+          ctx.ui.notify("Review cancelled.", "info");
+          return;
+        }
+      }
+
+      // 5. Build scope
+      let scope: ReviewScope;
+      if (scopeKind === "workspace") {
+        scope = { kind: "workspace" };
+      } else if (scopeKind === "baseline") {
+        scope = {
+          kind: "baseline",
+          from: scopeValues?.from?.trim() || state.workBaselineRef!,
+          to: scopeValues?.to?.trim() || "HEAD",
+        };
+      } else if (scopeKind === "range") {
+        scope = {
+          kind: "range",
+          from: scopeValues?.from ?? "",
+          to: scopeValues?.to ?? "",
+        };
+      } else {
+        // commit
+        scope = {
+          kind: "commit",
+          commit: scopeValues?.commit ?? "",
+        };
+      }
+
+      // 6. Validate
+      if (scope.kind === "range" && (!scope.from || !scope.to)) {
+        ctx.ui.notify("Review aborted: from/to refs required for range mode.", "warning");
+        pi.sendUserMessage(
+          "Code review 未执行：range 模式需要同时指定 --from 和 --to。请重新运行 /review。",
+        );
+        return;
+      }
+      if (scope.kind === "commit" && !scope.commit) {
+        ctx.ui.notify("Review aborted: commit hash required for commit mode.", "warning");
+        pi.sendUserMessage(
+          "Code review 未执行：commit 模式需要指定 commit hash。请重新运行 /review。",
+        );
+        return;
+      }
+
+      // 7. Build argv and show summary
+      const argv = buildScopeArgv(scope);
+      const cmdSummary = ocrCommandSummary(ocrBinary, argv);
+      ctx.ui.notify(`Running: ${cmdSummary}`, "info");
+
+      // 8. Execute
       const timeoutMs = config.codeReview.timeoutMs ?? 300_000;
       try {
-        const rawOutput = runOcrReview(ocrBinary, ctx.cwd, fromRef, timeoutMs);
+        const rawOutput = await runOcrReviewArgv(ocrBinary, ctx.cwd, argv, timeoutMs);
         const parsed = parseOcrOutput(rawOutput);
 
-        // 5. Deliver results
+        // 9. Deliver results
+        let reviewMessage = "Code review 完成。";
+        if (parsed.hasCritical) {
+          reviewMessage = "Code review 发现 Critical 问题。";
+        } else if (parsed.hasImportant) {
+          reviewMessage = "Code review 发现 Important 问题。";
+        }
         ctx.ui.notify(
-          parsed.hasCritical ? "Code review 发现 Critical 问题。" :
-          parsed.hasImportant ? "Code review 发现 Important 问题。" :
-          "Code review 完成。",
-          parsed.hasCritical ? "warning" : "info"
+          reviewMessage,
+          parsed.hasCritical ? "warning" : "info",
         );
 
         pi.sendUserMessage(
-          `Code Review Result (via ocr review --from ${fromRef} --to HEAD):\n\n${parsed.formatted || "(empty output)"}`
+          `Code Review Result (via ${cmdSummary}):\n\n${parsed.formatted || "(empty output)"}`,  
         );
-      } catch (err: any) {
-        const errMsg = err?.message ?? String(err);
-        const stderr = err?.stderr ?? "";
+
+        // 10. Ask whether to fix issues
+        const hasIssues = parsed.hasCritical || parsed.hasImportant;
+        if (hasIssues) {
+          const fix = await ctx.ui.custom<"yes" | "no" | null>(
+            (_tui, theme, _kb, done) =>
+              fixConfirmationComponent(theme, done),
+            { overlay: true },
+          );
+
+          if (fix === "yes") {
+            try {
+              const nextState: WorkflowState = {
+                ...state,
+                mode: "work",
+                workRunId: crypto.randomUUID(),
+                workBaselineRef: createWorkBaseline(ctx.cwd),
+                workBaselineUntracked: captureBaselineUntracked(ctx.cwd),
+              };
+              saveState(ctx.cwd, sessionKey, nextState);
+
+              const ok = await applyModeRuntime(pi, ctx, "work", getAgentDir);
+              if (!ok) {
+                ctx.ui.notify("进入 Work Mode 失败，请检查 workflow runtime 配置。", "error");
+                return;
+              }
+            } catch (fixErr: unknown) {
+              const fixErrMsg = fixErr instanceof Error ? fixErr.message : String(fixErr);
+              ctx.ui.notify(`进入修复流程失败: ${fixErrMsg}`, "error");
+              pi.sendUserMessage(
+                `Code review 已完成，但进入修复流程失败。\n\n错误：${fixErrMsg}\n\n请检查 workflow 状态文件权限和 runtime 配置后重试。`,
+              );
+              return;
+            }
+
+            pi.sendUserMessage(
+              `Code review 发现 Critical / Important 问题，请根据以下结果修复，修复后运行相关验证：\n\n${parsed.formatted}`,
+            );
+          } else if (fix === "no") {
+            pi.sendUserMessage(
+              "用户选择不修复。保持当前状态，不执行任何修复操作。",
+            );
+          } else {
+            // null = user cancelled the dialog (esc)
+            ctx.ui.notify("Fix confirmation cancelled.", "info");
+          }
+        }
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const stderr =
+          typeof err === "object" && err !== null && "stderr" in err
+            ? (err as { stderr?: unknown }).stderr
+            : "";
         ctx.ui.notify(`ocr review 执行失败: ${errMsg}`, "error");
         pi.sendUserMessage(
-          `Code review 执行失败。\n\n错误：${errMsg}\nstderr：${stderr.slice(0, 2000)}\n\n` +
-          `请检查 ocr 配置和 LLM 连接。运行 ocr llm test 验证 LLM 连通性。`
+          `Code review 执行失败。\n\nCommand: ${cmdSummary}\n错误：${errMsg}\nstderr：${String(stderr).slice(0, 2000)}\n\n` +
+            `请检查 ocr 配置和 LLM 连接。运行 ocr llm test 验证 LLM 连通性。`,
         );
       }
     },

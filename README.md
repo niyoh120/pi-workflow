@@ -30,7 +30,7 @@ idle → plan → planReview → work → review ⟷ fix → commit → idle
 ```
 
 - **Plan Review**: Same-turn `completeSimple()` sidecall with curated context (plan text + auto-extracted key file snippets + conversation summary + tool inventory). The reviewer model sees exactly what it needs — no subprocess, no isolation overhead.
-- **Code Review**: Runs `ocr review --from <baselineRef> --to HEAD` via alibaba/open-code-review CLI. Delivers structured results with severity classification.
+- **Code Review**: Interactive TUI wizard for `ocr review`. Choose scope (workspace/baseline/range/single-commit) and run via alibaba/open-code-review CLI.
 - **Explore**: Not included. Install `@tintinweb/pi-subagents` separately if you want its built-in explore agent.
 
 ## Modes
@@ -41,7 +41,7 @@ idle → plan → planReview → work → review ⟷ fix → commit → idle
 | Plan Review Mode | (auto) | Same-turn plan review via completeSimple sidecall |
 | Work Mode | `/work` | Implement the approved plan |
 | Fix | (auto) | Fix critical/important issues from code review |
-| Code Review Mode | `/review` | Run `ocr review` on current diff |
+| Code Review Mode | `/review` | Interactive TUI: choose scope, then run `ocr review` |
 | Commit Mode | `/commit` | Generate and execute a conventional commit |
 
 ## Configuration
@@ -116,15 +116,21 @@ The plan review sidecall uses `completeSimple()` — a single LLM API call with 
 
 **Thinking level "off"**: When `thinking` is set to `"off"`, the reasoning parameter is omitted from the completeSimple call entirely. The reviewer model runs without extended thinking.
 
-### Code review via OCR CLI
+### Code review via OCR CLI (TUI-driven)
 
-Code review runs `ocr review --from <baselineRef> --to HEAD`. The `ocr` binary is expected in `PATH` or at the configured `ocrBinary` path.
+`/review` opens an interactive TUI wizard:
+
+1. **Scope selector** — Choose what to review:
+   - **Workspace changes**: `ocr review` (no scope flags)
+   - **Workflow baseline → HEAD**: `ocr review --from <workBaselineRef> --to HEAD`
+   - **Custom ref range**: `ocr review --from <ref> --to <ref>`
+   - **Single commit**: `ocr review --commit <hash>`
+2. **Scope inputs** — Enter from/to refs or commit hash (with sensible defaults for baseline mode); confirm to run.
+
+The resulting command is built into a safe `argv` array and executed via `execFileSync` (no shell interpolation).
 
 - `ocrBinary` — Path to the `ocr` binary (default: `"ocr"` — assumes in PATH).
 - `timeoutMs` — Maximum execution time in ms (default: 300,000 = 5 min).
-- `maxLoops` — Max review-then-fix loops. Prompt-constrained soft upper bound.
-
-The OCR CLI uses its own LLM configuration. Set it up with `ocr config set` or environment variables as described in the [open-code-review docs](https://github.com/alibaba/open-code-review).
 
 ### Project config
 
