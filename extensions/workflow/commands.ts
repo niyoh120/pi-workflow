@@ -642,7 +642,7 @@ export function registerWfInitCommand(pi: ExtensionAPI): void {
           `- 构建/测试命令\n` +
           `- 代码风格/规范\n` +
           `- 目录约定\n` +
-          `- 工作流规则（v2 模式：idle/plan/work/commit）\n` +
+          `- 工作流规则（idle → plan → work → commit；plan review 使用内置 completeSimple 侧调用，code review 使用 OCR CLI）\n` +
           `- 提交规范\n` +
           `- 安全/禁止事项\n\n` +
           `使用 write 工具将内容写入 ${path.join(root, "AGENTS.md")}。`

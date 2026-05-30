@@ -1,5 +1,5 @@
 /**
- * Pi Workflow Extension (v3)
+ * Pi Workflow Extension
  *
  * A lightweight software development workflow with simplified mode flow:
  * idle → plan → work → commit.
