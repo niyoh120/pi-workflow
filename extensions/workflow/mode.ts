@@ -68,6 +68,7 @@ export function activateWorkflowToolsIfAllowed(pi: ExtensionAPI, cwd: string, ge
     next.add("workflow_todo");
     next.add("workflow_plan");
     next.add("workflow_subagent");
+    next.add("workflow_code_review");
 
     try {
       const config = loadConfig(cwd, getAgentDir());

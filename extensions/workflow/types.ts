@@ -72,13 +72,6 @@ export interface WorkflowState {
   planRunId?: string;
   /** Work run id — identifies a work session. */
   workRunId?: string;
-  /** Git baseline ref captured at Work mode entry.
-   *  Used by code review to diff only changes made during this work session.
-   *  Cleared on review PASS, reset, new plan, or commit. */
-  workBaselineRef?: string;
-  /** Set of untracked file paths at Work mode entry.
-   *  Used by code review to scope untracked content to only files created during this session. */
-  workBaselineUntracked?: string[];
   /** Todo items tracking work progress. */
   todos: TodoItem[];
   /** IDs of completed todos that have been hidden from the overlay. */

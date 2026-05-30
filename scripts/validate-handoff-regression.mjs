@@ -319,16 +319,18 @@ assertNotContains(commandsSrc, "function setRole", "commands.ts: no old setRole"
 assertNotContains(commandsSrc, "function activateWorkflowToolsIfAllowed", "commands.ts: no own activateWorkflowToolsIfAllowed");
 assertContains(commandsSrc, "activateWorkflowToolsIfAllowed", "commands.ts imports activateWorkflowToolsIfAllowed");
 
-// ── 19. runCodeReviewSubagent still uses fix handoff ───────────────────────
+// ── 19. registerReviewCommand prompts tool call ───────────────────────────
 
-console.log("19. Code-review → fix handoff preserved");
+console.log("19. /review prompts workflow_code_review tool call");
 
-const codeReviewFn = commandsSrc.slice(
-  commandsSrc.indexOf("async function runCodeReviewSubagent"),
-  commandsSrc.indexOf("registerBeforeAgentStart")
+const reviewCmdBlock = commandsSrc.slice(
+  commandsSrc.indexOf("registerReviewCommand"),
+  commandsSrc.indexOf("registerCommitCommand")
 );
-assertContains(codeReviewFn, 'applyModeRuntime(pi, ctx, "fix"', "code-review → fix: applies fix runtime");
-assertContains(codeReviewFn, "Critical / Important", "code-review → fix: sends fix handoff message");
+// /review no longer executes OCR directly; it prompts the model to call the tool
+assertContains(reviewCmdBlock, "workflow_code_review", "/review prompts workflow_code_review tool call");
+assertNotContains(reviewCmdBlock, "async function runCodeReviewSubagent", "/review: no old runCodeReviewSubagent");
+assertContains(reviewCmdBlock, "sendUserMessage", "/review uses sendUserMessage for tool prompt");
 
 // ── 20. work-handoff.ts exports ────────────────────────────────────────────
 
@@ -341,6 +343,58 @@ assertContains(workHandoffSrc, "export async function startApprovedWorkFromComma
 assertContains(workHandoffSrc, "export function clearPendingWorkHandoff", "exports clearPendingWorkHandoff");
 assertContains(workHandoffSrc, "export function isPendingWorkHandoffValid", "exports isPendingWorkHandoffValid");
 assertContains(workHandoffSrc, "export const PENDING_WORK_HANDOFF_TTL_MS", "exports PENDING_WORK_HANDOFF_TTL_MS");
+
+// ── 21. workflow_code_review tool registration ───────────────────────────
+
+console.log("21. workflow_code_review tool registration");
+
+const indexSrc = readFileSync("extensions/workflow/index.ts", "utf8");
+const modeSrc2 = readFileSync("extensions/workflow/mode.ts", "utf8");
+const toolsSrc2 = readFileSync("extensions/workflow/tools.ts", "utf8");
+
+assertContains(indexSrc, "registerCodeReviewTool", "index.ts registers workflow_code_review");
+assertContains(modeSrc2, "workflow_code_review", "mode.ts activates workflow_code_review");
+assertContains(toolsSrc2, "workflow_code_review", "tools.ts exports registerCodeReviewTool");
+assertContains(toolsSrc2, 'required a non-empty background', "workflow_code_review requires non-empty background");
+
+// ── 22. Baseline state fields removed ──────────────────────────────────────
+
+console.log("22. Baseline state fields removed");
+
+const typesSrc2 = readFileSync("extensions/workflow/types.ts", "utf8");
+const stateSrc2 = readFileSync("extensions/workflow/state.ts", "utf8");
+
+assertNotContains(typesSrc2, "workBaselineRef", "types.ts: no workBaselineRef field");
+assertNotContains(typesSrc2, "workBaselineUntracked", "types.ts: no workBaselineUntracked field");
+assertNotContains(stateSrc2, "workBaselineRef", "state.ts: no workBaselineRef normalization");
+assertNotContains(stateSrc2, "workBaselineUntracked", "state.ts: no workBaselineUntracked normalization");
+assertNotContains(helpersSrc, "workBaselineRef", "helpers.ts: no baseline in status text");
+assertNotContains(indexSrc, "createWorkBaseline", "index.ts: no baseline import");
+
+// /work and approve no longer capture baseline
+assertNotContains(commandsSrc, "createWorkBaseline", "commands.ts: no createWorkBaseline calls");
+assertNotContains(commandsSrc, "captureBaselineUntracked", "commands.ts: no captureBaselineUntracked calls");
+assertNotContains(commandsSrc, "clearWorkBaseline", "commands.ts: no clearWorkBaseline calls");
+
+// ── 23. Work prompt updated ────────────────────────────────────────────────
+
+console.log("23. Work prompt updated");
+
+assertContains(promptsSrc, "workflow_code_review", "prompts.ts: mentions workflow_code_review");
+assertContains(promptsSrc, "workspace", "prompts.ts: default scope is workspace");
+assertContains(promptsSrc, "background", "prompts.ts: requires model-written background");
+assertNotContains(promptsSrc, "--from <baselineRef>", "prompts.ts: no old baseline review command");
+
+// ── 24. OCR helpers module exists ──────────────────────────────────────────
+
+console.log("24. OCR helpers module");
+
+const ocrHelpersSrc = readFileSync("extensions/workflow/ocr-helpers.ts", "utf8");
+assertContains(ocrHelpersSrc, "buildReviewArgv", "ocr-helpers.ts: exports buildReviewArgv");
+assertContains(ocrHelpersSrc, "checkOcrAvailable", "ocr-helpers.ts: exports checkOcrAvailable");
+assertContains(ocrHelpersSrc, "parseOcrOutput", "ocr-helpers.ts: exports parseOcrOutput");
+assertContains(ocrHelpersSrc, '--audience', "ocr-helpers.ts: always uses --audience flag");
+assertContains(ocrHelpersSrc, '--background', "ocr-helpers.ts: always uses --background flag");
 
 // ── Summary ────────────────────────────────────────────────────────────────
 

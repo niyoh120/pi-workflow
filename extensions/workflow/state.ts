@@ -32,10 +32,6 @@ export function normalizeState(raw: unknown): WorkflowState {
     planTitle:   typeof obj.planTitle === "string" ? obj.planTitle : undefined,
     planRunId:   typeof obj.planRunId === "string" ? obj.planRunId : undefined,
     workRunId:   typeof obj.workRunId === "string" ? obj.workRunId : undefined,
-    workBaselineRef: typeof obj.workBaselineRef === "string" ? obj.workBaselineRef : undefined,
-    workBaselineUntracked: Array.isArray(obj.workBaselineUntracked)
-      ? (obj.workBaselineUntracked as string[]).filter((p: any) => typeof p === "string")
-      : undefined,
     todos: Array.isArray(obj.todos)
       ? (obj.todos as Array<WorkflowState["todos"][number]>).filter((t: any) => t && typeof t === "object").map((t: any) => ({
           id: t.id ?? "",

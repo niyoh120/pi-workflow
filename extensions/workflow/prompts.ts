@@ -136,7 +136,11 @@ export const WORK_PROMPT = `
 
 全部 todo 完成后，你必须主动发起 code review：
 
-9. 调用 /review 命令触发 code review（使用 alibaba/open-code-review CLI），或直接运行 \`ocr review --from <baselineRef> --to HEAD\` 并分析结果。
+9. 调用 workflow_code_review 工具进行 code review。
+   - 默认 scope 使用 workspace（覆盖 staged + unstaged + untracked 变更）。
+   - background 必须由你根据当前任务上下文自行总结，包含：用户目标、本轮实际修改范围、关键设计约束、已运行测试、希望 OCR 重点检查的风险点。
+   - 只有在用户明确要求 review 特定 commit 或 ref range 时才使用 range/commit scope。
+   - 🚫 不要默认使用 --from <baselineRef> --to HEAD，因为这会漏掉未提交工作区变更。
 10. 收到 review 结果后处理：
     - 如果 reviewer 提出 Critical 或 Important 问题，先在代码中验证问题是否真实存在。
     - 确认存在的问题，自行修复，修复后运行相关测试验证，然后再次 review。

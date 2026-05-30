@@ -32,8 +32,6 @@ export function currentStatusText(
     `planPath: ${s.planPath ?? "none"}`,
     `planRunId: ${s.planRunId ?? "none"}`,
     `workRunId: ${s.workRunId ?? "none"}`,
-    `workBaselineRef: ${s.workBaselineRef ?? "none"}`,
-    `workBaselineUntracked: ${s.workBaselineUntracked?.length ?? 0} files`,
     "",
     "todos:",
     todoText(s),

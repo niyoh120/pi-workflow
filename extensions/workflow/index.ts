@@ -23,6 +23,7 @@ import {
   registerTodoTool,
   registerPlanTool,
   registerSubagentTool,
+  registerCodeReviewTool,
 } from "./tools.js";
 
 import {
@@ -44,6 +45,7 @@ export default function (pi: ExtensionAPI) {
   registerTodoTool(pi, getAgentDir);
   registerPlanTool(pi, getAgentDir);
   registerSubagentTool(pi, getAgentDir);
+  registerCodeReviewTool(pi, getAgentDir);
 
   // ── Commands ───────────────────────────────
   registerPlanCommand(pi, getAgentDir);

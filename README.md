@@ -30,7 +30,7 @@ idle → plan → planReview → work → review ⟷ fix → commit → idle
 ```
 
 - **Plan Review**: Same-turn `completeSimple()` sidecall with curated context (plan text + auto-extracted key file snippets + conversation summary + tool inventory). The reviewer model sees exactly what it needs — no subprocess, no isolation overhead.
-- **Code Review**: Interactive TUI wizard for `ocr review`. Choose scope (workspace/baseline/range/single-commit) and run via alibaba/open-code-review CLI.
+- **Code Review**: Tool-driven via `workflow_code_review`. The model selects review scope (workspace by default) and provides context. `/review` is a TUI scope-selector that prompts the model to invoke the tool.
 - **Explore**: Not included. Install `@tintinweb/pi-subagents` separately if you want its built-in explore agent.
 
 ## Modes
@@ -116,18 +116,15 @@ The plan review sidecall uses `completeSimple()` — a single LLM API call with 
 
 **Thinking level "off"**: When `thinking` is set to `"off"`, the reasoning parameter is omitted from the completeSimple call entirely. The reviewer model runs without extended thinking.
 
-### Code review via OCR CLI (TUI-driven)
+### Code review (tool-driven)
 
-`/review` opens an interactive TUI wizard:
+Code review is executed through the `workflow_code_review` tool:
 
-1. **Scope selector** — Choose what to review:
-   - **Workspace changes**: `ocr review` (no scope flags)
-   - **Workflow baseline → HEAD**: `ocr review --from <workBaselineRef> --to HEAD`
-   - **Custom ref range**: `ocr review --from <ref> --to <ref>`
-   - **Single commit**: `ocr review --commit <hash>`
-2. **Scope inputs** — Enter from/to refs or commit hash (with sensible defaults for baseline mode); confirm to run.
+- **Workspace** (default): `ocr review --audience agent --background "<model context>"` — reviews staged + unstaged + untracked changes.
+- **Custom ref range**: `ocr review --audience agent --background "..." --from <ref> --to <ref>`
+- **Single commit**: `ocr review --audience agent --background "..." --commit <hash>`
 
-The resulting command is built into a safe `argv` array and executed via `execFileSync` (no shell interpolation).
+The model is responsible for filling in the `--background` parameter based on current task context. The `/review` command opens a TUI for scope selection and then prompts the model to call the tool.
 
 - `ocrBinary` — Path to the `ocr` binary (default: `"ocr"` — assumes in PATH).
 - `timeoutMs` — Maximum execution time in ms (default: 300,000 = 5 min).
@@ -183,7 +180,7 @@ This prevents wasting tokens on auto-review when the user still wants to refine 
 | `/plan` | Enter Plan Mode |
 | `/go [--force]` | Approve current plan and hand off to Work Mode |
 | `/work [task]` | Skip Plan Mode, go straight to implementation |
-| `/review` | Run `ocr review` on current diff |
+| `/review` | TUI scope selector for code review — prompts model to call workflow_code_review |
 | `/commit [notes]` | Generate commit message and commit |
 | `/wf-status` | Show current workflow state (includes plan path and run IDs) |
 | `/wf-exit` | Exit workflow mode |
@@ -202,7 +199,7 @@ Plan review runs as a **same-turn `completeSimple()` sidecall** — no subproces
 
 ## Code Review (OCR CLI)
 
-Code review uses alibaba/open-code-review's `ocr review` CLI:
+Code review uses the `workflow_code_review` tool, which wraps alibaba/open-code-review's `ocr review` CLI:
 
 - **Deterministic rules** — Built-in detectors for NPE, thread safety, XSS, SQL injection, etc. Not LLM-dependent.
 - **Dedicated review tools** — `code_search` for cross-file reference checking, `code_comment` for line-level annotations.
@@ -210,10 +207,12 @@ Code review uses alibaba/open-code-review's `ocr review` CLI:
 - **Line-level comments** — Precise issue locations, not vague text descriptions.
 - **Severity classification** — Security/Defect → Critical, Maintainability/Quality → Important.
 
-The `/review` command:
-1. Checks git repo and ocr CLI availability
-2. Runs `ocr review --from <workBaselineRef or HEAD~1> --to HEAD`
-3. Parses output and delivers results to the agent
+The `workflow_code_review` tool:
+1. Always runs with `--audience agent` for structured output.
+2. Requires a model-supplied `--background` with task context.
+3. Defaults to workspace scope (staged + unstaged + untracked changes).
+
+For interactive scope selection, use `/review` — it shows a TUI and prompts the model to call the tool.
 
 ## Trigger-Scoped Review Counters
 

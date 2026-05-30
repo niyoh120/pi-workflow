@@ -6,9 +6,9 @@ import { getSessionKey, loadState, saveState, writeNewPlan, updatePlan, readPlan
 import { loadConfig } from "./config.js";
 import { todoText } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
-import { createWorkBaseline, captureBaselineUntracked } from "./baseline.js";
 import type { WorkflowState } from "./types.js";
 import { executePlanReviewSidecall } from "./sidecall.js";
+import { checkOcrAvailable, buildReviewArgv, ocrCommandSummary, runOcrReview, parseOcrOutput, type ReviewScopeKind } from "./ocr-helpers.js";
 
 const TodoStatusSchema = StringEnum([
   "pending",
@@ -199,9 +199,6 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
         // Direct transition: plan → work (no handoff mechanism)
         state.mode = "work";
         state.workRunId = crypto.randomUUID();
-        // Capture baseline for code review diff scope
-        state.workBaselineRef = createWorkBaseline(ctx.cwd);
-        state.workBaselineUntracked = captureBaselineUntracked(ctx.cwd);
 
         saveState(ctx.cwd, sessionKey, state);
 
@@ -212,7 +209,6 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
               text:
                 `Plan approved. Transitioning to Work Mode.\n` +
                 `Work run: ${state.workRunId.slice(-8)}.\n` +
-                `Baseline: ${state.workBaselineRef ?? "none"}.\n` +
                 `The next turn will activate Work Mode runtime (model/tools/status).`,
             },
           ],
@@ -324,6 +320,146 @@ export function registerSubagentTool(
         modelSpec: config.models.planReview,
         signal,
       });
+    },
+  });
+}
+
+// ── workflow_code_review tool ────────────────────────────
+
+const ReviewScopeKindSchema = StringEnum(["workspace", "range", "commit"] as const);
+
+export function registerCodeReviewTool(
+  pi: ExtensionAPI,
+  getAgentDir: () => string,
+): void {
+  pi.registerTool({
+    name: "workflow_code_review",
+    label: "Workflow Code Review",
+    description:
+      "Run OCR code review on the current workspace or a Git ref range/commit. The model must provide a background string describing the task context, changes, constraints, and risk areas. Default review scope is workspace (staged + unstaged + untracked changes).",
+    promptSnippet:
+      "workflow_code_review: run ocr review with model-supplied context.",
+    promptGuidelines: [
+      "Use workflow_code_review when completing work to review changes.",
+      "Default scope to workspace unless the user explicitly requested range or commit.",
+      "Provide a thoughtful background: user goal, actual changes, key constraints, tests run, and risk areas to check.",
+    ],
+    parameters: Type.Object({
+      scope: Type.Optional(ReviewScopeKindSchema),
+      background: Type.String({ description: "Task context and review focus — user goal, changes, constraints, tests, risk areas." }),
+      from: Type.Optional(Type.String({ description: "Source ref for range scope." })),
+      to: Type.Optional(Type.String({ description: "Target ref for range scope." })),
+      commit: Type.Optional(Type.String({ description: "Commit hash for commit scope." })),
+      preview: Type.Optional(Type.Boolean({ description: "Preview files without running the LLM." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const config = loadConfig(ctx.cwd, getAgentDir());
+      const ocrBinary = config.codeReview.ocrBinary ?? "ocr";
+
+      // Validate OCR availability
+      if (!checkOcrAvailable(ocrBinary)) {
+        return {
+          isError: true,
+          content: [{
+            type: "text",
+            text:
+              `ocr CLI not found at "${ocrBinary}". ` +
+              "Install alibaba/open-code-review: npm i -g @alibaba-group/open-code-review\n" +
+              "Then configure LLM with ocr config set llm.url / llm.auth_token / llm.model.",
+          }],
+          details: {},
+        };
+      }
+
+      // Validate required fields per scope
+      const scope: ReviewScopeKind = (params.scope as ReviewScopeKind) ?? "workspace";
+      const background = params.background as string;
+      const from = params.from as string | undefined;
+      const to = params.to as string | undefined;
+      const commit = params.commit as string | undefined;
+      const preview = params.preview as boolean | undefined;
+
+      if (!background || !background.trim()) {
+        return {
+          isError: true,
+          content: [{
+            type: "text",
+            text: "workflow_code_review requires a non-empty background describing task context and review focus.",
+          }],
+          details: {},
+        };
+      }
+
+      if (scope === "range" && (!from || !to)) {
+        return {
+          isError: true,
+          content: [{
+            type: "text",
+            text: "scope=range requires both from and to refs.",
+          }],
+          details: {},
+        };
+      }
+
+      if (scope === "commit" && !commit) {
+        return {
+          isError: true,
+          content: [{
+            type: "text",
+            text: "scope=commit requires a commit hash.",
+          }],
+          details: {},
+        };
+      }
+
+      // Build argv and execute
+      const argv = buildReviewArgv(background.trim(), scope, from, to, commit, preview);
+      const cmdSummary = ocrCommandSummary(ocrBinary, argv);
+      const timeoutMs = config.codeReview.timeoutMs ?? 300_000;
+
+      try {
+        const rawOutput = await runOcrReview(ocrBinary, ctx.cwd, argv, timeoutMs);
+        const parsed = parseOcrOutput(rawOutput);
+
+        let severityNote = "Code review complete.";
+        if (parsed.hasCritical) severityNote = "Code review found Critical issues.";
+        else if (parsed.hasImportant) severityNote = "Code review found Important issues.";
+
+        return {
+          content: [{
+            type: "text",
+            text:
+              `${severityNote}\n\n` +
+              `Command: ${cmdSummary}\n\n` +
+              `${parsed.formatted || "(empty output)"}`,
+          }],
+          details: {
+            command: cmdSummary,
+            scope,
+            hasCritical: parsed.hasCritical,
+            hasImportant: parsed.hasImportant,
+          },
+        };
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const stderr =
+          typeof err === "object" && err !== null && "stderr" in err
+            ? (err as { stderr?: unknown }).stderr
+            : "";
+        return {
+          isError: true,
+          content: [{
+            type: "text",
+            text:
+              `ocr review failed.\n\n` +
+              `Command: ${cmdSummary}\n` +
+              `Error: ${errMsg}\n` +
+              `stderr: ${String(stderr).slice(0, 2000)}\n\n` +
+              `Check ocr config and LLM connectivity: ocr llm test`,
+          }],
+          details: { command: cmdSummary, error: errMsg },
+        };
+      }
     },
   });
 }
