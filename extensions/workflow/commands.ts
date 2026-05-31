@@ -438,12 +438,17 @@ export function registerReviewCommand(
 
       // 6. Build prompt instructing the model to call workflow_code_review
       let promptText: string;
+      const configuredAskTool = config.askUserQuestion?.toolName;
+      const askTool = /^[A-Za-z0-9_-]+$/.test(configuredAskTool ?? "")
+        ? configuredAskTool!
+        : "ask_user_question";
       if (scopeKind === "workspace") {
         promptText =
           "用户请求 code review，范围：workspace changes。\n\n" +
           "请调用 workflow_code_review 工具:\n" +
           '- scope: "workspace"\n' +
-          "- background: 由你自行总结，必须包含用户目标、本次实际修改范围、关键设计约束、已运行测试、希望 OCR 重点检查的风险点。";
+          "- background: 由你自行总结，必须包含用户目标、本次实际修改范围、关键设计约束、已运行测试、希望 OCR 重点检查的风险点。\n\n" +
+          `收到 review 结果后，如果发现 Critical 或 Important 问题，必须用 ${askTool} 询问用户是否需要修复（如工具不可用则直接在聊天里问）。只有用户确认后才执行修复。`;
       } else if (scopeKind === "range") {
         const from = scopeValues!.from!;
         const to = scopeValues!.to!;
@@ -453,7 +458,8 @@ export function registerReviewCommand(
           `- scope: "range"\n` +
           `- from: "${from}"\n` +
           `- to: "${to}"\n` +
-          "- background: 由你自行总结，必须包含用户目标、本次修改范围、关键约束、已运行测试、希望 OCR 重点检查的风险点。";
+          "- background: 由你自行总结，必须包含用户目标、本次修改范围、关键约束、已运行测试、希望 OCR 重点检查的风险点。\n\n" +
+          `收到 review 结果后，如果发现 Critical 或 Important 问题，必须用 ${askTool} 询问用户是否需要修复（如工具不可用则直接在聊天里问）。只有用户确认后才执行修复。`;
       } else {
         const commit = scopeValues!.commit!;
         promptText =
@@ -461,7 +467,8 @@ export function registerReviewCommand(
           "请调用 workflow_code_review 工具:\n" +
           `- scope: "commit"\n` +
           `- commit: "${commit}"\n` +
-          "- background: 由你自行总结，必须包含用户目标、本次修改范围、关键约束、已运行测试、希望 OCR 重点检查的风险点。";
+          "- background: 由你自行总结，必须包含用户目标、本次修改范围、关键约束、已运行测试、希望 OCR 重点检查的风险点。\n\n" +
+          `收到 review 结果后，如果发现 Critical 或 Important 问题，必须用 ${askTool} 询问用户是否需要修复（如工具不可用则直接在聊天里问）。只有用户确认后才执行修复。`;
       }
 
       ctx.ui.notify(

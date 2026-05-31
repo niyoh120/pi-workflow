@@ -79,6 +79,7 @@ export async function runOcrReview(
   cwd: string,
   argv: string[],
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(binary, argv, {
@@ -86,45 +87,16 @@ export async function runOcrReview(
       encoding: "utf8",
       maxBuffer: 10 * 1024 * 1024,
       timeout: timeoutMs,
+      signal,
     }, (err, stdout, stderr) => {
       if (err) {
-        const errorWithStderr = err as Error & { stderr?: string };
-        errorWithStderr.stderr = stderr;
-        reject(errorWithStderr);
+        const errorWithOutput = err as Error & { stderr?: string; stdout?: string };
+        errorWithOutput.stderr = stderr;
+        errorWithOutput.stdout = stdout;
+        reject(errorWithOutput);
         return;
       }
       resolve(stdout);
     });
   });
-}
-
-// ── Output parsing ──────────────────────────────────────────────────────────
-
-/**
- * Parse OCR output into a structured format for workflow severity classification.
- *
- * Maps heuristic patterns:
- *   Security/Defect/Critical/Bug → hasCritical
- *   Maintainability/Quality/Important → hasImportant
- */
-export function parseOcrOutput(raw: string): {
-  hasCritical: boolean;
-  hasImportant: boolean;
-  formatted: string;
-} {
-  const lines = raw.split("\n");
-  let hasCritical = false;
-  let hasImportant = false;
-
-  for (const line of lines) {
-    const lower = line.toLowerCase();
-    if (/\b(security|critical|bug|defect|npe|dead\s*loop|sql\s*injection|xss|buffer\s*overflow)\b/.test(lower)) {
-      hasCritical = true;
-    }
-    if (/\b(important|maintainability|quality|error\s*handling|edge\s*case|test\s*gap)\b/.test(lower)) {
-      hasImportant = true;
-    }
-  }
-
-  return { hasCritical, hasImportant, formatted: raw };
 }

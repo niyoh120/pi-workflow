@@ -8,7 +8,7 @@ import { todoText } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { executePlanReviewSidecall } from "./sidecall.js";
-import { checkOcrAvailable, buildReviewArgv, ocrCommandSummary, runOcrReview, parseOcrOutput, type ReviewScopeKind } from "./ocr-helpers.js";
+import { checkOcrAvailable, buildReviewArgv, ocrCommandSummary, runOcrReview, type ReviewScopeKind } from "./ocr-helpers.js";
 
 const TodoStatusSchema = StringEnum([
   "pending",
@@ -158,6 +158,8 @@ export function registerPlanTool(pi: ExtensionAPI, getAgentDir: () => string): v
           state.planRunId = crypto.randomUUID();
         }
 
+        state.todos = [];
+        state.hiddenDoneIds = [];
         saveState(ctx.cwd, sessionKey, state);
 
         const overlay = getWorkflowOverlay();
@@ -418,29 +420,25 @@ export function registerCodeReviewTool(
       const timeoutMs = config.codeReview.timeoutMs ?? 300_000;
 
       try {
-        const rawOutput = await runOcrReview(ocrBinary, ctx.cwd, argv, timeoutMs);
-        const parsed = parseOcrOutput(rawOutput);
-
-        let severityNote = "Code review complete.";
-        if (parsed.hasCritical) severityNote = "Code review found Critical issues.";
-        else if (parsed.hasImportant) severityNote = "Code review found Important issues.";
+        const rawOutput = await runOcrReview(ocrBinary, ctx.cwd, argv, timeoutMs, _signal);
 
         return {
           content: [{
             type: "text",
             text:
-              `${severityNote}\n\n` +
+              `Code review complete.\n\n` +
               `Command: ${cmdSummary}\n\n` +
-              `${parsed.formatted || "(empty output)"}`,
+              `${rawOutput || "(empty output)"}`,
           }],
           details: {
             command: cmdSummary,
             scope,
-            hasCritical: parsed.hasCritical,
-            hasImportant: parsed.hasImportant,
           },
         };
       } catch (err: unknown) {
+        // AbortError from cancelled signal — rethrow so the platform handles cancellation
+        if (err instanceof Error && err.name === "AbortError") throw err;
+
         const errMsg = err instanceof Error ? err.message : String(err);
         const stderr =
           typeof err === "object" && err !== null && "stderr" in err
