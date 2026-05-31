@@ -10,82 +10,98 @@ import { modeLabel } from "./helpers.js";
  * and apply thinking level. Does NOT write workflow state.
  */
 export async function setRole(
-  pi: ExtensionAPI,
-  ctx: any,
-  role: string,
-  getAgentDir: () => string
+	pi: ExtensionAPI,
+	ctx: any,
+	role: string,
+	getAgentDir: () => string,
 ): Promise<boolean> {
-  try {
-    const config = loadConfig(ctx.cwd, getAgentDir());
-    const spec = config.models[role as keyof typeof config.models];
+	try {
+		const config = loadConfig(ctx.cwd, getAgentDir());
+		const spec = config.models[role as keyof typeof config.models];
 
-    if (!spec) {
-      ctx.ui.notify(`找不到 role 配置：${role}`, "error");
-      return false;
-    }
+		if (!spec) {
+			ctx.ui.notify(`找不到 role 配置：${role}`, "error");
+			return false;
+		}
 
-    const model = ctx.modelRegistry.find(spec.provider, spec.model);
-    if (!model) {
-      ctx.ui.notify(`找不到模型：${spec.provider}/${spec.model}`, "error");
-      return false;
-    }
+		const model = ctx.modelRegistry.find(spec.provider, spec.model);
+		if (!model) {
+			ctx.ui.notify(`找不到模型：${spec.provider}/${spec.model}`, "error");
+			return false;
+		}
 
-    const ok = await pi.setModel(model);
-    if (!ok) {
-      ctx.ui.notify(
-        `模型不可用或缺少 API key：${spec.provider}/${spec.model}`,
-        "error"
-      );
-      return false;
-    }
+		const ok = await pi.setModel(model);
+		if (!ok) {
+			ctx.ui.notify(
+				`模型不可用或缺少 API key：${spec.provider}/${spec.model}`,
+				"error",
+			);
+			return false;
+		}
 
-    if (spec.thinking) {
-      pi.setThinkingLevel(spec.thinking);
-    }
+		if (spec.thinking) {
+			pi.setThinkingLevel(spec.thinking);
+		}
 
-    return true;
-  } catch (err: any) {
-    ctx.ui.notify(`Runtime switch error: ${err.message ?? String(err)}`, "error");
-    return false;
-  }
+		return true;
+	} catch (err: any) {
+		ctx.ui.notify(
+			`Runtime switch error: ${err.message ?? String(err)}`,
+			"error",
+		);
+		return false;
+	}
 }
 
 /** Activate workflow tools when the current agent allows them.
  *  Skips when the current agent has already excluded workflow_todo
  *  (e.g. review subagents that block workflow tools via disallowed_tools). */
-export function activateWorkflowToolsIfAllowed(pi: ExtensionAPI, cwd: string, getAgentDir: () => string): void {
-  try {
-    const active = pi.getActiveTools().map((tool: any) => {
-      if (typeof tool === "string") return tool;
-      return tool.name;
-    });
+export function activateWorkflowToolsIfAllowed(
+	pi: ExtensionAPI,
+	cwd: string,
+	getAgentDir: () => string,
+): void {
+	try {
+		const active = pi.getActiveTools().map((tool: any) => {
+			if (typeof tool === "string") return tool;
+			return tool.name;
+		});
 
-    // Guard: if the agent already excludes workflow_todo, it is a restricted
-    // agent — do NOT re-add workflow tools.
-    if (!active.includes("workflow_todo")) return;
+		// Guard: if the agent already excludes workflow_todo, it is a restricted
+		// agent — do NOT re-add workflow tools.
+		if (!active.includes("workflow_todo")) return;
 
-    const next = new Set(active);
-    next.add("workflow_todo");
-    next.add("workflow_plan");
-    next.add("workflow_subagent");
-    next.add("workflow_code_review");
+		const next = new Set(active);
+		next.add("workflow_todo");
+		next.add("workflow_plan");
 
-    try {
-      const config = loadConfig(cwd, getAgentDir());
-      if (config.askUserQuestion.enabled) {
-        const allTools = pi.getAllTools();
-        if (allTools.some((t: any) => t.name === config.askUserQuestion.toolName)) {
-          next.add(config.askUserQuestion.toolName);
-        }
-      }
-    } catch {
-      // If config load or getAllTools fails, skip silently.
-    }
+		// Conditionally activate review tools based on config.
+		// Always remove first, then re-add — so a config change to false takes effect.
+		try {
+			const cfg = loadConfig(cwd, getAgentDir());
+			next.delete("workflow_subagent"); // old tool name, no longer registered
+			next.delete("workflow_plan_review");
+			next.delete("workflow_code_review");
+			if (cfg.planReview.enabled) next.add("workflow_plan_review");
+			if (cfg.codeReview.enabled) next.add("workflow_code_review");
+		} catch {
+			// If config load fails, skip review tool activation.
+		}
 
-    pi.setActiveTools([...next]);
-  } catch {
-    // If any part of tool activation fails, skip silently.
-  }
+		// Auto-activate ask_user_question if the tool is installed (tool-name existence check only).
+		try {
+			const allTools = pi.getAllTools();
+			if (allTools.some((t: any) => t.name === "ask_user_question")) {
+				next.add("ask_user_question");
+			}
+		} catch {
+			// If getAllTools fails, skip silently.
+		}
+
+		pi.setActiveTools([...next]);
+	} catch {
+		// If any part of tool activation fails, skip silently.
+	}
 }
 
 /**
@@ -93,27 +109,27 @@ export function activateWorkflowToolsIfAllowed(pi: ExtensionAPI, cwd: string, ge
  * Does NOT write workflow state. State must be saved separately.
  */
 export async function applyModeRuntime(
-  pi: ExtensionAPI,
-  ctx: any,
-  mode: Mode,
-  getAgentDir: () => string
+	pi: ExtensionAPI,
+	ctx: any,
+	mode: Mode,
+	getAgentDir: () => string,
 ): Promise<boolean> {
-  // Simplified role mapping: plan→plan, work→work, commit→commit
-  const roleMap: Record<string, string> = {
-    idle: "plan",   // idle uses plan model as default
-    plan: "plan",
-    work: "work",
-    commit: "commit",
-  };
-  const role = roleMap[mode];
-  try {
-    if (role && !(await setRole(pi, ctx, role, getAgentDir))) return false;
-    activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir);
-    ctx.ui.setStatus("lite-sp", modeLabel(mode));
-    return true;
-  } catch {
-    return false;
-  }
+	// Simplified role mapping: plan→plan, work→work, commit→commit
+	const roleMap: Record<string, string> = {
+		idle: "plan", // idle uses plan model as default
+		plan: "plan",
+		work: "work",
+		commit: "commit",
+	};
+	const role = roleMap[mode];
+	try {
+		if (role && !(await setRole(pi, ctx, role, getAgentDir))) return false;
+		activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir);
+		ctx.ui.setStatus("lite-sp", modeLabel(mode));
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 // ── Per-turn in-memory guard helpers ───────────────────────────────────────
@@ -126,13 +142,13 @@ export async function applyModeRuntime(
 const guardModes = new Map<string, Mode>();
 
 export function setCurrentTurnGuardMode(sessionKey: string, mode: Mode): void {
-  guardModes.set(sessionKey, mode);
+	guardModes.set(sessionKey, mode);
 }
 
 export function getCurrentTurnGuardMode(sessionKey: string): Mode | undefined {
-  return guardModes.get(sessionKey);
+	return guardModes.get(sessionKey);
 }
 
 export function clearCurrentTurnGuardMode(sessionKey: string): void {
-  guardModes.delete(sessionKey);
+	guardModes.delete(sessionKey);
 }

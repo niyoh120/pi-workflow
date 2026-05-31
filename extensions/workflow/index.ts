@@ -14,55 +14,57 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadState, getSessionKey } from "./state.js";
 import { loadConfig } from "./config.js";
 import {
-  WorkflowTodoOverlay,
-  setWorkflowOverlay,
-  getWorkflowOverlay,
+	WorkflowTodoOverlay,
+	setWorkflowOverlay,
+	getWorkflowOverlay,
 } from "./todo-overlay.js";
 
 import {
-  registerTodoTool,
-  registerPlanTool,
-  registerSubagentTool,
-  registerCodeReviewTool,
+	registerTodoTool,
+	registerPlanTool,
+	registerPlanReviewTool,
+	registerCodeReviewTool,
 } from "./tools.js";
 
 import {
-  registerBeforeAgentStart,
-  registerToolCallGuard,
-  registerAgentEnd,
-  registerPlanCommand,
-  registerWorkCommand,
-  registerReviewCommand,
-  registerCommitCommand,
-  registerWfStatusCommand,
-  registerWfExitCommand,
-  registerWfResetCommand,
-  registerWfInitCommand,
+	registerBeforeAgentStart,
+	registerToolCallGuard,
+	registerAgentEnd,
+	registerPlanCommand,
+	registerWorkCommand,
+	registerReviewCommand,
+	registerCommitCommand,
+	registerWfStatusCommand,
+	registerWfExitCommand,
+	registerWfResetCommand,
+	registerWfInitCommand,
 } from "./commands.js";
 
 export default function (pi: ExtensionAPI) {
-  // ── Tools ──────────────────────────────────
-  registerTodoTool(pi, getAgentDir);
-  registerPlanTool(pi, getAgentDir);
-  registerSubagentTool(pi, getAgentDir);
-  registerCodeReviewTool(pi, getAgentDir);
+	const config = loadConfig(process.cwd(), getAgentDir());
 
-  // ── Commands ───────────────────────────────
-  registerPlanCommand(pi, getAgentDir);
-  registerWorkCommand(pi, getAgentDir);
-  registerReviewCommand(pi, getAgentDir);
-  registerCommitCommand(pi, getAgentDir);
-  registerWfStatusCommand(pi, getAgentDir);
-  registerWfExitCommand(pi);
-  registerWfResetCommand(pi);
-  registerWfInitCommand(pi);
+	// ── Tools ──────────────────────────────────
+	registerTodoTool(pi, getAgentDir);
+	registerPlanTool(pi, getAgentDir);
+	if (config.planReview.enabled) registerPlanReviewTool(pi, getAgentDir);
+	if (config.codeReview.enabled) registerCodeReviewTool(pi, getAgentDir);
 
-  // ── Event handlers ─────────────────────────
-  registerBeforeAgentStart(pi, getAgentDir);
-  registerToolCallGuard(pi, getAgentDir);
-  registerAgentEnd(pi, getAgentDir);
+	// ── Commands ───────────────────────────────
+	registerPlanCommand(pi, getAgentDir);
+	registerWorkCommand(pi, getAgentDir);
+	if (config.codeReview.enabled) registerReviewCommand(pi, getAgentDir);
+	registerCommitCommand(pi, getAgentDir);
+	registerWfStatusCommand(pi, getAgentDir);
+	registerWfExitCommand(pi);
+	registerWfResetCommand(pi);
+	registerWfInitCommand(pi);
 
-  // ── Overlay setup ──────────────────────────
-  const overlay = new WorkflowTodoOverlay();
-  setWorkflowOverlay(overlay);
+	// ── Event handlers ─────────────────────────
+	registerBeforeAgentStart(pi, getAgentDir);
+	registerToolCallGuard(pi, getAgentDir);
+	registerAgentEnd(pi, getAgentDir);
+
+	// ── Overlay setup ──────────────────────────
+	const overlay = new WorkflowTodoOverlay();
+	setWorkflowOverlay(overlay);
 }

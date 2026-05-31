@@ -5,95 +5,105 @@ import { globalConfigPath, configPath, ensureWorkflowDir } from "./paths.js";
 
 /** Deep-merge objects recursively: arrays are replaced, objects are merged. */
 export function deepMerge<T>(base: T, override: Partial<T>): T {
-  const output: any = Array.isArray(base) ? [...base] : { ...(base as any) };
+	const output: any = Array.isArray(base) ? [...base] : { ...(base as any) };
 
-  for (const [key, value] of Object.entries(override as any)) {
-    if (
-      value &&
-      typeof value === "object" &&
-      !Array.isArray(value) &&
-      output[key] &&
-      typeof output[key] === "object" &&
-      !Array.isArray(output[key])
-    ) {
-      output[key] = deepMerge(output[key], value);
-    } else {
-      output[key] = value;
-    }
-  }
+	for (const [key, value] of Object.entries(override as any)) {
+		if (
+			value &&
+			typeof value === "object" &&
+			!Array.isArray(value) &&
+			output[key] &&
+			typeof output[key] === "object" &&
+			!Array.isArray(output[key])
+		) {
+			output[key] = deepMerge(output[key], value);
+		} else {
+			output[key] = value;
+		}
+	}
 
-  return output;
+	return output;
 }
 
 /** Load merged config: DEFAULT ← global ← project. */
 export function loadConfig(cwd: string, agentDir: string): WorkflowConfig {
-  ensureWorkflowDir(cwd);
+	ensureWorkflowDir(cwd);
 
-  let merged = { ...DEFAULT_CONFIG };
+	let merged = { ...DEFAULT_CONFIG };
 
-  // Layer global config
-  const gpath = globalConfigPath(agentDir);
-  if (fs.existsSync(gpath)) {
-    try {
-      const globalCfg = JSON.parse(fs.readFileSync(gpath, "utf8"));
-      merged = deepMerge(merged, globalCfg);
-    } catch (e) {
-      console.error(`Warning: Could not parse global config ${gpath}: ${e}`);
-    }
-  }
+	// Layer global config
+	const gpath = globalConfigPath(agentDir);
+	if (fs.existsSync(gpath)) {
+		try {
+			const globalCfg = JSON.parse(fs.readFileSync(gpath, "utf8"));
+			merged = deepMerge(merged, globalCfg);
+		} catch (e) {
+			console.error(`Warning: Could not parse global config ${gpath}: ${e}`);
+		}
+	}
 
-  // Layer project config
-  const ppath = configPath(cwd);
-  if (fs.existsSync(ppath)) {
-    try {
-      const projectCfg = JSON.parse(fs.readFileSync(ppath, "utf8"));
-      merged = deepMerge(merged, projectCfg);
-    } catch (e) {
-      console.error(`Warning: Could not parse project config ${ppath}: ${e}`);
-    }
-  }
+	// Layer project config
+	const ppath = configPath(cwd);
+	if (fs.existsSync(ppath)) {
+		try {
+			const projectCfg = JSON.parse(fs.readFileSync(ppath, "utf8"));
+			merged = deepMerge(merged, projectCfg);
+		} catch (e) {
+			console.error(`Warning: Could not parse project config ${ppath}: ${e}`);
+		}
+	}
 
-  // Normalize: strip stale fields from old configs (e.g. the removed
-  // subagent section, old planReview.maxLoops/codeReview.maxLoops/codeReview.auto).
-  merged = normalizeConfig(merged);
+	// Normalize: strip stale fields from old configs (e.g. the removed
+	// subagent section, old planReview.maxLoops/codeReview.maxLoops/codeReview.auto).
+	merged = normalizeConfig(merged);
 
-  return merged;
+	return merged;
 }
 
 /**
  * Normalize a config object to the current schema.
- * Removes stale sections that no longer exist in the types (e.g. subagent),
- * and strips unknown keys from codeReview/planReview.
+ * Removes stale sections that no longer exist (subagent, askUserQuestion,
+ * todoOverlay) and strips unknown keys from codeReview/planReview.
  */
 function normalizeConfig(cfg: any): WorkflowConfig {
-  // Remove the old `subagent` section entirely — it no longer exists.
-  if ("subagent" in cfg) {
-    delete cfg.subagent;
-  }
+	// Remove old sections entirely.
+	if ("subagent" in cfg) delete cfg.subagent;
+	if ("todoOverlay" in cfg) delete cfg.todoOverlay;
+	if ("askUserQuestion" in cfg) delete cfg.askUserQuestion;
 
-  // Remove stale planReview fields (maxLoops no longer used)
-  if (cfg.planReview && typeof cfg.planReview === "object") {
-    const pr: any = {};
-    if ("enabled" in cfg.planReview) pr.enabled = cfg.planReview.enabled;
-    cfg.planReview = pr;
-  }
+	// Strip unknown planReview fields — only enabled is supported.
+	if (cfg.planReview && typeof cfg.planReview === "object") {
+		cfg.planReview = { enabled: !!cfg.planReview.enabled };
+	}
 
-  // Remove stale codeReview fields (maxLoops, auto)
-  if (cfg.codeReview && typeof cfg.codeReview === "object") {
-    const cr: any = {};
-    if ("enabled" in cfg.codeReview) cr.enabled = cfg.codeReview.enabled;
-    if ("ocrBinary" in cfg.codeReview) cr.ocrBinary = cfg.codeReview.ocrBinary;
-    if ("timeoutMs" in cfg.codeReview) cr.timeoutMs = cfg.codeReview.timeoutMs;
-    if ("maxLoops" in cfg.codeReview) cr.maxLoops = cfg.codeReview.maxLoops;
-    cfg.codeReview = cr;
-  }
+	// Strip unknown codeReview fields — only enabled is supported.
+	if (cfg.codeReview && typeof cfg.codeReview === "object") {
+		cfg.codeReview = { enabled: !!cfg.codeReview.enabled };
+	}
 
-  // Remove stale models entries (explore)
-  if (cfg.models && typeof cfg.models === "object") {
-    if ("explore" in cfg.models) {
-      delete cfg.models.explore;
-    }
-  }
+	// Strip unknown models entries and normalize each model to only contain
+	// provider/model/thinking (strip baseUrl, apiKey, or other old fields).
+	const VALID_ROLES = new Set([
+		"plan",
+		"planReview",
+		"work",
+		"review",
+		"commit",
+	]);
+	if (cfg.models && typeof cfg.models === "object") {
+		const cleaned: any = {};
+		for (const [key, val] of Object.entries(cfg.models)) {
+			if (VALID_ROLES.has(key) && val && typeof val === "object") {
+				const m = val as any;
+				cleaned[key] = {
+					provider: m.provider,
+					model: m.model,
+					...("thinking" in m ? { thinking: m.thinking } : {}),
+				};
+			}
+		}
+		cfg.models = cleaned;
+	}
 
-  return cfg as WorkflowConfig;
+	return cfg as WorkflowConfig;
 }

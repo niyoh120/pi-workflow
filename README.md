@@ -87,47 +87,35 @@ idle → plan → planReview → work → review ⟷ fix → commit → idle
     "enabled": true
   },
   "codeReview": {
-    "enabled": true,
-    "ocrBinary": "ocr",
-    "timeoutMs": 300000,
-    "maxLoops": 3
-  },
-  "askUserQuestion": {
-    "enabled": true,
-    "toolName": "ask_user_question",
-    "installSource": "npm:@juicesharp/rpiv-ask-user-question"
-  },
-  "todoOverlay": {
     "enabled": true
   }
 }
 ```
 
-### Plan review sidecall
+See `config.json.example` for the canonical config template.
 
-The plan review sidecall uses `completeSimple()` — a single LLM API call with no tools and no subprocess. The reviewer receives:
+### Plan review (optional tool)
+
+Plan review is an **optional** feature — when `planReview.enabled` is `true`, the `workflow_plan_review` tool becomes available. The plan agent decides whether to call it based on plan complexity and risk.
+
+The reviewer uses `completeSimple()` — a single LLM API call with no tools and no subprocess — receiving:
 
 - The full plan text
 - Auto-extracted file snippets from paths referenced in the plan
-- The executor's tool inventory (so it can assess whether the right tools are available)
-- (Future) A conversation summary capturing key user constraints and decisions
+- The executor's tool inventory
 
-**Configuration** only needs the model spec (`models.planReview`) — no agent containers, RPC timeouts, or subprocess management.
+**Configuration** needs the model spec (`models.planReview`) and `planReview.enabled: true`. When `thinking` is `"off"`, the reasoning parameter is omitted entirely.
 
-**Thinking level "off"**: When `thinking` is set to `"off"`, the reasoning parameter is omitted from the completeSimple call entirely. The reviewer model runs without extended thinking.
+### Code review (optional tool)
 
-### Code review (tool-driven)
+Code review is also **optional** — when `codeReview.enabled` is `true`, the `workflow_code_review` tool (and the `/review` command) become available.
 
-Code review is executed through the `workflow_code_review` tool:
+- **Workspace** (default): reviews staged + unstaged + untracked changes.
+- **Custom ref range** or **single commit**: via `/review` command TUI.
 
-- **Workspace** (default): `ocr review --audience agent --background "<model context>"` — reviews staged + unstaged + untracked changes.
-- **Custom ref range**: `ocr review --audience agent --background "..." --from <ref> --to <ref>`
-- **Single commit**: `ocr review --audience agent --background "..." --commit <hash>`
+The model fills in the `--background` parameter based on current task context. The `/review` command opens a TUI for scope selection and then prompts the model to call the tool.
 
-The model is responsible for filling in the `--background` parameter based on current task context. The `/review` command opens a TUI for scope selection and then prompts the model to call the tool.
-
-- `ocrBinary` — Path to the `ocr` binary (default: `"ocr"` — assumes in PATH).
-- `timeoutMs` — Maximum execution time in ms (default: 300,000 = 5 min).
+The `ocr` binary is assumed to be in PATH (hardcoded). No additional OCR configuration is exposed.
 
 ### Project config
 
@@ -137,9 +125,13 @@ The model is responsible for filling in the `--background` parameter based on cu
 
 On load, pi-workflow strips stale config keys from old versions:
 - Removed `subagent` section (no longer exists)
+- Removed `todoOverlay` section (no longer user-configurable)
+- Removed `askUserQuestion` section (no longer user-configurable)
+- Removed `codeReview.ocrBinary/timeoutMs/maxLoops` (hardcoded, no longer configurable)
 - Removed `planReview.maxLoops` (no longer used)
 - Removed `codeReview.auto` (no longer used)
 - Removed `models.explore` (Explore removed)
+- Unknown models keys are stripped; only `plan/planReview/work/review/commit` are recognized
 
 ## Plan Document Management
 
@@ -163,15 +155,13 @@ Every plan save, read, and `/wf-status` explicitly shows the plan file path (e.g
 
 ### Plan Mode Confirmation Gate
 
-Before producing and saving the final plan (which triggers automatic plan review), Plan Mode explicitly asks whether the discussion is sufficient:
+Before producing and saving the final plan, Plan Mode explicitly asks whether the discussion is sufficient:
 
 > "Is the discussion sufficient? Shall I write the final plan?"
 
-Only after the user confirms the discussion is complete does the agent:
-1. Write the final plan document.
-2. Call `workflow_plan(action="save")` and `workflow_todo(action="reset")` — which triggers automatic plan review via sidecall.
+Only after the user confirms the discussion is complete does the agent write the final plan document and call `workflow_plan(action="save")`. If plan review is enabled, the agent may optionally call `workflow_plan_review` for an independent review.
 
-This prevents wasting tokens on auto-review when the user still wants to refine the design. Ordinary clarification replies or approach confirmations are NOT treated as permission to save.
+This prevents wasting tokens when the user still wants to refine the design.
 
 ## Commands
 
@@ -189,13 +179,13 @@ This prevents wasting tokens on auto-review when the user still wants to refine 
 
 ## Plan Review (Sidecall)
 
-Plan review runs as a **same-turn `completeSimple()` sidecall** — no subprocess, no agent containers, no RPC. This provides:
+Plan review runs as an **optional, model-initiated** `completeSimple()` sidecall — no subprocess, no agent containers, no RPC. The plan agent calls `workflow_plan_review` when the plan is complex or the user requests it.
 
-- **Curated context** — the reviewer sees the plan text, auto-extracted file snippets, conversation summary, and executor tool inventory. No irrelevant conversation history.
+- **Curated context** — the reviewer sees the plan text, auto-extracted file snippets, and executor tool inventory.
 - **Fast & reliable** — single LLM API call, no subprocess communication risk.
-- **Zero config** — just set `models.planReview` in your config. No agent `.md` files to sync.
-- **Structured output** — `[pi-workflow-plan-review/v1]` identity marker + Critical/Important/Minor severity classification.
-- **Identity marker validation** — the sidecall validates the marker and returns an error if the reviewer model didn't follow the prompt correctly.
+- **Zero config** — just set `models.planReview` in your config.
+- **Structured output** — the prompt asks the reviewer to produce Critical/Important/Minor severity classification.
+- **No marker validation** — the full review text is passed back for the plan agent to evaluate. No strict format requirement.
 
 ## Code Review (OCR CLI)
 
@@ -213,17 +203,6 @@ The `workflow_code_review` tool:
 3. Defaults to workspace scope (staged + unstaged + untracked changes).
 
 For interactive scope selection, use `/review` — it shows a TUI and prompts the model to call the tool.
-
-## Trigger-Scoped Review Counters
-
-Plan review and code review loop counters limit review retries per trigger, not across the whole session.
-
-- `planReviewLoops` resets to `0` on every `workflow_plan save`. A save is a fresh plan-review trigger.
-- If plan review is enabled, each save creates a `pending` review status. Review failures increment `planReviewLoops` within that save-trigger only.
-- `codeReviewLoops` resets to `0` when the Work-mode agent reports `ready_for_review`. This starts a fresh automatic review/fix sequence.
-- Fix-mode `ready_for_review` does **not** reset `codeReviewLoops` — retries in the same auto sequence accumulate.
-- Manual `/review` never increments `codeReviewLoops` and does not consume the automatic fix-loop budget.
-- A prior trigger's review failures never block a later trigger in the same session.
 
 ## Session-Scoped Runtime State
 
@@ -245,61 +224,26 @@ Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) ar
 |------|---------|
 | `workflow_todo` | Maintain the todo list (reset, add, set, list) |
 | `workflow_plan` | Manage plans (save, approve, read, clear) — responses include plan path |
-| `workflow_subagent` | Run a plan review sidecall via completeSimple (role=planReview only) |
+| `workflow_plan_review` | Run an optional plan review sidecall via completeSimple |
+| `workflow_code_review` | Run OCR code review on workspace or git ref range |
 
-### workflow_subagent
+### workflow_plan_review
 
-Run a same-turn plan review via `completeSimple()` sidecall. The reviewer receives curated context (plan + file snippets + conversation summary + tool inventory) and returns structured feedback.
+Run a same-turn plan review via `completeSimple()` sidecall (only available when `planReview.enabled: true`). The reviewer receives curated context (plan + file snippets + tool inventory) and returns structured feedback.
 
 **Parameters:**
-- `role` (required): `planReview` (the only supported role)
 - `task` (required): the plan content or a brief task description
 - `context` (optional): extra background (user constraints, discussion points)
 - `instructions` (optional): review preferences (depth, focus areas)
 
-## Structured User Questions
+### workflow_code_review
 
-When `@juicesharp/rpiv-ask-user-question` is installed, Plan Mode uses tabbed dialog boxes for structured interaction:
+Run OCR code review (only available when `codeReview.enabled: true`). Defaults to workspace scope.
 
-- **Clarifying questions** — decisions with clear trade-offs are presented as option sheets (2-4 options, optional markdown previews) instead of plain text.
-- **Approval confirmation** — after plan review passes, the agent presents a structured confirmation: "Execute plan / Revise plan / Discuss more".
-- **Graceful fallback** — without the package, workflow uses normal chat and works identically to previous versions.
-
-### Configuring
-
-```json
-{
-  "askUserQuestion": {
-    "enabled": true,
-    "toolName": "ask_user_question",
-    "installSource": "npm:@juicesharp/rpiv-ask-user-question"
-  }
-}
-```
-
-Disable `enabled` to prevent activation even when the package is installed. Change `toolName` if a different question tool is registered under another name.
-
-## Built-in Todo Overlay
-
-pi-workflow includes a built-in progress overlay displayed above the editor in non-idle workflow modes (plan, work). It does **not** require `@juicesharp/rpiv-todo` — the overlay reads `workflow_todo` state directly through extension code, so there is no manual sync step and no risk of two todo lists drifting apart.
-
-**Behavior:**
-- Shows pending, in-progress, done, and blocked tasks with status symbols (○ ◐ ✓ ⊘).
-- Done items stay visible for the remainder of the current agent turn, then hide when the next turn starts.
-- Auto-hides when the workflow mode is idle (`/wf-exit`) or the todo list is empty.
-- Truncates to at most 12 lines to stay unobtrusive.
-
-**Disabling:**
-
-```json
-{
-  "todoOverlay": { "enabled": false }
-}
-```
-
-Set `todoOverlay.enabled` to `false` in the global or project config to hide the overlay.
-
-## Storage
+**Parameters:**
+- `background` (required): task context and review focus
+- `scope`: `"workspace"` (default), `"range"`, or `"commit"`
+- `from` / `to` / `commit`: scope-specific refs
 
 | Path | Purpose |
 |------|---------|

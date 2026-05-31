@@ -7,12 +7,17 @@
  * no tools, and returns a structured tool result.
  */
 
-import type { StopReason, Usage, ThinkingLevel, Context } from "@earendil-works/pi-ai";
+import type {
+	StopReason,
+	Usage,
+	ThinkingLevel,
+	Context,
+} from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import type {
-  AgentToolResult,
-  ExtensionAPI,
-  ExtensionContext,
+	AgentToolResult,
+	ExtensionAPI,
+	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
@@ -21,20 +26,21 @@ import type { ModelSpec, Thinking } from "./types.js";
 // ── Result type ──────────────────────────────────────────────────
 
 export interface SideCallResult {
-  text: string;
-  model?: string;
-  effort?: Thinking;
-  usage?: Usage;
-  stopReason?: StopReason;
-  errorMessage?: string;
+	text: string;
+	model?: string;
+	effort?: Thinking;
+	usage?: Usage;
+	stopReason?: StopReason;
+	errorMessage?: string;
 }
 
 interface SideCallDetails {
-  advisorModel?: string;
-  effort?: Thinking;
-  usage?: Usage;
-  stopReason?: StopReason;
-  errorMessage?: string;
+	advisorModel?: string;
+	effort?: Thinking;
+	usage?: Usage;
+	stopReason?: StopReason;
+	errorMessage?: string;
+	errorCause?: unknown;
 }
 
 // ── Plan review system prompt ────────────────────────────────────
@@ -70,11 +76,7 @@ read the actual plan content provided below.
 
 ## Output Format
 
-You MUST begin your output with the identity marker [pi-workflow-plan-review/v1]
-on the first line, before any review content. This is required for validation —
-your response will be rejected without it.
-
-After the marker, produce:
+Produce your review using this structure:
 
 ## 审查结果
 
@@ -101,12 +103,12 @@ After the marker, produce:
 
 /** Regex patterns to extract file paths from plan markdown. */
 const FILE_PATH_PATTERNS = [
-  // "Files / Areas to Change" section: lines like `- src/foo.ts` or `1. src/foo.ts`
-  /^[-*\d.]+\s+(`[^`]+`|[^\s]+\.[a-z]+)\s*$/gm,
-  // Inline code references: `src/foo.ts`
-  /`([^`]+\.[a-z]+)`/g,
-  // Generic path-like strings: src/foo/bar.ts
-  /(?:src|lib|test|tests|pkg|cmd|internal|extensions|scripts|docs)\/[\w./-]+\.[a-z]+/g,
+	// "Files / Areas to Change" section: lines like `- src/foo.ts` or `1. src/foo.ts`
+	/^[-*\d.]+\s+(`[^`]+`|[^\s]+\.[a-z]+)\s*$/gm,
+	// Inline code references: `src/foo.ts`
+	/`([^`]+\.[a-z]+)`/g,
+	// Generic path-like strings: src/foo/bar.ts
+	/(?:src|lib|test|tests|pkg|cmd|internal|extensions|scripts|docs)\/[\w./-]+\.[a-z]+/g,
 ];
 
 /** Max lines per file snippet. */
@@ -119,48 +121,52 @@ const MAX_SNIPPET_FILES = 5;
  * Extract referenced file paths from plan markdown and read key snippets.
  * Returns a formatted string ready to inject into the prompt.
  */
-export function extractFileSnippets(
-  planMarkdown: string,
-  cwd: string,
-): string {
-  const filePaths = new Set<string>();
+export function extractFileSnippets(planMarkdown: string, cwd: string): string {
+	const filePaths = new Set<string>();
 
-  for (const pattern of FILE_PATH_PATTERNS) {
-    const matches = planMarkdown.matchAll(pattern instanceof RegExp && pattern.global ? pattern : new RegExp(pattern.source, pattern.flags));
-    for (const match of matches) {
-      const raw = match[1] ?? match[0];
-      // Strip markdown formatting
-      const cleaned = raw.replace(/^[-*\d.]+\s+/, "").replace(/^`|`$/g, "").trim();
-      if (cleaned && /\.[a-z]+$/.test(cleaned)) {
-        filePaths.add(cleaned);
-      }
-    }
-  }
+	for (const pattern of FILE_PATH_PATTERNS) {
+		const matches = planMarkdown.matchAll(
+			pattern instanceof RegExp && pattern.global
+				? pattern
+				: new RegExp(pattern.source, pattern.flags),
+		);
+		for (const match of matches) {
+			const raw = match[1] ?? match[0];
+			// Strip markdown formatting
+			const cleaned = raw
+				.replace(/^[-*\d.]+\s+/, "")
+				.replace(/^`|`$/g, "")
+				.trim();
+			if (cleaned && /\.[a-z]+$/.test(cleaned)) {
+				filePaths.add(cleaned);
+			}
+		}
+	}
 
-  const snippets: string[] = [];
-  const includedFiles: string[] = [];
+	const snippets: string[] = [];
+	const includedFiles: string[] = [];
 
-  for (const filePath of filePaths) {
-    if (includedFiles.length >= MAX_SNIPPET_FILES) break;
+	for (const filePath of filePaths) {
+		if (includedFiles.length >= MAX_SNIPPET_FILES) break;
 
-    const resolved = path.resolve(cwd, filePath);
-    // Safety: only read files inside cwd
-    const rel = path.relative(cwd, resolved);
-    if (rel.startsWith("..") || rel === "") continue;
+		const resolved = path.resolve(cwd, filePath);
+		// Safety: only read files inside cwd
+		const rel = path.relative(cwd, resolved);
+		if (rel.startsWith("..") || rel === "") continue;
 
-    try {
-      if (!fs.existsSync(resolved)) continue;
-      const content = fs.readFileSync(resolved, "utf-8");
-      const lines = content.split("\n").slice(0, MAX_SNIPPET_LINES);
-      snippets.push(`### ${filePath}\n\`\`\`\n${lines.join("\n")}\n\`\`\``);
-      includedFiles.push(filePath);
-    } catch {
-      // Skip unreadable files
-    }
-  }
+		try {
+			if (!fs.existsSync(resolved)) continue;
+			const content = fs.readFileSync(resolved, "utf-8");
+			const lines = content.split("\n").slice(0, MAX_SNIPPET_LINES);
+			snippets.push(`### ${filePath}\n\`\`\`\n${lines.join("\n")}\n\`\`\``);
+			includedFiles.push(filePath);
+		} catch {
+			// Skip unreadable files
+		}
+	}
 
-  if (snippets.length === 0) return "";
-  return `\n# Key File Snippets (auto-extracted from plan)\n\n${snippets.join("\n\n")}`;
+	if (snippets.length === 0) return "";
+	return `\n# Key File Snippets (auto-extracted from plan)\n\n${snippets.join("\n\n")}`;
 }
 
 // ── Conversation summary extraction ──────────────────────────────
@@ -174,13 +180,11 @@ export function extractFileSnippets(
  * will be implemented when ctx.sessionManager provides a suitable
  * summary API. The infrastructure is here for future enhancement.
  */
-export function extractConversationSummary(
-  _ctx: ExtensionContext,
-): string {
-  // TODO: Extract key decisions and user constraints from session context.
-  // Could use ctx.sessionManager.getEntries() to identify user messages
-  // that contain requirements, constraints, or design decisions.
-  return "";
+export function extractConversationSummary(_ctx: ExtensionContext): string {
+	// TODO: Extract key decisions and user constraints from session context.
+	// Could use ctx.sessionManager.getEntries() to identify user messages
+	// that contain requirements, constraints, or design decisions.
+	return "";
 }
 
 // ── Tool inventory ───────────────────────────────────────────────
@@ -190,21 +194,21 @@ export function extractConversationSummary(
  * whether the executor's planned tool usage is reasonable.
  */
 export function buildToolInventory(pi: ExtensionAPI): string {
-  try {
-    const tools = pi.getAllTools();
-    if (!tools || tools.length === 0) return "";
+	try {
+		const tools = pi.getAllTools();
+		if (!tools || tools.length === 0) return "";
 
-    const names: string[] = [];
-    for (const tool of tools) {
-      if (typeof tool === "string") names.push(tool);
-      else if (tool && typeof tool.name === "string") names.push(tool.name);
-    }
+		const names: string[] = [];
+		for (const tool of tools) {
+			if (typeof tool === "string") names.push(tool);
+			else if (tool && typeof tool.name === "string") names.push(tool.name);
+		}
 
-    if (names.length === 0) return "";
-    return `\n# Executor Tool Inventory\n\nThe executor model has access to these tools: ${names.join(", ")}`;
-  } catch {
-    return "";
-  }
+		if (names.length === 0) return "";
+		return `\n# Executor Tool Inventory\n\nThe executor model has access to these tools: ${names.join(", ")}`;
+	} catch {
+		return "";
+	}
 }
 
 // ── Main sidecall ─────────────────────────────────────────────────
@@ -214,132 +218,120 @@ export function buildToolInventory(pi: ExtensionAPI): string {
  * curated context, no tools, no subprocess.
  */
 export async function executePlanReviewSidecall(
-  ctx: ExtensionContext,
-  pi: ExtensionAPI,
-  opts: {
-    planMarkdown: string;
-    /** Optional: conversation summary (currently empty, future enhancement). */
-    conversationSummary?: string;
-    /** Optional: additional context from executor (e.g. user constraints). */
-    extraContext?: string;
-    modelSpec: ModelSpec;
-    signal?: AbortSignal;
-  },
+	ctx: ExtensionContext,
+	pi: ExtensionAPI,
+	opts: {
+		planMarkdown: string;
+		/** Optional: conversation summary (currently empty, future enhancement). */
+		conversationSummary?: string;
+		/** Optional: additional context from executor (e.g. user constraints). */
+		extraContext?: string;
+		modelSpec: ModelSpec;
+		signal?: AbortSignal;
+	},
 ): Promise<AgentToolResult<SideCallDetails>> {
-  const effort = opts.modelSpec.thinking;
-  const advisorLabel = `${opts.modelSpec.provider}/${opts.modelSpec.model}`;
+	const effort = opts.modelSpec.thinking;
+	const advisorLabel = `${opts.modelSpec.provider}/${opts.modelSpec.model}`;
 
-  // Build curated context sections
-  const fileSnippets = extractFileSnippets(opts.planMarkdown, ctx.cwd);
-  const conversationSummary = opts.conversationSummary ?? extractConversationSummary(ctx);
-  const toolInventory = buildToolInventory(pi);
+	// Build curated context sections
+	const fileSnippets = extractFileSnippets(opts.planMarkdown, ctx.cwd);
+	const conversationSummary =
+		opts.conversationSummary ?? extractConversationSummary(ctx);
+	const toolInventory = buildToolInventory(pi);
 
-  // Assemble system prompt with dynamic context
-  let systemPrompt = PLAN_REVIEW_SYSTEM_PROMPT;
-  if (conversationSummary) {
-    systemPrompt += `\n\n# Conversation Summary\n\n${conversationSummary}`;
-  }
-  if (toolInventory) {
-    systemPrompt += toolInventory;
-  }
+	// Assemble system prompt with dynamic context
+	let systemPrompt = PLAN_REVIEW_SYSTEM_PROMPT;
+	if (conversationSummary) {
+		systemPrompt += `\n\n# Conversation Summary\n\n${conversationSummary}`;
+	}
+	if (toolInventory) {
+		systemPrompt += toolInventory;
+	}
 
-  // Build user message: plan content + file snippets + extra context
-  let userContent = opts.planMarkdown;
-  if (fileSnippets) {
-    userContent += `\n\n${fileSnippets}`;
-  }
-  if (opts.extraContext) {
-    userContent += `\n\n# Additional Context\n${opts.extraContext}`;
-  }
+	// Build user message: plan content + file snippets + extra context
+	let userContent = opts.planMarkdown;
+	if (fileSnippets) {
+		userContent += `\n\n${fileSnippets}`;
+	}
+	if (opts.extraContext) {
+		userContent += `\n\n# Additional Context\n${opts.extraContext}`;
+	}
 
-  // Build Context object: system prompt goes in Context.systemPrompt,
-  // not as a Message with "system" role (pi-ai Message only supports user/assistant/toolResult).
-  const context: Context = {
-    systemPrompt,
-    messages: [
-      { role: "user", content: userContent, timestamp: Date.now() },
-    ],
-  };
+	// Build Context object: system prompt goes in Context.systemPrompt,
+	// not as a Message with "system" role (pi-ai Message only supports user/assistant/toolResult).
+	const context: Context = {
+		systemPrompt,
+		messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
+	};
 
-  // Find the model from the registry (needed for completeSimple's Model<TApi> parameter).
-  const model = (ctx as any).modelRegistry?.find(
-    opts.modelSpec.provider,
-    opts.modelSpec.model,
-  );
-  if (!model) {
-    return {
-      content: [{ type: "text", text: `Plan review model not found: ${advisorLabel}` }],
-      details: {
-        advisorModel: advisorLabel,
-        effort,
-        errorMessage: "model_not_found",
-      },
-    };
-  }
+	// Find the model from the registry (needed for completeSimple's Model<TApi> parameter).
+	const model = (ctx as any).modelRegistry?.find(
+		opts.modelSpec.provider,
+		opts.modelSpec.model,
+	);
+	if (!model) {
+		return {
+			content: [
+				{ type: "text", text: `Plan review model not found: ${advisorLabel}` },
+			],
+			details: {
+				advisorModel: advisorLabel,
+				effort,
+				errorMessage: "model_not_found",
+			},
+		};
+	}
 
-  // Convert Thinking to ThinkingLevel: "off" means no reasoning.
-  const thinkingLevel: ThinkingLevel | undefined =
-    effort && effort !== "off" ? (effort as unknown as ThinkingLevel) : undefined;
+	// Convert Thinking to ThinkingLevel: "off" means no reasoning.
+	const thinkingLevel: ThinkingLevel | undefined =
+		effort && effort !== "off"
+			? (effort as unknown as ThinkingLevel)
+			: undefined;
 
-  try {
-    // completeSimple(model, context, options) — not an options bag.
-    const response = await completeSimple(model, context, {
-      reasoning: thinkingLevel,
-      signal: opts.signal,
-    });
+	try {
+		// completeSimple(model, context, options) — not an options bag.
+		const response = await completeSimple(model, context, {
+			reasoning: thinkingLevel,
+			signal: opts.signal,
+		});
 
-    // AssistantMessage.content is (TextContent | ThinkingContent | ToolCall)[] —
-    // extract text from TextContent blocks.
-    const text = response.content
-      .filter((b): b is { type: "text"; text: string } => b.type === "text")
-      .map((b) => b.text)
-      .join("");
+		// AssistantMessage.content is (TextContent | ThinkingContent | ToolCall)[] —
+		// extract text from TextContent blocks.
+		const text = response.content
+			.filter((b): b is { type: "text"; text: string } => b.type === "text")
+			.map((b) => b.text)
+			.join("");
 
-    // Validate identity marker
-    if (!text.includes("[pi-workflow-plan-review/v1]")) {
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              `Plan review sidecall returned output without the required identity marker "[pi-workflow-plan-review/v1]". ` +
-              `This may indicate the model did not follow the review prompt correctly. ` +
-              `Raw output:\n\n${text.slice(0, 2000)}`,
-          },
-        ],
-        details: {
-          advisorModel: advisorLabel,
-          effort,
-          usage: response.usage,
-          stopReason: response.stopReason,
-          errorMessage: "identity_marker_missing",
-        },
-      };
-    }
+		const resultText = text || "(no text output returned by plan review model)";
 
-    return {
-      content: [{ type: "text", text }],
-      details: {
-        advisorModel: advisorLabel,
-        effort,
-        usage: response.usage,
-        stopReason: response.stopReason,
-      },
-    };
-  } catch (err: any) {
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Plan review sidecall error: ${message}`,
-        },
-      ],
-      details: {
-        advisorModel: advisorLabel,
-        effort,
-        errorMessage: message,
-      },
-    };
-  }
+		return {
+			content: [{ type: "text", text: resultText }],
+			details: {
+				advisorModel: advisorLabel,
+				effort,
+				usage: response.usage,
+				stopReason: response.stopReason,
+			},
+		};
+	} catch (err: any) {
+		const message = err instanceof Error ? err.message : String(err);
+		const cause =
+			err instanceof Error && (err as Error & { cause?: unknown }).cause
+				? `\nCause: ${String((err as Error & { cause?: unknown }).cause)}`
+				: "";
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Plan review sidecall error: ${message}${cause}\n\nModel: ${advisorLabel}\nThinking: ${effort ?? "off"}`,
+				},
+			],
+			details: {
+				advisorModel: advisorLabel,
+				effort,
+				errorMessage: message,
+				errorCause: (err as any)?.cause ?? undefined,
+			},
+		};
+	}
 }

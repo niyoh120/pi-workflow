@@ -71,25 +71,25 @@ export const PLAN_PROMPT = `
 9. 最终计划产出后，必须调用 workflow_plan(action="save") 保存计划，并调用 workflow_todo(action="reset") 写入 todo。
 10. 保存后必须在回复中明确展示计划文件路径（例如 "Plan saved to .pi/workflow/plan/plan-xxx.md"），方便用户查看。
 
-## Plan Review 流程（内嵌）
+## Plan Review（可选工具）
 
-计划保存后，你必须主动发起 plan review：
+如果 workflow_plan_review 工具可用（当前启用了 plan review 配置），你可以在保存计划后自主决定是否调用它进行独立审查。建议在以下情况调用：
+- 计划复杂、涉及多个模块或文件
+- 用户明确要求审查
+- 你对方案有不确定的地方
 
-11. 调用 workflow_subagent(role="planReview")，将计划内容交给 reviewer 审查。reviewer 使用独立的模型和上下文（含对话摘要和关键文件片段），在同 turn 内返回结果。
-12. 收到 review 结果后，与你自己的评估进行对比讨论：
-    - 如果 reviewer 提出 Critical 或 Important 问题，评估是否合理。合理则修订计划，重新 workflow_plan(save) 保存修订版，再次调用 workflow_subagent(role="planReview") 审查。
-    - 如果你认为 reviewer 的某个问题不成立，用技术推理说明理由，但不要为了迎合而修改计划。
-    - 如果 reviewer 只有 Minor 问题，可以接受并继续推进。
-13. 重复审查-修订循环，直到：
-    - 达成共识（你和 reviewer 都没有 Critical/Important 反对意见）→ 进入下一步。
-    - 产生分歧无法解决 → 停止循环，将分歧摘要呈现给用户，请用户裁决。
-    - 🚫 不要无限制循环。如果 2-3 轮修订后仍有分歧，必须交给用户。Prompt 自行约束循环深度，不需要外部硬限制。
+调用规则：
+- 如有需要，调用 workflow_plan_review(task="计划内容摘要", context="额外的背景或约束", instructions="审查重点")。reviewer 使用独立模型（配置在 models.planReview 中），在同 turn 内返回结果。
+- 如果 reviewer 提出 Critical 或 Important 问题，必须技术评估是否合理，不要盲目接受。合理则修订计划，重新 workflow_plan(save) 保存修订版，并可再次调用 workflow_plan_review 审查。
+- 如果你认为 reviewer 的问题不成立（误判、超出范围、与技术事实不符），用技术推理说明理由，不修改计划。
+- 重复审查-修订循环，直到达成共识（你和 reviewer 都没有 Critical/Important 反对意见），或分歧无法解决。
+- 🚫 不要无限制循环。如果 2-3 轮修订后仍有分歧，必须将分歧摘要呈现给用户，请用户裁决。
+- 如果 reviewer 只有 Minor 问题，可以接受并继续推进。
 
-14. 共识达成后，展示最终计划摘要（包含 plan path），并请用户确认执行。
-    - 当 ask_user_question 可用时，用结构化确认问题（例如选项：执行计划 / 修改计划 / 继续讨论），让用户一键确认而不用打字。
-    - ask_user_question 返回后，根据用户选择决定批准或继续讨论。
-15. 用户明确确认"执行 / 可以 / approved / go / 按计划做"后，调用 workflow_plan(action="approve")。
-16. 不要在 Plan Mode 里实现代码。
+共识达成或分歧交由用户裁决后，展示最终计划摘要（包含 plan path），并请用户确认执行。
+
+11. 用户明确确认"执行 / 可以 / approved / go / 按计划做"后，调用 workflow_plan(action="approve")。
+12. 不要在 Plan Mode 里实现代码。
 
 最终计划建议格式：
 
@@ -132,32 +132,23 @@ export const WORK_PROMPT = `
 7. 修改后运行最相关测试。
 8. 如果测试命令不明确，从项目配置中寻找：package.json、pyproject.toml、Cargo.toml、go.mod、Makefile、README/docs。
 
-## Code Review 流程（内嵌）
+## Code Review（可选工具）
 
-全部 todo 完成后，你必须主动发起 code review：
+如果 workflow_code_review 工具可用（当前启用了 code review 配置），你可以在 todo 完成后自主决定是否调用它进行代码审查。建议在以下情况调用：
+- 变更非平凡、涉及多个文件或模块
+- 用户明确要求 review
+- 涉及安全、性能或数据完整性等关键领域
 
-9. 调用 workflow_code_review 工具进行 code review。
-   - 默认 scope 使用 workspace（覆盖 staged + unstaged + untracked 变更）。
-   - background 必须由你根据当前任务上下文自行总结，包含：用户目标、本轮实际修改范围、关键设计约束、已运行测试、希望 OCR 重点检查的风险点。
-   - 只有在用户明确要求 review 特定 commit 或 ref range 时才使用 range/commit scope。
-   - 🚫 不要默认使用 --from <baselineRef> --to HEAD，因为这会漏掉未提交工作区变更。
-10. 收到 review 结果后处理：
-    - 如果 reviewer 提出 Critical 或 Important 问题，先在代码中验证问题是否真实存在。
-    - 确认存在的问题，自行修复，修复后运行相关测试验证，然后再次 review。
-    - 如果你认为 reviewer 的某个问题不成立（误判、超出范围、与技术事实不符），用技术推理说明理由，但不修改代码。如果分歧无法解决，停止循环。
-    - 🚫 不要无限制循环。如果 2-3 轮修复后仍有无法解决的分歧，必须交给用户。
-11. 重复修复-审查循环，直到：
-    - Reviewer 通过（只有 Minor 问题或无问题）→ 调用 workflow_status 报告完成。
-    - 产生分歧无法解决 → 停止循环，将分歧摘要呈现给用户，请用户裁决。
-    - 修复后测试持续失败且两次尝试仍不清楚根因 → 调用 workflow_status blocked。
-
-## 必须调用的工具
-
-- Review 通过 → workflow_status({ status: "ready_for_review", runId: currentRunId, summary: "...", tests: "..." })
-- 阻塞无法继续 → workflow_status({ status: "blocked", runId: currentRunId, error: "..." })
-
-不要输出 WORK_STATUS 文本标记。workflow_status 工具记录完成状态：
-- workflow_status ready_for_review 表示 code review 已通过，可进入后续流程。
+调用规则：
+- 如有需要，调用 workflow_code_review 工具进行 code review。默认 scope 使用 workspace（覆盖 staged + unstaged + untracked 变更）。
+- background 必须由你根据当前任务上下文自行总结，包含：用户目标、本轮实际修改范围、关键设计约束、已运行测试、希望 code review 重点检查的风险点。
+- 只有在用户明确要求 review 特定 commit 或 ref range 时才使用 range/commit scope。
+- 🚫 不要默认使用 --from <baselineRef> --to HEAD，因为这会漏掉未提交工作区变更。
+- 收到 review 结果后，如果发现 Critical 或 Important 问题，先在代码中验证问题是否真实存在。
+- 确认存在的问题，自行修复，修复后运行相关测试验证，然后可再次 review。
+- 如果你认为 reviewer 的某个问题不成立（误判、超出范围、与技术事实不符），用技术推理说明理由，但不修改代码。
+- 重复修复-审查循环，直到 reviewer 通过（只有 Minor 问题或无问题），或分歧无法解决。
+- 🚫 不要无限制循环。如果 2-3 轮修复后仍有无法解决的分歧，必须交给用户裁决。
 `;
 
 export const COMMIT_PROMPT = `
@@ -196,9 +187,9 @@ Commit 风格和语言（优先级从高到低）：
 
 /** Return the system prompt for a workflow mode. Returns undefined for idle. */
 export function promptForMode(mode: Mode): string | undefined {
-  if (mode === "idle") return undefined;
-  if (mode === "plan") return PLAN_PROMPT;
-  if (mode === "work") return WORK_PROMPT;
-  if (mode === "commit") return COMMIT_PROMPT;
-  return undefined;
+	if (mode === "idle") return undefined;
+	if (mode === "plan") return PLAN_PROMPT;
+	if (mode === "work") return WORK_PROMPT;
+	if (mode === "commit") return COMMIT_PROMPT;
+	return undefined;
 }
