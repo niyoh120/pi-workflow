@@ -71,6 +71,18 @@ function normalizeConfig(cfg: any): WorkflowConfig {
 	if ("todoOverlay" in cfg) delete cfg.todoOverlay;
 	if ("askUserQuestion" in cfg) delete cfg.askUserQuestion;
 
+	// Normalize workflow section — only autoEnter is supported.
+	if (
+		cfg.workflow &&
+		typeof cfg.workflow === "object" &&
+		!Array.isArray(cfg.workflow)
+	) {
+		cfg.workflow = { autoEnter: !!cfg.workflow.autoEnter };
+	} else if ("workflow" in cfg) {
+		// Non-object value — reset to default.
+		cfg.workflow = { autoEnter: DEFAULT_CONFIG.workflow.autoEnter };
+	}
+
 	// Strip unknown planReview fields — only enabled is supported.
 	if (cfg.planReview && typeof cfg.planReview === "object") {
 		cfg.planReview = { enabled: !!cfg.planReview.enabled };

@@ -28,6 +28,9 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
 			thinking: "low",
 		},
 	},
+	workflow: {
+		autoEnter: false,
+	},
 	planReview: {
 		enabled: true,
 	},
@@ -37,6 +40,8 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
 };
 
 export const DEFAULT_STATE: WorkflowState = {
+	workflowEnabled: false,
+	workflowExplicitlyDisabled: false,
 	mode: "idle",
 	todos: [],
 	hiddenDoneIds: [],

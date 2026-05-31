@@ -23,6 +23,10 @@ export interface ModelSpec {
 
 export interface WorkflowConfig {
 	models: Record<Role, ModelSpec>;
+	/** Workflow entry gate — disabled by default until /wf is run. */
+	workflow: {
+		autoEnter: boolean;
+	};
 	/** Plan review via sidecall — optional, controlled by enabled flag. */
 	planReview: {
 		enabled: boolean;
@@ -34,6 +38,10 @@ export interface WorkflowConfig {
 }
 
 export interface WorkflowState {
+	/** Whether workflow commands/tools are enabled for this session. */
+	workflowEnabled: boolean;
+	/** Whether the user explicitly disabled workflow this session (overrides autoEnter). */
+	workflowExplicitlyDisabled: boolean;
 	mode: Mode;
 	/** Path to the current plan file (relative to cwd). */
 	planPath?: string;

@@ -24,6 +24,42 @@ import {
 	type ReviewScopeKind,
 } from "./ocr-helpers.js";
 
+// ── Workflow-enabled guard ──────────────────────────────────────
+
+/**
+ * Check whether workflow is enabled for the current session.
+ * Returns an error result if disabled, null if enabled.
+ */
+function checkWorkflowEnabled(
+	ctx: any,
+	getAgentDir: () => string,
+): {
+	isError: true;
+	content: { type: "text"; text: string }[];
+	details: Record<string, unknown>;
+} | null {
+	try {
+		const sessionKey = getSessionKey(ctx.sessionManager);
+		const state = loadState(ctx.cwd, sessionKey);
+		const config = loadConfig(ctx.cwd, getAgentDir());
+		if (!state.workflowEnabled && !config.workflow.autoEnter) {
+			return {
+				isError: true,
+				content: [
+					{
+						type: "text",
+						text: "Workflow is not enabled. Run /wf first to enable workflow tools.",
+					},
+				],
+				details: {},
+			};
+		}
+		return null;
+	} catch {
+		return null; // If we can't check, allow through.
+	}
+}
+
 const TodoStatusSchema = StringEnum([
 	"pending",
 	"in_progress",
@@ -66,6 +102,9 @@ export function registerTodoTool(
 			notes: Type.Optional(Type.String()),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const denied = checkWorkflowEnabled(ctx, getAgentDir);
+			if (denied) return denied;
+
 			const sessionKey = getSessionKey(ctx.sessionManager);
 			const state = loadState(ctx.cwd, sessionKey);
 
@@ -152,6 +191,9 @@ export function registerPlanTool(
 			markdown: Type.Optional(Type.String()),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const denied = checkWorkflowEnabled(ctx, getAgentDir);
+			if (denied) return denied;
+
 			const sessionKey = getSessionKey(ctx.sessionManager);
 			const state = loadState(ctx.cwd, sessionKey);
 			const { action } = params;
@@ -302,6 +344,8 @@ export function registerPlanTool(
 
 			if (action === "clear") {
 				const cleared: WorkflowState = {
+					workflowEnabled: state.workflowEnabled,
+					workflowExplicitlyDisabled: state.workflowExplicitlyDisabled,
 					mode: "idle",
 					todos: [],
 					hiddenDoneIds: [],
@@ -353,6 +397,9 @@ export function registerPlanReviewTool(
 			instructions: Type.Optional(Type.String()),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			const denied = checkWorkflowEnabled(ctx, getAgentDir);
+			if (denied) return denied;
+
 			const config = loadConfig(ctx.cwd, getAgentDir());
 
 			// Read the active plan from file if available
@@ -440,6 +487,9 @@ export function registerCodeReviewTool(
 			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const denied = checkWorkflowEnabled(ctx, getAgentDir);
+			if (denied) return denied;
+
 			// Validate OCR availability
 			if (!checkOcrAvailable(OCR_BINARY)) {
 				return {
@@ -567,4 +617,35 @@ export function registerCodeReviewTool(
 			}
 		},
 	});
+}
+
+// ── Bulk registration / gating ──────────────────────────────────────
+
+const _workflowToolsRegistered = new WeakSet<ExtensionAPI>();
+
+/** Check whether workflow tools have already been registered this session. */
+export function isWorkflowToolsRegistered(): boolean {
+	// Legacy compat — WeakSet is the source of truth now.
+	return false;
+}
+
+/**
+ * Register all workflow tools (todo, plan, plan review, code review).
+ * Idempotent per ExtensionAPI instance — skips if already registered.
+ */
+export function registerAllWorkflowTools(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+	cwd: string,
+): void {
+	if (_workflowToolsRegistered.has(pi)) return;
+
+	const config = loadConfig(cwd, getAgentDir());
+
+	registerTodoTool(pi, getAgentDir);
+	registerPlanTool(pi, getAgentDir);
+	if (config.planReview.enabled) registerPlanReviewTool(pi, getAgentDir);
+	if (config.codeReview.enabled) registerCodeReviewTool(pi, getAgentDir);
+
+	_workflowToolsRegistered.add(pi);
 }

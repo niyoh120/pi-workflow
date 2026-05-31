@@ -1,4 +1,7 @@
 {
+  "workflow": {
+    "autoEnter": false
+  },
   "models": {
     "plan": {
       "provider": "anthropic",

@@ -14,12 +14,14 @@ import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
 import { planDir } from "./paths.js";
+import { loadConfig } from "./config.js";
 import {
 	activateWorkflowToolsIfAllowed,
 	applyModeRuntime,
 	setCurrentTurnGuardMode,
 	getCurrentTurnGuardMode,
 	clearCurrentTurnGuardMode,
+	deactivateWorkflowTools,
 } from "./mode.js";
 import { execSync } from "node:child_process";
 import path from "node:path";
@@ -99,8 +101,16 @@ export function registerBeforeAgentStart(
 ): void {
 	pi.on("before_agent_start", async (event, ctx) => {
 		const sessionKey = ctxSessionKey(ctx);
+		const state = loadState(ctx.cwd, sessionKey);
+		const config = loadConfig(ctx.cwd, getAgentDir());
+		const workflowActive =
+			(state.workflowEnabled || config.workflow.autoEnter) &&
+			!state.workflowExplicitlyDisabled;
 
-		activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir);
+		// Tool activation: only when workflow is active.
+		if (workflowActive) {
+			activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir);
+		}
 
 		// Hide done items at the start of each new turn.
 		const overlay = getWorkflowOverlay();
@@ -108,24 +118,18 @@ export function registerBeforeAgentStart(
 			overlay.hideDoneFromLastTurn();
 		}
 
-		// Load current state
-		const state = loadState(ctx.cwd, sessionKey);
+		// When workflow is not active, stay idle — no mode prompts, no guards.
+		if (!workflowActive || state.mode === "idle") {
+			if (overlay) overlay.dispose();
+			return;
+		}
 
 		// Set per-turn guard mode from persisted state
-		if (state.mode !== "idle") {
-			setCurrentTurnGuardMode(sessionKey, state.mode);
-		}
+		setCurrentTurnGuardMode(sessionKey, state.mode);
 
-		// Overlay setup
 		if (overlay) {
-			if (state.mode === "idle") {
-				overlay.dispose();
-				return;
-			}
 			overlay.update(state.todos);
 		}
-
-		if (state.mode === "idle") return;
 
 		// Apply mode runtime (model/tools/status) for non-idle modes
 		await applyModeRuntime(pi, ctx, state.mode, getAgentDir);
@@ -156,13 +160,26 @@ export function registerToolCallGuard(
 	pi.on("tool_call", async (event, ctx) => {
 		const sessionKey = ctxSessionKey(ctx);
 		const state = loadState(ctx.cwd, sessionKey);
+		const config = loadConfig(ctx.cwd, getAgentDir());
+		const workflowActive =
+			(state.workflowEnabled || config.workflow.autoEnter) &&
+			!state.workflowExplicitlyDisabled;
 
-		// Allow workflow's own tools through.
+		// Block workflow tool calls when the workflow is not enabled.
+		// This catches stale tool registrations and direct tool invocations.
 		if (
 			event.toolName === "workflow_plan" ||
 			event.toolName === "workflow_todo" ||
-			event.toolName === "workflow_plan_review"
+			event.toolName === "workflow_plan_review" ||
+			event.toolName === "workflow_code_review"
 		) {
+			if (!workflowActive) {
+				return {
+					block: true,
+					reason:
+						"Workflow is not enabled. Run /wf first to enable workflow tools.",
+				};
+			}
 			return;
 		}
 
@@ -288,7 +305,69 @@ export function registerAgentEnd(
 	});
 }
 
+// ── /wf command ─────────────────────────────────────────────────────────────
+
+export function registerWfCommand(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.registerCommand("wf", {
+		description: "进入 workflow 模式，启用 /plan /work /review /commit 等命令",
+		handler: async (_args, ctx) => {
+			await ctx.waitForIdle();
+			const sessionKey = ctxSessionKey(ctx);
+			const state = loadState(ctx.cwd, sessionKey);
+
+			if (state.workflowEnabled) {
+				ctx.ui.notify("Workflow 已启用。", "info");
+				return;
+			}
+
+			state.workflowEnabled = true;
+			state.workflowExplicitlyDisabled = false;
+			state.mode = "idle";
+			saveState(ctx.cwd, sessionKey, state);
+
+			ctx.ui.notify("已进入 Workflow 模式。正在重载扩展...", "info");
+			await ctx.reload();
+		},
+	});
+}
+
 // ── Command registrations ────────────────────────────────────────────────────
+
+const _workflowCommandsRegistered = new WeakSet<ExtensionAPI>();
+
+/** Check whether workflow commands have already been registered for this session. */
+export function isWorkflowCommandsRegistered(): boolean {
+	// Legacy compat — WeakSet is the source of truth now.
+	return false;
+}
+
+/**
+ * Register all workflow slash commands except /wf (which is always registered).
+ * Idempotent per ExtensionAPI instance — skips if already registered.
+ */
+export function registerAllWorkflowCommands(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+	cwd: string,
+): void {
+	if (_workflowCommandsRegistered.has(pi)) return;
+
+	const config = loadConfig(cwd, getAgentDir());
+
+	registerPlanCommand(pi, getAgentDir);
+	registerWorkCommand(pi, getAgentDir);
+	if (config.codeReview.enabled) registerReviewCommand(pi, getAgentDir);
+	registerCommitCommand(pi, getAgentDir);
+	registerWfStatusCommand(pi, getAgentDir);
+	registerWfResetCommand(pi);
+	registerWfInitCommand(pi);
+	registerWfExitCommand(pi);
+
+	_workflowCommandsRegistered.add(pi);
+}
 
 export function registerPlanCommand(
 	pi: ExtensionAPI,
@@ -300,8 +379,10 @@ export function registerPlanCommand(
 			await ctx.waitForIdle();
 			const sessionKey = ctxSessionKey(ctx);
 
+			const current = loadState(ctx.cwd, sessionKey);
 			const state: WorkflowState = {
 				...DEFAULT_STATE,
+				workflowEnabled: current.workflowEnabled,
 				mode: "plan",
 				planRunId: crypto.randomUUID(),
 			};
@@ -336,8 +417,10 @@ export function registerWorkCommand(
 
 			const workArgs = args.trim();
 
+			const current = loadState(ctx.cwd, sessionKey);
 			const state: WorkflowState = {
 				...DEFAULT_STATE,
+				workflowEnabled: current.workflowEnabled,
 				mode: "work",
 				workRunId: crypto.randomUUID(),
 			};
@@ -549,13 +632,20 @@ export function registerWfExitCommand(pi: ExtensionAPI): void {
 
 			const state = loadState(ctx.cwd, sessionKey);
 			state.mode = "idle";
+			state.workflowEnabled = false;
+			state.workflowExplicitlyDisabled = true;
 			saveState(ctx.cwd, sessionKey, state);
+
+			// Remove workflow tools from active set before reload so
+			// the next turn starts clean.
+			deactivateWorkflowTools(pi);
 
 			const overlay = getWorkflowOverlay();
 			if (overlay) overlay.dispose();
 
 			ctx.ui.setStatus("lite-sp", undefined);
-			ctx.ui.notify("已退出 workflow mode。", "info");
+			ctx.ui.notify("已退出 workflow mode。正在重载扩展...", "info");
+			await ctx.reload();
 		},
 	});
 }
@@ -567,7 +657,12 @@ export function registerWfResetCommand(pi: ExtensionAPI): void {
 			await ctx.waitForIdle();
 			const sessionKey = ctxSessionKey(ctx);
 
-			const state: WorkflowState = { ...DEFAULT_STATE };
+			const current = loadState(ctx.cwd, sessionKey);
+			const state: WorkflowState = {
+				...DEFAULT_STATE,
+				workflowEnabled: current.workflowEnabled,
+				workflowExplicitlyDisabled: current.workflowExplicitlyDisabled,
+			};
 			saveState(ctx.cwd, sessionKey, state);
 
 			const overlay = getWorkflowOverlay();

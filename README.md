@@ -35,8 +35,11 @@ idle → plan → planReview → work → review ⟷ fix → commit → idle
 
 ## Modes
 
+Workflow tools and commands are **opt-in by default**: only `/wf` is visible until you enter workflow mode. Set `workflow.autoEnter: true` in config to enable them on startup.
+
 | Mode | Command | Description |
 |------|---------|-------------|
+| Entry | `/wf` | Enter workflow mode — enables all workflow commands and tools |
 | Plan Mode | `/plan` | Brainstorm and produce an implementation plan |
 | Plan Review Mode | (auto) | Same-turn plan review via completeSimple sidecall |
 | Work Mode | `/work` | Implement the approved plan |
@@ -49,6 +52,20 @@ idle → plan → planReview → work → review ⟷ fix → commit → idle
 ### Config merge order
 
 `DEFAULT_CONFIG` ← `global config` ← `project config`
+
+### Workflow entry gate
+
+By default, workflow commands and tools are hidden. Users must run `/wf` to enable them.
+
+```json
+{
+  "workflow": {
+    "autoEnter": false
+  }
+}
+```
+
+Set `workflow.autoEnter: true` to enable workflow commands and tools automatically on Pi startup.
 
 ### Global config
 
@@ -124,6 +141,7 @@ The `ocr` binary is assumed to be in PATH (hardcoded). No additional OCR configu
 ### Stale config cleanup
 
 On load, pi-workflow strips stale config keys from old versions:
+- The `workflow` section is preserved (only `autoEnter` is kept).
 - Removed `subagent` section (no longer exists)
 - Removed `todoOverlay` section (no longer user-configurable)
 - Removed `askUserQuestion` section (no longer user-configurable)
@@ -167,6 +185,7 @@ This prevents wasting tokens when the user still wants to refine the design.
 
 | Command | Description |
 |---------|-------------|
+| `/wf` | Enter workflow mode — enables all other workflow commands and tools |
 | `/plan` | Enter Plan Mode |
 | `/go [--force]` | Approve current plan and hand off to Work Mode |
 | `/work [task]` | Skip Plan Mode, go straight to implementation |

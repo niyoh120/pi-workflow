@@ -372,16 +372,26 @@ console.log("\n=== Check 6: Source structure verification ===");
 	);
 
 	// /plan and /work call clearBookkeeping
-	const planCmdStart = commandsTs.indexOf("registerPlanCommand");
-	const planCmdEnd = commandsTs.indexOf("registerWorkCommand", planCmdStart);
+	const planCmdStart = commandsTs.indexOf(
+		"export function registerPlanCommand",
+	);
+	const planCmdEnd = commandsTs.indexOf(
+		"export function registerWorkCommand",
+		planCmdStart,
+	);
 	assert(
 		planCmdStart >= 0 &&
 			planCmdEnd > planCmdStart &&
 			commandsTs.slice(planCmdStart, planCmdEnd).includes("clearBookkeeping()"),
 		"/plan command calls clearBookkeeping()",
 	);
-	const workCmdStart = commandsTs.indexOf("registerWorkCommand");
-	const workCmdEnd = commandsTs.indexOf("registerReviewCommand", workCmdStart);
+	const workCmdStart = commandsTs.indexOf(
+		"export function registerWorkCommand",
+	);
+	const workCmdEnd = commandsTs.indexOf(
+		"export function registerReviewCommand",
+		workCmdStart,
+	);
 	assert(
 		workCmdStart >= 0 &&
 			workCmdEnd > workCmdStart &&
@@ -521,24 +531,25 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"tools.ts: workflow_plan_review no longer has role param (removed)",
 	);
 
-	// Conditional registration in index.ts — tolerate braces/whitespace
+	// Conditional registration — now inside registerAllWorkflowTools in tools.ts
+	// and registerAllWorkflowCommands in commands.ts (not index.ts directly)
 	assert(
-		/if\s*\(\s*config\.planReview\.enabled\s*\)\s*\{?\s*registerPlanReviewTool\s*\(\s*pi\s*,\s*getAgentDir\s*\)/.test(
-			indexTs,
+		/if\s*\(\s*config\.planReview\.enabled\s*\)\s*\{?\s*registerPlanReviewTool/.test(
+			toolsTs,
 		),
-		"index.ts: conditionally registers plan review tool",
+		"tools.ts: conditionally registers plan review tool",
 	);
 	assert(
-		/if\s*\(\s*config\.codeReview\.enabled\s*\)\s*\{?\s*registerCodeReviewTool\s*\(\s*pi\s*,\s*getAgentDir\s*\)/.test(
-			indexTs,
+		/if\s*\(\s*config\.codeReview\.enabled\s*\)\s*\{?\s*registerCodeReviewTool/.test(
+			toolsTs,
 		),
-		"index.ts: conditionally registers code review tool",
+		"tools.ts: conditionally registers code review tool",
 	);
 	assert(
-		/if\s*\(\s*config\.codeReview\.enabled\s*\)\s*\{?\s*registerReviewCommand\s*\(\s*pi\s*,\s*getAgentDir\s*\)/.test(
-			indexTs,
+		/if\s*\(\s*config\.codeReview\.enabled\s*\)\s*\{?\s*registerReviewCommand/.test(
+			commandsTs,
 		),
-		"index.ts: conditionally registers /review command",
+		"commands.ts: conditionally registers /review command",
 	);
 
 	// Conditional activation in mode.ts — always delete old names first
@@ -622,8 +633,13 @@ console.log("\n=== Check 7: Code review tooling ===");
 	);
 
 	// /review now prompts model to call workflow_code_review
-	const reviewCmdStart = commandsTs.indexOf("registerReviewCommand");
-	const reviewCmdEnd = commandsTs.indexOf("registerCommitCommand");
+	const reviewCmdStart = commandsTs.indexOf(
+		"export function registerReviewCommand",
+	);
+	const reviewCmdEnd = commandsTs.indexOf(
+		"export function registerCommitCommand",
+		reviewCmdStart,
+	);
 	assert(
 		reviewCmdStart >= 0 && reviewCmdEnd > reviewCmdStart,
 		"/review and commit command anchors exist",
@@ -758,6 +774,158 @@ console.log("\n=== Check 7: Code review tooling ===");
 		approveBlock.indexOf("applyModeRuntime") <
 			approveBlock.indexOf('deliverAs: "followUp"'),
 		"tools.ts: approve applies runtime before followUp kickoff",
+	);
+	// Check 13: Workflow gating — defaults, schema, guards ───
+	console.log("\n=== Check 13: Workflow gating ===");
+
+	// DEFAULT_STATE includes workflowEnabled: false
+	assert(
+		defaultsTs.includes("workflowEnabled: false"),
+		"defaults.ts: DEFAULT_STATE has workflowEnabled: false",
+	);
+	assert(
+		defaultsTs.includes("autoEnter: false"),
+		"defaults.ts: DEFAULT_CONFIG has autoEnter: false",
+	);
+
+	// Type definitions
+	assert(
+		typesTs.includes("workflowEnabled: boolean"),
+		"types.ts: WorkflowState has workflowEnabled",
+	);
+	assert(
+		typesTs.includes("workflowExplicitlyDisabled"),
+		"types.ts: WorkflowState has workflowExplicitlyDisabled",
+	);
+	assert(
+		typesTs.includes("autoEnter: boolean"),
+		"types.ts: WorkflowConfig has workflow.autoEnter",
+	);
+
+	// State normalization preserves workflowEnabled
+	const stateTs2 = fs.readFileSync(
+		path.join(CWD, "extensions/workflow/state.ts"),
+		"utf8",
+	);
+	assert(
+		stateTs2.includes("typeof obj.workflowEnabled"),
+		"state.ts: normalizeState checks workflowEnabled",
+	);
+
+	// Config normalization preserves workflow section
+	assert(
+		/"workflow"/.test(configTs) ||
+			/cfg\.workflow/.test(configTs) ||
+			configTs.includes("workflow") ||
+			configTs.includes("autoEnter"),
+		"config.ts: normalizeConfig preserves workflow.autoEnter",
+	);
+
+	// checkWorkflowEnabled guard in tools
+	assert(
+		toolsTs.includes("checkWorkflowEnabled"),
+		"tools.ts: has checkWorkflowEnabled guard function",
+	);
+	assert(
+		toolsTs.includes("Run /wf first to enable workflow tools"),
+		"tools.ts: checkWorkflowEnabled error message present",
+	);
+
+	// Register functions exist
+	assert(
+		/export\s+function\s+registerWfCommand\s*\(/.test(commandsTs),
+		"commands.ts: exports registerWfCommand",
+	);
+	assert(
+		/export\s+function\s+registerAllWorkflowCommands\s*\(/.test(commandsTs),
+		"commands.ts: exports registerAllWorkflowCommands",
+	);
+	assert(
+		/export\s+function\s+registerAllWorkflowTools\s*\(/.test(toolsTs),
+		"tools.ts: exports registerAllWorkflowTools",
+	);
+	assert(
+		/export\s+function\s+deactivateWorkflowTools\s*\(/.test(modeTs),
+		"mode.ts: exports deactivateWorkflowTools",
+	);
+
+	// /wf-exit disables workflowEnabled
+	const wfExitStart = commandsTs.indexOf(
+		"export function registerWfExitCommand",
+	);
+	const wfExitEnd = commandsTs.indexOf(
+		"export function registerWfResetCommand",
+		wfExitStart,
+	);
+	const wfExitBlock = commandsTs.slice(wfExitStart, wfExitEnd);
+	assert(
+		wfExitBlock.includes("workflowEnabled = false"),
+		"/wf-exit: sets workflowEnabled to false",
+	);
+
+	// /wf-reset preserves workflowEnabled
+	const wfResetStart = commandsTs.indexOf(
+		"export function registerWfResetCommand",
+	);
+	const wfResetEnd = commandsTs.indexOf(
+		"export function registerWfInitCommand",
+		wfResetStart,
+	);
+	const wfResetBlock = commandsTs.slice(wfResetStart, wfResetEnd);
+	assert(
+		wfResetBlock.includes("current.workflowEnabled"),
+		"/wf-reset: preserves current workflowEnabled state",
+	);
+
+	// Tool-call guard blocks workflow tools when disabled
+	const tcgStart = commandsTs.indexOf("registerToolCallGuard");
+	const tcgEnd = commandsTs.indexOf("registerAgentEnd", tcgStart);
+	const tcgBlock = commandsTs.slice(tcgStart, tcgEnd);
+	assert(
+		tcgBlock.includes("!workflowActive"),
+		"tool-call guard: checks !workflowActive for workflow tools",
+	);
+	assert(
+		tcgBlock.includes("Run /wf first"),
+		"tool-call guard: error message mentions /wf",
+	);
+
+	// before_agent_start gates on workflowActive (scoped to the function)
+	const basStart = commandsTs.indexOf(
+		"export function registerBeforeAgentStart",
+	);
+	const basEnd = commandsTs.indexOf(
+		"export function registerToolCallGuard",
+		basStart,
+	);
+	const basBlock =
+		basStart >= 0 && basEnd > basStart
+			? commandsTs.slice(basStart, basEnd)
+			: "";
+	assert(
+		basBlock.includes("workflowActive") &&
+			basBlock.includes("workflowExplicitlyDisabled"),
+		"commands.ts: before_agent_start scoped check for workflowActive + explicit disable",
+	);
+
+	// index.ts gating
+	const indexTsGating = fs.readFileSync(
+		path.join(CWD, "extensions/workflow/index.ts"),
+		"utf8",
+	);
+	assert(
+		indexTsGating.includes("registerWfCommand") &&
+			indexTsGating.includes("autoEnter"),
+		"index.ts: /wf always registered, autoEnter gating present",
+	);
+	assert(
+		indexTsGating.includes("ensureWorkflowRegistered"),
+		"index.ts: has ensureWorkflowRegistered helper",
+	);
+	assert(
+		indexTsGating.includes('pi.on("session_start"') ||
+			indexTsGating.includes("session_start"),
+		"index.ts: registers session_start handler",
 	);
 }
 

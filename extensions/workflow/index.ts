@@ -7,6 +7,9 @@
  * Plan review uses completeSimple sidecall (no subprocess).
  * Code review uses alibaba/open-code-review CLI.
  * No external extension dependency required.
+ *
+ * Workflow commands and tools are gated behind /wf by default.
+ * Set config workflow.autoEnter = true to enable them on startup.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -19,52 +22,75 @@ import {
 	getWorkflowOverlay,
 } from "./todo-overlay.js";
 
-import {
-	registerTodoTool,
-	registerPlanTool,
-	registerPlanReviewTool,
-	registerCodeReviewTool,
-} from "./tools.js";
+import { registerAllWorkflowTools } from "./tools.js";
 
 import {
+	registerAllWorkflowCommands,
+	registerWfCommand,
 	registerBeforeAgentStart,
 	registerToolCallGuard,
 	registerAgentEnd,
-	registerPlanCommand,
-	registerWorkCommand,
-	registerReviewCommand,
-	registerCommitCommand,
-	registerWfStatusCommand,
-	registerWfExitCommand,
-	registerWfResetCommand,
-	registerWfInitCommand,
 } from "./commands.js";
+
+// ── Dynamic registration guard ──────────────────────
+
+const _workflowRegistered = new WeakSet<ExtensionAPI>();
+
+/**
+ * Dynamically register workflow slash commands and tools.
+ * Idempotent per ExtensionAPI instance — safe to call multiple times.
+ */
+function ensureWorkflowRegistered(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+	cwd: string,
+): void {
+	if (_workflowRegistered.has(pi)) return;
+
+	registerAllWorkflowCommands(pi, getAgentDir, cwd);
+	registerAllWorkflowTools(pi, getAgentDir, cwd);
+
+	_workflowRegistered.add(pi);
+}
+
+// ── Main entry point ────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
 	const config = loadConfig(process.cwd(), getAgentDir());
 
-	// ── Tools ──────────────────────────────────
-	registerTodoTool(pi, getAgentDir);
-	registerPlanTool(pi, getAgentDir);
-	if (config.planReview.enabled) registerPlanReviewTool(pi, getAgentDir);
-	if (config.codeReview.enabled) registerCodeReviewTool(pi, getAgentDir);
+	// ── /wf is always registered ──────────────────
+	registerWfCommand(pi, getAgentDir);
 
-	// ── Commands ───────────────────────────────
-	registerPlanCommand(pi, getAgentDir);
-	registerWorkCommand(pi, getAgentDir);
-	if (config.codeReview.enabled) registerReviewCommand(pi, getAgentDir);
-	registerCommitCommand(pi, getAgentDir);
-	registerWfStatusCommand(pi, getAgentDir);
-	registerWfExitCommand(pi);
-	registerWfResetCommand(pi);
-	registerWfInitCommand(pi);
+	// ── Workflow commands/tools: conditional ──────
+	if (config.workflow.autoEnter) {
+		// Auto-enter: register immediately at load time.
+		ensureWorkflowRegistered(pi, getAgentDir, process.cwd());
+	} else {
+		// Delayed registration: wait until /wf enables the session flag,
+		// then register on the next session_start after reload.
+		pi.on("session_start", async (_event, ctx) => {
+			try {
+				const sessionKey = getSessionKey({
+					getSessionId: () => (ctx as any).sessionManager?.getSessionId?.(),
+					getSessionFile: () =>
+						(ctx as any).sessionManager?.getSessionFile?.() ?? null,
+				});
+				const state = loadState((ctx as any).cwd, sessionKey);
+				if (state.workflowEnabled) {
+					ensureWorkflowRegistered(pi, getAgentDir, (ctx as any).cwd);
+				}
+			} catch {
+				// Silently skip if session state cannot be read.
+			}
+		});
+	}
 
-	// ── Event handlers ─────────────────────────
+	// ── Event handlers (always registered) ────────
 	registerBeforeAgentStart(pi, getAgentDir);
 	registerToolCallGuard(pi, getAgentDir);
 	registerAgentEnd(pi, getAgentDir);
 
-	// ── Overlay setup ──────────────────────────
+	// ── Overlay setup ─────────────────────────────
 	const overlay = new WorkflowTodoOverlay();
 	setWorkflowOverlay(overlay);
 }

@@ -132,6 +132,36 @@ export async function applyModeRuntime(
 	}
 }
 
+// ── Workflow tool activation / deactivation ──────────────────────────────
+
+/** All workflow tools that get enabled when workflow mode is active. */
+export const WORKFLOW_TOOL_NAMES = [
+	"workflow_todo",
+	"workflow_plan",
+	"workflow_plan_review",
+	"workflow_code_review",
+];
+
+/**
+ * Remove all workflow tool names from the active tool set.
+ * Used by /wf-exit to ensure the next reload starts clean.
+ */
+export function deactivateWorkflowTools(pi: ExtensionAPI): void {
+	try {
+		const active = pi.getActiveTools().map((tool: any) => {
+			if (typeof tool === "string") return tool;
+			return tool.name;
+		});
+		const workflowSet = new Set(WORKFLOW_TOOL_NAMES);
+		const next = active.filter((t: string) => !workflowSet.has(t));
+		if (next.length < active.length) {
+			pi.setActiveTools(next);
+		}
+	} catch {
+		// Silently ignore if tool introspection fails.
+	}
+}
+
 // ── Per-turn in-memory guard helpers ───────────────────────────────────────
 
 /**
