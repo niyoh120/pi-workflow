@@ -269,17 +269,21 @@ export async function executePlanReviewSidecall(
 		opts.modelSpec.provider,
 		opts.modelSpec.model,
 	);
+	// Throw so the agent runtime marks this as a real isError tool result
+	// instead of an empty/successful one.
 	if (!model) {
-		return {
-			content: [
-				{ type: "text", text: `Plan review model not found: ${advisorLabel}` },
-			],
-			details: {
-				advisorModel: advisorLabel,
-				effort,
-				errorMessage: "model_not_found",
-			},
-		};
+		throw new Error(`Plan review model not found: ${advisorLabel}`);
+	}
+
+	// Resolve request auth for the reviewer model. completeSimple only falls back
+	// to env API keys; provider auth configured via models.json / OAuth must be
+	// resolved here and forwarded explicitly, or the call fails with
+	// "No API key for provider: ...".
+	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+	if (!auth.ok) {
+		throw new Error(
+			`Plan review auth failed for ${advisorLabel}: ${auth.error}`,
+		);
 	}
 
 	// Convert Thinking to ThinkingLevel: "off" means no reasoning.
@@ -291,9 +295,25 @@ export async function executePlanReviewSidecall(
 	try {
 		// completeSimple(model, context, options) — not an options bag.
 		const response = await completeSimple(model, context, {
+			apiKey: auth.apiKey,
+			headers: auth.headers,
 			reasoning: thinkingLevel,
 			signal: opts.signal,
 		});
+
+		// completeSimple resolves (does not reject) on provider stream errors:
+		// the AssistantMessage carries stopReason "error" + errorMessage instead.
+		// Surface these as real tool errors so the model does not see empty output.
+		if (response.stopReason === "aborted" || opts.signal?.aborted) {
+			const abortErr = new Error("Plan review aborted");
+			abortErr.name = "AbortError";
+			throw abortErr;
+		}
+		if (response.stopReason === "error" || response.errorMessage) {
+			throw new Error(
+				`Plan review model error (${advisorLabel}): ${response.errorMessage ?? "unknown error"}`,
+			);
+		}
 
 		// AssistantMessage.content is (TextContent | ThinkingContent | ToolCall)[] —
 		// extract text from TextContent blocks.
@@ -302,10 +322,14 @@ export async function executePlanReviewSidecall(
 			.map((b) => b.text)
 			.join("");
 
-		const resultText = text || "(no text output returned by plan review model)";
+		if (!text.trim()) {
+			throw new Error(
+				`Plan review model returned no text output (${advisorLabel}, stopReason: ${response.stopReason}).`,
+			);
+		}
 
 		return {
-			content: [{ type: "text", text: resultText }],
+			content: [{ type: "text", text }],
 			details: {
 				advisorModel: advisorLabel,
 				effort,
@@ -314,24 +338,16 @@ export async function executePlanReviewSidecall(
 			},
 		};
 	} catch (err: any) {
+		// Re-throw aborts so the platform handles cancellation, and propagate all
+		// other errors so the runtime produces an isError tool result.
+		if (err instanceof Error && err.name === "AbortError") throw err;
 		const message = err instanceof Error ? err.message : String(err);
 		const cause =
 			err instanceof Error && (err as Error & { cause?: unknown }).cause
 				? `\nCause: ${String((err as Error & { cause?: unknown }).cause)}`
 				: "";
-		return {
-			content: [
-				{
-					type: "text",
-					text: `Plan review sidecall error: ${message}${cause}\n\nModel: ${advisorLabel}\nThinking: ${effort ?? "off"}`,
-				},
-			],
-			details: {
-				advisorModel: advisorLabel,
-				effort,
-				errorMessage: message,
-				errorCause: (err as any)?.cause ?? undefined,
-			},
-		};
+		throw new Error(
+			`Plan review sidecall error: ${message}${cause}\n\nModel: ${advisorLabel}\nThinking: ${effort ?? "off"}`,
+		);
 	}
 }

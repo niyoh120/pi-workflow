@@ -26,11 +26,11 @@ pi install .
 ## Architecture
 
 ```
-idle → explore → plan → planReview → work → review ⟷ fix → commit → idle
+idle → explore → plan → work → review ⟷ fix → commit → idle
 ```
 
 - **Explore Mode**: Default landing after `/wf`. Read-only codebase exploration and Q&A (same permissions as Plan Mode). Use `/plan` when ready to design.
-- **Plan Review**: Same-turn `completeSimple()` sidecall with curated context (plan text + auto-extracted key file snippets + conversation summary + tool inventory). The reviewer model sees exactly what it needs — no subprocess, no isolation overhead.
+- **Plan Review**: Optional, model-initiated `workflow_plan_review` tool call — the plan agent may invoke it after saving a plan. Same-turn `completeSimple()` sidecall with curated context (plan text + auto-extracted key file snippets + tool inventory). Not a separate mode; runs within Plan Mode.
 - **Code Review**: Tool-driven via `workflow_code_review`. The model selects review scope (workspace by default) and provides context. `/review` is a TUI scope-selector that prompts the model to invoke the tool.
 
 ## Modes
@@ -43,7 +43,6 @@ Workflow tools and commands are **opt-in by default**: only `/wf` is visible unt
 | Explore Mode | (default) | Read-only codebase exploration and Q&A — same permissions as Plan Mode |
 | Explore Mode | `/explore` | Return to Explore Mode from any mode (non-destructive — keeps plan/todos) |
 | Plan Mode | `/plan` | Brainstorm and produce an implementation plan |
-| Plan Review Mode | (auto) | Same-turn plan review via completeSimple sidecall |
 | Work Mode | `/work` | Implement the approved plan |
 | Fix | (auto) | Fix critical/important issues from code review |
 | Code Review Mode | `/review` | Interactive TUI: choose scope, then run `ocr review` |

@@ -465,10 +465,6 @@ console.log("\n=== Check 6: Source structure verification ===");
 console.log("\n=== Check 7: Code review tooling ===");
 
 {
-	const indexTs = fs.readFileSync(
-		path.join(CWD, "extensions/workflow/index.ts"),
-		"utf8",
-	);
 	const modeTs = fs.readFileSync(
 		path.join(CWD, "extensions/workflow/mode.ts"),
 		"utf8",
@@ -483,14 +479,6 @@ console.log("\n=== Check 7: Code review tooling ===");
 	);
 	const typesTs = fs.readFileSync(
 		path.join(CWD, "extensions/workflow/types.ts"),
-		"utf8",
-	);
-	const stateTs = fs.readFileSync(
-		path.join(CWD, "extensions/workflow/state.ts"),
-		"utf8",
-	);
-	const helpersTs = fs.readFileSync(
-		path.join(CWD, "extensions/workflow/helpers.ts"),
 		"utf8",
 	);
 	const promptsTs = fs.readFileSync(
@@ -733,7 +721,7 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"prompts.ts: no workflow_status (removed)",
 	);
 
-	// Sidecall: no marker validation
+	// Sidecall: auth resolution + error surfacing
 	const sidecallTs = fs.readFileSync(
 		path.join(CWD, "extensions/workflow/sidecall.ts"),
 		"utf8",
@@ -752,6 +740,31 @@ console.log("\n=== Check 7: Code review tooling ===");
 		sidecallTs,
 		"identity marker",
 		"sidecall.ts: no identity marker validation",
+	);
+	// Auth: sidecall must resolve request auth via modelRegistry, not rely on env keys.
+	assert(
+		sidecallTs.includes("getApiKeyAndHeaders"),
+		"sidecall.ts: resolves auth via getApiKeyAndHeaders",
+	);
+	assert(
+		/if\s*\(\s*!auth\.ok\s*\)\s*\{\s*throw new Error/.test(sidecallTs),
+		"sidecall.ts: checks auth.ok and throws on failure",
+	);
+	assert(
+		sidecallTs.includes("apiKey: auth.apiKey") &&
+			sidecallTs.includes("headers: auth.headers"),
+		"sidecall.ts: forwards apiKey and headers to completeSimple",
+	);
+	// Error surfacing: detect stopReason === "error" or errorMessage and throw.
+	assert(
+		/stopReason\s*===\s*"error"/.test(sidecallTs),
+		"sidecall.ts: detects stopReason === 'error'",
+	);
+	assert(
+		/if\s*\(\s*response\.stopReason\s*===\s*"error"\s*\|\|\s*response\.errorMessage\s*\)\s*\{\s*throw new Error/.test(
+			sidecallTs,
+		),
+		"sidecall.ts: throws on errorMessage or stopReason error",
 	);
 
 	// Approve kickoff — scope to approve branch, check await and order
