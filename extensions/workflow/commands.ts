@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import { getSessionKey, loadState, saveState, readPlan } from "./state.js";
+import { getSessionKey, loadState, saveState } from "./state.js";
 import { COMMON_PROMPT, promptForMode } from "./prompts.js";
 import {
 	isWorkflowDataPath,
@@ -9,7 +9,7 @@ import {
 	isLocalFileMutatingShell,
 	isAllowedPlanScratchPath,
 } from "./guards.js";
-import { currentStatusText, todoText } from "./helpers.js";
+import { currentStatusText } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
@@ -119,9 +119,15 @@ export function registerBeforeAgentStart(
 		}
 
 		// When workflow is not active, stay idle — no mode prompts, no guards.
-		if (!workflowActive || state.mode === "idle") {
+		if (!workflowActive) {
 			if (overlay) overlay.dispose();
 			return;
+		}
+
+		// Promote idle → explore: entry to workflow mode lands in Explore by default.
+		if (state.mode === "idle") {
+			state.mode = "explore";
+			saveState(ctx.cwd, sessionKey, state);
 		}
 
 		// Set per-turn guard mode from persisted state
@@ -235,19 +241,18 @@ export function registerToolCallGuard(
 			}
 
 			if (event.toolName === "write" || event.toolName === "edit") {
-				if (effectiveMode === "plan") {
+				if (effectiveMode === "plan" || effectiveMode === "explore") {
 					const targetPath: string | undefined =
 						(event.input as any)?.path ?? (event.input as any)?.filePath;
 					if (!targetPath) {
 						return {
 							block: true,
-							reason:
-								"Plan Mode: write/edit requires an absolute path under the scratch root.",
+							reason: `${effectiveMode} Mode: write/edit requires an absolute path under the scratch root.`,
 						};
 					}
 					const denial = isAllowedPlanScratchPath(ctx.cwd, targetPath);
 					if (denial) {
-						return { block: true, reason: `Plan Mode: ${denial}` };
+						return { block: true, reason: `${effectiveMode} Mode: ${denial}` };
 					}
 					return;
 				}
@@ -288,9 +293,9 @@ export function registerToolCallGuard(
 
 export function registerAgentEnd(
 	pi: ExtensionAPI,
-	getAgentDir: () => string,
+	_getAgentDir: () => string,
 ): void {
-	pi.on("agent_end", async (event, ctx) => {
+	pi.on("agent_end", async (_event, ctx) => {
 		const sessionKey = ctxSessionKey(ctx);
 		const state = loadState(ctx.cwd, sessionKey);
 
@@ -309,7 +314,7 @@ export function registerAgentEnd(
 
 export function registerWfCommand(
 	pi: ExtensionAPI,
-	getAgentDir: () => string,
+	_getAgentDir: () => string,
 ): void {
 	pi.registerCommand("wf", {
 		description: "进入 workflow 模式，启用 /plan /work /review /commit 等命令",
@@ -325,10 +330,10 @@ export function registerWfCommand(
 
 			state.workflowEnabled = true;
 			state.workflowExplicitlyDisabled = false;
-			state.mode = "idle";
+			state.mode = "explore";
 			saveState(ctx.cwd, sessionKey, state);
 
-			ctx.ui.notify("已进入 Workflow 模式。正在重载扩展...", "info");
+			ctx.ui.notify("已进入 Workflow 模式（Explore）。正在重载扩展...", "info");
 			await ctx.reload();
 		},
 	});
@@ -357,6 +362,7 @@ export function registerAllWorkflowCommands(
 
 	const config = loadConfig(cwd, getAgentDir());
 
+	registerExploreCommand(pi, getAgentDir);
 	registerPlanCommand(pi, getAgentDir);
 	registerWorkCommand(pi, getAgentDir);
 	if (config.codeReview.enabled) registerReviewCommand(pi, getAgentDir);
@@ -367,6 +373,35 @@ export function registerAllWorkflowCommands(
 	registerWfExitCommand(pi);
 
 	_workflowCommandsRegistered.add(pi);
+}
+
+export function registerExploreCommand(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.registerCommand("explore", {
+		description: "进入 Explore Mode：探索代码库、问答，权限等同 Plan Mode",
+		handler: async (_args, ctx) => {
+			await ctx.waitForIdle();
+			const sessionKey = ctxSessionKey(ctx);
+
+			const current = loadState(ctx.cwd, sessionKey);
+			// Non-destructive: switch mode only — preserve plan/todos.
+			// Also enable workflow in case the user ran /wf-exit earlier.
+			const state: WorkflowState = {
+				...current,
+				workflowEnabled: true,
+				workflowExplicitlyDisabled: false,
+				mode: "explore",
+			};
+			saveState(ctx.cwd, sessionKey, state);
+
+			const ok = await applyModeRuntime(pi, ctx, "explore", getAgentDir);
+			if (!ok) return;
+
+			ctx.ui.notify("已进入 Explore Mode。准备探索代码库或回答问题。", "info");
+		},
+	});
 }
 
 export function registerPlanCommand(
@@ -444,9 +479,11 @@ export function registerWorkCommand(
 	});
 }
 
+// registerReviewCommand
+// (function signatures on L483 and L644)
 export function registerReviewCommand(
 	pi: ExtensionAPI,
-	getAgentDir: () => string,
+	_getAgentDir: () => string,
 ): void {
 	pi.registerCommand("review", {
 		description:
@@ -607,7 +644,7 @@ export function registerCommitCommand(
 
 export function registerWfStatusCommand(
 	pi: ExtensionAPI,
-	getAgentDir: () => string,
+	_getAgentDir: () => string,
 ): void {
 	pi.registerCommand("wf-status", {
 		description: "显示当前轻量 workflow 状态",

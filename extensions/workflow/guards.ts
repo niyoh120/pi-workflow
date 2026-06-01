@@ -1,4 +1,4 @@
-import type { Mode, WorkflowState } from "./types.js";
+import type { Mode } from "./types.js";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
@@ -11,9 +11,11 @@ const PLAN_SCRATCH_ROOT = path.join(tmpdir(), "pi-workflow-plan-scratch");
  * Used to block direct read/write/edit access — agents must use workflow tools instead.
  */
 export function isWorkflowDataPath(targetPath: string, cwd: string): boolean {
-  const resolved = path.resolve(cwd, targetPath);
-  const workflowRoot = path.resolve(cwd, ".pi", "workflow");
-  return resolved === workflowRoot || resolved.startsWith(workflowRoot + path.sep);
+	const resolved = path.resolve(cwd, targetPath);
+	const workflowRoot = path.resolve(cwd, ".pi", "workflow");
+	return (
+		resolved === workflowRoot || resolved.startsWith(workflowRoot + path.sep)
+	);
 }
 
 /**
@@ -24,175 +26,197 @@ export function isWorkflowDataPath(targetPath: string, cwd: string): boolean {
  * Returns null if allowed, or a denial reason string.
  */
 export function isAllowedPlanScratchPath(
-  cwd: string,
-  targetPath: string
+	cwd: string,
+	targetPath: string,
 ): string | null {
-  // 1. Must be absolute.
-  if (!path.isAbsolute(targetPath)) {
-    return "Only absolute paths under the Plan Mode scratch root are allowed.";
-  }
+	// 1. Must be absolute.
+	if (!path.isAbsolute(targetPath)) {
+		return "Only absolute paths under the Plan Mode scratch root are allowed.";
+	}
 
-  const normalized = path.resolve(path.normalize(targetPath));
-  const scratchRoot = path.resolve(PLAN_SCRATCH_ROOT);
+	const normalized = path.resolve(path.normalize(targetPath));
+	const scratchRoot = path.resolve(PLAN_SCRATCH_ROOT);
 
-  // 2. Must be strictly under the scratch root.
-  const rel = path.relative(scratchRoot, normalized);
-  if (rel.startsWith("..") || path.resolve(scratchRoot, rel) !== normalized) {
-    return `Path must be under ${scratchRoot}.`;
-  }
+	// 2. Must be strictly under the scratch root.
+	const rel = path.relative(scratchRoot, normalized);
+	if (rel.startsWith("..") || path.resolve(scratchRoot, rel) !== normalized) {
+		return `Path must be under ${scratchRoot}.`;
+	}
 
-  // 3. Canonicalize cwd.
-  let canonicalCwd: string;
-  try {
-    canonicalCwd = realpathSync(cwd);
-  } catch {
-    return `Cannot resolve cwd: ${cwd}`;
-  }
+	// 3. Canonicalize cwd.
+	let canonicalCwd: string;
+	try {
+		canonicalCwd = realpathSync(cwd);
+	} catch {
+		return `Cannot resolve cwd: ${cwd}`;
+	}
 
-  // 4. Ensure scratch root exists and is safe (not a symlink, not inside cwd).
-  let canonicalRoot: string;
-  try {
-    const rootStat = lstatSync(scratchRoot);
-    if (rootStat.isSymbolicLink()) {
-      return `Scratch root ${scratchRoot} is a symlink — rejected.`;
-    }
-    if (!rootStat.isDirectory()) {
-      return `Scratch root ${scratchRoot} is not a directory.`;
-    }
-    canonicalRoot = realpathSync(scratchRoot);
-  } catch {
-    // Scratch root does not exist — verify the nearest existing ancestor
-    // (tmpdir) is safe before creating anything.
-    const tempDir = tmpdir();
-    let canonicalTemp: string;
-    try {
-      canonicalTemp = realpathSync(tempDir);
-    } catch {
-      return `Cannot resolve temp directory: ${tempDir}`;
-    }
-    const tempRelToCwd = path.relative(canonicalCwd, canonicalTemp);
-    if (!tempRelToCwd.startsWith("..") && tempRelToCwd !== "") {
-      return `Temp directory resolves inside project — cannot create scratch root.`;
-    }
-    if (tempRelToCwd === "") {
-      return `Temp directory resolves to project directory — cannot create scratch root.`;
-    }
+	// 4. Ensure scratch root exists and is safe (not a symlink, not inside cwd).
+	let canonicalRoot: string;
+	try {
+		const rootStat = lstatSync(scratchRoot);
+		if (rootStat.isSymbolicLink()) {
+			return `Scratch root ${scratchRoot} is a symlink — rejected.`;
+		}
+		if (!rootStat.isDirectory()) {
+			return `Scratch root ${scratchRoot} is not a directory.`;
+		}
+		canonicalRoot = realpathSync(scratchRoot);
+	} catch {
+		// Scratch root does not exist — verify the nearest existing ancestor
+		// (tmpdir) is safe before creating anything.
+		const tempDir = tmpdir();
+		let canonicalTemp: string;
+		try {
+			canonicalTemp = realpathSync(tempDir);
+		} catch {
+			return `Cannot resolve temp directory: ${tempDir}`;
+		}
+		const tempRelToCwd = path.relative(canonicalCwd, canonicalTemp);
+		if (!tempRelToCwd.startsWith("..") && tempRelToCwd !== "") {
+			return `Temp directory resolves inside project — cannot create scratch root.`;
+		}
+		if (tempRelToCwd === "") {
+			return `Temp directory resolves to project directory — cannot create scratch root.`;
+		}
 
-    // Safe to create scratch root now.
-    mkdirSync(scratchRoot, { recursive: true });
-    const createdStat = lstatSync(scratchRoot);
-    if (createdStat.isSymbolicLink()) {
-      return `Scratch root ${scratchRoot} was created as a symlink — rejected.`;
-    }
-    if (!createdStat.isDirectory()) {
-      return `Scratch root ${scratchRoot} is not a directory — rejected.`;
-    }
-    canonicalRoot = realpathSync(scratchRoot);
-  }
+		// Safe to create scratch root now.
+		mkdirSync(scratchRoot, { recursive: true });
+		const createdStat = lstatSync(scratchRoot);
+		if (createdStat.isSymbolicLink()) {
+			return `Scratch root ${scratchRoot} was created as a symlink — rejected.`;
+		}
+		if (!createdStat.isDirectory()) {
+			return `Scratch root ${scratchRoot} is not a directory — rejected.`;
+		}
+		canonicalRoot = realpathSync(scratchRoot);
+	}
 
-  // Scratch root itself must NOT resolve inside cwd.
-  const rootRelToCwd = path.relative(canonicalCwd, canonicalRoot);
-  if (!rootRelToCwd.startsWith("..") && rootRelToCwd !== "") {
-    return `Scratch root resolves inside project directory.`;
-  }
-  if (rootRelToCwd === "") {
-    return `Scratch root resolves to the same path as project directory.`;
-  }
+	// Scratch root itself must NOT resolve inside cwd.
+	const rootRelToCwd = path.relative(canonicalCwd, canonicalRoot);
+	if (!rootRelToCwd.startsWith("..") && rootRelToCwd !== "") {
+		return `Scratch root resolves inside project directory.`;
+	}
+	if (rootRelToCwd === "") {
+		return `Scratch root resolves to the same path as project directory.`;
+	}
 
-  // 5. Walk path segments from scratch root to target.
-  const segments = rel.split(path.sep).filter(Boolean);
-  if (segments.length === 0) {
-    return `Target path must be a file under ${scratchRoot}, not the root itself.`;
-  }
+	// 5. Walk path segments from scratch root to target.
+	const segments = rel.split(path.sep).filter(Boolean);
+	if (segments.length === 0) {
+		return `Target path must be a file under ${scratchRoot}, not the root itself.`;
+	}
 
-  let accumulated = scratchRoot;
-  for (let i = 0; i < segments.length; i++) {
-    accumulated = path.join(accumulated, segments[i]);
-    const isFinal = i === segments.length - 1;
+	let accumulated = scratchRoot;
+	for (let i = 0; i < segments.length; i++) {
+		accumulated = path.join(accumulated, segments[i]);
+		const isFinal = i === segments.length - 1;
 
-    if (existsSync(accumulated)) {
-      const stat = lstatSync(accumulated);
+		if (existsSync(accumulated)) {
+			const stat = lstatSync(accumulated);
 
-      if (stat.isSymbolicLink()) {
-        return `Path component ${accumulated} is a symlink — rejected.`;
-      }
+			if (stat.isSymbolicLink()) {
+				return `Path component ${accumulated} is a symlink — rejected.`;
+			}
 
-      if (isFinal) {
-        if (!stat.isFile()) {
-          return `Target ${accumulated} exists but is not a regular file.`;
-        }
-        // Reject hard links: a hard-link target could share its inode
-        // with a project file, so editing it would mutate the project.
-        if (stat.nlink > 1) {
-          return `Target ${accumulated} has multiple hard links — rejected.`;
-        }
-      } else {
-        if (!stat.isDirectory()) {
-          return `Path component ${accumulated} is not a directory.`;
-        }
-      }
+			if (isFinal) {
+				if (!stat.isFile()) {
+					return `Target ${accumulated} exists but is not a regular file.`;
+				}
+				// Reject hard links: a hard-link target could share its inode
+				// with a project file, so editing it would mutate the project.
+				if (stat.nlink > 1) {
+					return `Target ${accumulated} has multiple hard links — rejected.`;
+				}
+			} else {
+				if (!stat.isDirectory()) {
+					return `Path component ${accumulated} is not a directory.`;
+				}
+			}
 
-      const canonical = realpathSync(accumulated);
-      const relToCwd = path.relative(canonicalCwd, canonical);
-      if (!relToCwd.startsWith("..") && relToCwd !== "") {
-        return `Path ${accumulated} resolves inside project directory.`;
-      }
-      if (relToCwd === "") {
-        return `Path ${accumulated} resolves to project directory — rejected.`;
-      }
-    }
-  }
+			const canonical = realpathSync(accumulated);
+			const relToCwd = path.relative(canonicalCwd, canonical);
+			if (!relToCwd.startsWith("..") && relToCwd !== "") {
+				return `Path ${accumulated} resolves inside project directory.`;
+			}
+			if (relToCwd === "") {
+				return `Path ${accumulated} resolves to project directory — rejected.`;
+			}
+		}
+	}
 
-  return null; // Allowed.
+	return null; // Allowed.
 }
 
 /** Returns true if the given mode is read-only (no local file mutations). */
 export function isReadonlyMode(mode: Mode): boolean {
-  return mode === "plan";
+	return mode === "explore" || mode === "plan";
 }
 
 /** Check whether a shell command would modify local files. */
 export function isLocalFileMutatingShell(command: string): boolean {
-  const cmd = command.trim();
-  if (cmd.length === 0) return false;
+	const cmd = command.trim();
+	if (cmd.length === 0) return false;
 
-  // Shell redirection / tee / patch usually writes files.
-  if (/(^|[^<])>\s*[^&]/.test(cmd)) return true;
-  if (/>>\s*/.test(cmd)) return true;
-  if (/\|\s*tee\b/.test(cmd)) return true;
-  if (/\bapply_patch\b/.test(cmd)) return true;
+	// Strip harmless fd-duplication redirects (2>&1, >&2, 1>&2).
+	// Note: &>word creates a file in bash — we only strip &>/dev/…, not &>1 / &>2.
+	let stripped = cmd;
+	stripped = stripped.replace(/\d*>\s*&[12]\b/g, "");
 
-  const mutatingPatterns = [
-    /^rm\b/,
-    /^mv\b/,
-    /^cp\b/,
-    /^touch\b/,
-    /^mkdir\b/,
-    /^rmdir\b/,
-    /^chmod\b/,
-    /^chown\b/,
-    /^ln\b/,
-    /^truncate\b/,
+	// Strip redirects to /dev/{null,stdout,stderr} — these are read-only
+	// virtual devices. The (?!…) guard rejects path-traversal variants
+	// such as >/dev/null/../../foo or >/dev/nulls.
+	stripped = stripped.replace(
+		/\d*>\s*\/dev\/(null|stdout|stderr)(?![\w/.])/g,
+		"",
+	);
+	stripped = stripped.replace(
+		/\d*>>\s*\/dev\/(null|stdout|stderr)(?![\w/.])/g,
+		"",
+	);
+	// &>/dev/null is harmless (both stdout+stderr → null device).
+	stripped = stripped.replace(
+		/&>\s*\/dev\/(null|stdout|stderr)(?![\w/.])/g,
+		"",
+	);
 
-    /\bprettier\b.*\s--write\b/,
-    /\beslint\b.*\s--fix\b/,
-    /\bruff\b.*\s--fix\b/,
-    /\bblack\b/,
-    /\bgofmt\b.*\s-w\b/,
-    /\brustfmt\b/,
-    /^npm\s+(install|i|add|update|dedupe|link|uninstall|remove|rm)\b/,
-    /^pnpm\s+(install|add|update|link|remove|rm)\b/,
-    /^yarn\s+(install|add|upgrade|link|remove)\b/,
-    /^bun\s+(install|add|update|remove|rm)\b/,
-    /^pip\s+install\b/,
-    /^uv\s+add\b/,
-    /^poetry\s+add\b/,
-    /^cargo\s+add\b/,
-    /^go\s+get\b/,
+	// Shell redirection / tee / patch usually writes files.
+	if (/(^|[^<])>\s*[^&]/.test(stripped)) return true;
+	if (/>>\s*/.test(stripped)) return true;
+	if (/\|\s*tee\b/.test(stripped)) return true;
+	if (/\bapply_patch\b/.test(stripped)) return true;
 
-    /^git\s+(add|commit|checkout|switch|reset|clean|apply|restore|merge|rebase|cherry-pick|stash|tag|push)\b/,
-    /^git\s+branch\s+(-d|-D|-m)\b/,
-  ];
+	const mutatingPatterns = [
+		/^rm\b/,
+		/^mv\b/,
+		/^cp\b/,
+		/^touch\b/,
+		/^mkdir\b/,
+		/^rmdir\b/,
+		/^chmod\b/,
+		/^chown\b/,
+		/^ln\b/,
+		/^truncate\b/,
 
-  return mutatingPatterns.some((re) => re.test(cmd));
+		/\bprettier\b.*\s--write\b/,
+		/\beslint\b.*\s--fix\b/,
+		/\bruff\b.*\s--fix\b/,
+		/\bblack\b/,
+		/\bgofmt\b.*\s-w\b/,
+		/\brustfmt\b/,
+		/^npm\s+(install|i|add|update|dedupe|link|uninstall|remove|rm)\b/,
+		/^pnpm\s+(install|add|update|link|remove|rm)\b/,
+		/^yarn\s+(install|add|upgrade|link|remove)\b/,
+		/^bun\s+(install|add|update|remove|rm)\b/,
+		/^pip\s+install\b/,
+		/^uv\s+add\b/,
+		/^poetry\s+add\b/,
+		/^cargo\s+add\b/,
+		/^go\s+get\b/,
+
+		/^git\s+(add|commit|checkout|switch|reset|clean|apply|restore|merge|rebase|cherry-pick|stash|tag|push)\b/,
+		/^git\s+branch\s+(-d|-D|-m)\b/,
+	];
+
+	return mutatingPatterns.some((re) => re.test(cmd));
 }

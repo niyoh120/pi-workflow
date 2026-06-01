@@ -96,6 +96,7 @@ function normalizeConfig(cfg: any): WorkflowConfig {
 	// Strip unknown models entries and normalize each model to only contain
 	// provider/model/thinking (strip baseUrl, apiKey, or other old fields).
 	const VALID_ROLES = new Set([
+		"explore",
 		"plan",
 		"planReview",
 		"work",

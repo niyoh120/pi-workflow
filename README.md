@@ -26,12 +26,12 @@ pi install .
 ## Architecture
 
 ```
-idle → plan → planReview → work → review ⟷ fix → commit → idle
+idle → explore → plan → planReview → work → review ⟷ fix → commit → idle
 ```
 
+- **Explore Mode**: Default landing after `/wf`. Read-only codebase exploration and Q&A (same permissions as Plan Mode). Use `/plan` when ready to design.
 - **Plan Review**: Same-turn `completeSimple()` sidecall with curated context (plan text + auto-extracted key file snippets + conversation summary + tool inventory). The reviewer model sees exactly what it needs — no subprocess, no isolation overhead.
 - **Code Review**: Tool-driven via `workflow_code_review`. The model selects review scope (workspace by default) and provides context. `/review` is a TUI scope-selector that prompts the model to invoke the tool.
-- **Explore**: Not included. Install `@tintinweb/pi-subagents` separately if you want its built-in explore agent.
 
 ## Modes
 
@@ -40,6 +40,8 @@ Workflow tools and commands are **opt-in by default**: only `/wf` is visible unt
 | Mode | Command | Description |
 |------|---------|-------------|
 | Entry | `/wf` | Enter workflow mode — enables all workflow commands and tools |
+| Explore Mode | (default) | Read-only codebase exploration and Q&A — same permissions as Plan Mode |
+| Explore Mode | `/explore` | Return to Explore Mode from any mode (non-destructive — keeps plan/todos) |
 | Plan Mode | `/plan` | Brainstorm and produce an implementation plan |
 | Plan Review Mode | (auto) | Same-turn plan review via completeSimple sidecall |
 | Work Mode | `/work` | Implement the approved plan |
@@ -74,6 +76,11 @@ Set `workflow.autoEnter: true` to enable workflow commands and tools automatical
 ```json
 {
   "models": {
+    "explore": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-5",
+      "thinking": "medium"
+    },
     "plan": {
       "provider": "anthropic",
       "model": "claude-opus-4-5",
@@ -148,8 +155,7 @@ On load, pi-workflow strips stale config keys from old versions:
 - Removed `codeReview.ocrBinary/timeoutMs/maxLoops` (hardcoded, no longer configurable)
 - Removed `planReview.maxLoops` (no longer used)
 - Removed `codeReview.auto` (no longer used)
-- Removed `models.explore` (Explore removed)
-- Unknown models keys are stripped; only `plan/planReview/work/review/commit` are recognized
+- Unknown models keys are stripped; only `explore/plan/planReview/work/review/commit` are recognized
 
 ## Plan Document Management
 
@@ -186,6 +192,7 @@ This prevents wasting tokens when the user still wants to refine the design.
 | Command | Description |
 |---------|-------------|
 | `/wf` | Enter workflow mode — enables all other workflow commands and tools |
+| `/explore` | Enter Explore Mode (non-destructive — preserves plan/todos) |
 | `/plan` | Enter Plan Mode |
 | `/go [--force]` | Approve current plan and hand off to Work Mode |
 | `/work [task]` | Skip Plan Mode, go straight to implementation |

@@ -2,38 +2,37 @@ import type { WorkflowState } from "./types.js";
 
 /** Format todos as a markdown checklist string. */
 export function todoText(s: WorkflowState): string {
-  if (s.todos.length === 0) return "当前没有 todo。";
+	if (s.todos.length === 0) return "当前没有 todo。";
 
-  return s.todos
-    .map((item) => {
-      const notes = item.notes ? ` — ${item.notes}` : "";
-      return `- [${item.status}] ${item.id}: ${item.title}${notes}`;
-    })
-    .join("\n");
+	return s.todos
+		.map((item) => {
+			const notes = item.notes ? ` — ${item.notes}` : "";
+			return `- [${item.status}] ${item.id}: ${item.title}${notes}`;
+		})
+		.join("\n");
 }
 
 /** Map internal mode to user-visible label for TUI status. */
 export function modeLabel(mode: string): string {
-  const labels: Record<string, string> = {
-    idle: "Idle",
-    plan: "Plan Mode",
-    work: "Work Mode",
-    commit: "Commit Mode",
-  };
-  return labels[mode] ?? mode;
+	const labels: Record<string, string> = {
+		idle: "Idle",
+		explore: "Explore Mode",
+		plan: "Plan Mode",
+		work: "Work Mode",
+		commit: "Commit Mode",
+	};
+	return labels[mode] ?? mode;
 }
 
 /** Build the current workflow status text block to inject into the system prompt. */
-export function currentStatusText(
-  s: WorkflowState
-): string {
-  return [
-    `mode: ${s.mode}`,
-    `planPath: ${s.planPath ?? "none"}`,
-    `planRunId: ${s.planRunId ?? "none"}`,
-    `workRunId: ${s.workRunId ?? "none"}`,
-    "",
-    "todos:",
-    todoText(s),
-  ].join("\n");
+export function currentStatusText(s: WorkflowState): string {
+	return [
+		`mode: ${s.mode}`,
+		`planPath: ${s.planPath ?? "none"}`,
+		`planRunId: ${s.planRunId ?? "none"}`,
+		`workRunId: ${s.workRunId ?? "none"}`,
+		"",
+		"todos:",
+		todoText(s),
+	].join("\n");
 }

@@ -929,6 +929,264 @@ console.log("\n=== Check 7: Code review tooling ===");
 	);
 }
 
+// Check 14: Explore mode — types, config, prompts, guards, commands, redirect ═══
+
+console.log("\n=== Check 14: Explore mode ===");
+
+{
+	// Re-read source files — Check 7's block defines them in a sibling scope.
+	const typesTs14 = fs.readFileSync(
+		path.join(CWD, "extensions/workflow/types.ts"),
+		"utf8",
+	);
+	const defaultsTs14 = fs.readFileSync(
+		path.join(CWD, "extensions/workflow/defaults.ts"),
+		"utf8",
+	);
+	const configTs14 = fs.readFileSync(
+		path.join(CWD, "extensions/workflow/config.ts"),
+		"utf8",
+	);
+	const promptsTs14 = fs.readFileSync(
+		path.join(CWD, "extensions/workflow/prompts.ts"),
+		"utf8",
+	);
+	const modeTs14 = fs.readFileSync(
+		path.join(CWD, "extensions/workflow/mode.ts"),
+		"utf8",
+	);
+	const helpersTs14 = fs.readFileSync(
+		path.join(CWD, "extensions/workflow/helpers.ts"),
+		"utf8",
+	);
+	const commandsTs14 = fs.readFileSync(
+		path.join(CWD, "extensions/workflow/commands.ts"),
+		"utf8",
+	);
+
+	// types.ts: Mode and Role include explore
+	assert(typesTs14.includes('"explore"'), "types.ts: includes 'explore'");
+	assert(
+		typesTs14.includes('"explore"') && typesTs14.includes('"plan"'),
+		"types.ts: Mode union includes explore",
+	);
+
+	// defaults.ts: DEFAULT_CONFIG.models includes explore
+	assert(
+		defaultsTs14.includes("explore:"),
+		"defaults.ts: DEFAULT_CONFIG has explore model",
+	);
+	assert(
+		!defaultsTs14.includes("models.explore (Explore removed)"),
+		"defaults.ts: no stale explore-removed comment",
+	);
+
+	// config.ts: VALID_ROLES includes explore
+	assert(
+		configTs14.includes('"explore"'),
+		"config.ts: VALID_ROLES includes explore",
+	);
+
+	// prompts.ts: EXPLORE_PROMPT and promptForMode branch
+	assert(
+		/export const EXPLORE_PROMPT/.test(promptsTs14),
+		"prompts.ts: exports EXPLORE_PROMPT",
+	);
+	assert(
+		promptsTs14.includes('mode === "explore"'),
+		"prompts.ts: promptForMode handles explore",
+	);
+
+	// mode.ts: roleMap includes explore
+	assert(
+		modeTs14.includes('explore: "explore"'),
+		"mode.ts: roleMap has explore: explore",
+	);
+
+	// helpers.ts: modeLabel includes explore
+	assert(
+		helpersTs14.includes('explore: "Explore Mode"'),
+		"helpers.ts: modeLabel has explore",
+	);
+
+	// guards.ts: isReadonlyMode includes explore
+	const guardsTs = fs.readFileSync(
+		path.join(CWD, "extensions/workflow/guards.ts"),
+		"utf8",
+	);
+	assert(
+		/mode === "explore"/.test(guardsTs) && /mode === "plan"/.test(guardsTs),
+		"guards.ts: isReadonlyMode true for explore + plan",
+	);
+
+	// guards.ts: isLocalFileMutatingShell strips /dev/null and fd-dups
+	assert(
+		guardsTs.includes("null|stdout|stderr") &&
+			guardsTs.includes("let stripped = cmd"),
+		"guards.ts: isLocalFileMutatingShell strips safe redirects",
+	);
+
+	// commands.ts: before_agent_start promotes idle→explore
+	assert(
+		/state\.mode === "idle"/.test(commandsTs14) &&
+			commandsTs14.includes('state.mode = "explore"'),
+		"commands.ts: before_agent_start promotes idle→explore",
+	);
+
+	// commands.ts: /explore command registered
+	assert(
+		/registerExploreCommand/.test(commandsTs14),
+		"commands.ts: exports registerExploreCommand",
+	);
+	assert(
+		commandsTs14.includes("Non-destructive") ||
+			commandsTs14.includes("...current, mode"),
+		"commands.ts: /explore is non-destructive",
+	);
+
+	// commands.ts: /wf sets mode explore
+	const wfCmdStart = commandsTs14.indexOf("export function registerWfCommand");
+	const wfResetCmdStart = commandsTs14.indexOf(
+		"export function registerWfResetCommand",
+		wfCmdStart,
+	);
+	const wfCmdBlock = commandsTs14.slice(wfCmdStart, wfResetCmdStart);
+	assert(
+		wfCmdBlock.includes('state.mode = "explore"'),
+		"commands.ts: /wf sets mode to explore",
+	);
+
+	// commands.ts: scratch write allows explore mode
+	assert(
+		/e(?:ffectiveMode|ffective)\s*===\s*"plan"\s*\|\|\s*e(?:ffectiveMode|ffective)\s*===\s*"explore"/.test(
+			commandsTs14,
+		) || commandsTs14.includes('"plan" || effectiveMode === "explore"'),
+		"commands.ts: scratch writes allowed for plan || explore",
+	);
+}
+
+// ═══ Check 15: isLocalFileMutatingShell redirect behavioral tests ═══
+
+console.log("\n=== Check 15: isLocalFileMutatingShell redirect guard ===");
+
+{
+	// Extract the function body from guards.ts for behavioral testing via eval.
+	const guardsTs = fs.readFileSync(
+		path.join(CWD, "extensions/workflow/guards.ts"),
+		"utf8",
+	);
+
+	const fnStart = guardsTs.indexOf("export function isLocalFileMutatingShell");
+	const bodyStart = guardsTs.indexOf("{", fnStart);
+	let depth = 0,
+		fnEnd = bodyStart;
+	for (let i = bodyStart; i < guardsTs.length; i++) {
+		if (guardsTs[i] === "{") depth++;
+		else if (guardsTs[i] === "}" && --depth === 0) {
+			fnEnd = i;
+			break;
+		}
+	}
+
+	let body = guardsTs.slice(bodyStart + 1, fnEnd);
+	// Strip inline type annotations so eval() can handle the plain JS.
+	body = body
+		.replace(/strip\w+ed\s*:\s*string/g, "")
+		.replace(/\bstripped\b/g, "s");
+	body = body.replace(/let stripped = cmd;/g, "let s = cmd;");
+	body = body.replace(/stripped/g, "s");
+	body = body.replace(/cmd\.length/g, "cmd.length");
+	body = body.replace(
+		/const cmd = command\.trim\(\);/g,
+		"const cmd = command.trim();",
+	);
+
+	const fnStr = "function isLocalFileMutatingShell(command) {" + body + "\n}";
+
+	let isLocalFileMutatingShell;
+	try {
+		isLocalFileMutatingShell = eval("(function() { return " + fnStr + "; })()");
+	} catch (e) {
+		assert(
+			false,
+			"isLocalFileMutatingShell eval failed: " +
+				(e.message ?? String(e)).slice(0, 200),
+		);
+		isLocalFileMutatingShell = () => {
+			throw new Error("eval failed");
+		};
+	}
+
+	// Safe redirects — must NOT be flagged as file-mutating.
+	assert(
+		isLocalFileMutatingShell("grep x y 2>/dev/null") === false,
+		"2>/dev/null NOT mutating",
+	);
+	assert(
+		isLocalFileMutatingShell("grep -rn pattern . 2>/dev/null") === false,
+		"...2>/dev/null NOT mutating (full cmd)",
+	);
+	assert(
+		isLocalFileMutatingShell("cmd >/dev/null 2>&1") === false,
+		">/dev/null 2>&1 NOT mutating",
+	);
+	assert(
+		isLocalFileMutatingShell("echo $$ >/dev/null 2>&1") === false,
+		">/dev/null with 2>&1 NOT mutating",
+	);
+	assert(
+		isLocalFileMutatingShell("stderr_cmd 2>/dev/stderr") === false,
+		"2>/dev/stderr NOT mutating",
+	);
+	assert(
+		isLocalFileMutatingShell("cmd 1>&2") === false,
+		"fd dup 1>&2 NOT mutating",
+	);
+	assert(
+		isLocalFileMutatingShell("cmd 1>>/dev/null") === false,
+		">>/dev/null NOT mutating",
+	);
+	assert(
+		isLocalFileMutatingShell("cmd &>/dev/null") === false,
+		"&>/dev/null NOT mutating",
+	);
+
+	// &>word creates a FILE in bash — &>1 must be flagged.
+	assert(
+		isLocalFileMutatingShell("cmd &>1") === true,
+		"&>1 IS mutating (creates file named 1)",
+	);
+
+	// Unsafe — MUST be flagged.
+	assert(
+		isLocalFileMutatingShell("echo x > f.txt") === true,
+		"> f.txt IS mutating",
+	);
+	assert(
+		isLocalFileMutatingShell("echo x >> f.txt") === true,
+		">> f.txt IS mutating",
+	);
+	assert(isLocalFileMutatingShell("rm foo") === true, "rm IS mutating");
+	assert(isLocalFileMutatingShell("touch bar") === true, "touch IS mutating");
+
+	// Pure reads — must NOT be flagged.
+	assert(isLocalFileMutatingShell("cat foo") === false, "cat NOT mutating");
+	assert(isLocalFileMutatingShell("ls -la") === false, "ls NOT mutating");
+	assert(
+		isLocalFileMutatingShell("grep -r hello .") === false,
+		"grep without redirect NOT mutating",
+	);
+
+	// Path traversal — must NOT be stripped (must still be flagged).
+	const traversalResult = isLocalFileMutatingShell(
+		"cmd >/dev/null/../../etc/passwd",
+	);
+	assert(
+		traversalResult === true,
+		">/dev/null/../../etc/passwd IS mutating (path traversal not stripped)",
+	);
+}
+
 function assertNotContains(haystack, needle, label) {
 	runs++;
 	const contains = haystack.includes(needle);

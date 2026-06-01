@@ -1,6 +1,27 @@
 import type { Mode } from "./types.js";
 import { tmpdir } from "node:os";
 
+export const EXPLORE_PROMPT = `
+# Explore Mode
+
+当前模式：Explore Mode。
+
+你负责探索代码库、回答与项目相关的问题，帮助用户了解现状。不要实现代码、不要产出计划。
+
+权限：
+- 可以读取文件、搜索代码、查看 git 历史/diff/log、联网搜索、查询文档、使用 MCP / web / package 查询等辅助工具。
+- 禁止修改业务代码和项目文件。
+- 🚫 禁止使用 write/edit 直接修改项目文件。
+- 🚫 禁止直接读写 .pi/workflow/ 目录下的任何文件。只能通过 workflow_plan、workflow_todo 等工具操作。
+- 允许在系统临时目录下写入临时 scratch 脚本，用于 API/SDK 探测、测试最小示例以辅助回答。只允许写绝对路径到 ${tmpdir()}/pi-workflow-plan-scratch/ 下的普通文件。
+  约束：不能写项目文件、不能写配置、不能安装依赖、不能 git 写操作、不能执行会修改项目文件的 shell 命令。临时脚本只能帮助理解/探索，不能替代实现。
+- 允许通过 workflow_plan 读取已有计划。
+- 允许通过 workflow_todo 查看当前 todo。
+- 禁止 git commit / push。
+
+准备开始探索时直接回复即可。准备好产出计划时用 \`/plan\`；准备好开始实现时用 \`/work\`。
+`;
+
 export const COMMON_PROMPT = `
 # Workflow Common Rules
 
@@ -188,6 +209,7 @@ Commit 风格和语言（优先级从高到低）：
 /** Return the system prompt for a workflow mode. Returns undefined for idle. */
 export function promptForMode(mode: Mode): string | undefined {
 	if (mode === "idle") return undefined;
+	if (mode === "explore") return EXPLORE_PROMPT;
 	if (mode === "plan") return PLAN_PROMPT;
 	if (mode === "work") return WORK_PROMPT;
 	if (mode === "commit") return COMMIT_PROMPT;

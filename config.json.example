@@ -3,6 +3,11 @@
     "autoEnter": false
   },
   "models": {
+    "explore": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-5",
+      "thinking": "medium"
+    },
     "plan": {
       "provider": "anthropic",
       "model": "claude-opus-4-5",

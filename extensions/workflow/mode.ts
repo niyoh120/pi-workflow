@@ -116,7 +116,8 @@ export async function applyModeRuntime(
 ): Promise<boolean> {
 	// Simplified role mapping: plan→plan, work→work, commit→commit
 	const roleMap: Record<string, string> = {
-		idle: "plan", // idle uses plan model as default
+		explore: "explore",
+		idle: "explore", // idle uses explore model as default
 		plan: "plan",
 		work: "work",
 		commit: "commit",

@@ -2,9 +2,10 @@
 
 ## 项目概述
 
-**pi-workflow** 是一个轻量级软件开发工作流扩展，为 [pi-coding-agent](https://github.com/earendil-works/pi-coding-agent) 提供 Plan → Plan Review → Work → Code Review → Commit 的全流程编排。
+**pi-workflow** 是一个轻量级软件开发工作流扩展，为 [pi-coding-agent](https://github.com/earendil-works/pi-coding-agent) 提供 Explore → Plan → Plan Review → Work → Code Review → Commit 的全流程编排。
 
 ### 核心能力
+- **Explore Mode** (默认) — 进入 workflow 后默认落点，只读探索代码库、回答问题
 - **Plan Mode** (`/plan`) — 生成实现计划
 - **Plan Review Mode** (自动) — same-turn `completeSimple()` 侧调用审查计划，无需子进程
 - **Work Mode** (`/work`) — 执行已批准的计划
@@ -47,6 +48,7 @@ node scripts/validate-todo-regression.mjs
 | 命令 | 用途 |
 |------|------|
 | `/wf` | 进入 workflow 模式，启用其它工作流命令和工具 |
+| `/explore` | 进入 Explore Mode（非破坏性） |
 | `/plan` | 进入 Plan Mode |
 | `/go [--force]` | 批准计划并交予 Work Mode |
 | `/work [task]` | 跳过计划，直接实现 |
@@ -129,11 +131,12 @@ Workflow 命令和工具默认为 opt-in：普通 Pi 仅暴露 `/wf`，使用 `/
 在 config 中设置 `workflow.autoEnter: true` 可在启动时自动启用。
 
 ```
-/wf → idle → plan → planReview → work → review ↔ fix → commit → /wf-exit
+/wf → idle → explore → plan → planReview → work → review ↔ fix → commit → /wf-exit
         ↑____________________________________|   (auto loop)
 ```
 
-- **Entry**: 用户发起 `/wf`，启用 workflow 命令和工具
+- **Explore Mode**: 进入 workflow 后默认进入的只读模式，用于探索代码库、了解现状
+- **Entry**: 用户发起 `/wf`，启用 workflow 命令和工具，自动进入 Explore Mode
 - **Plan Mode**: 用户发起 `/plan`，AI 探索、讨论、确认需求充分后产出计划文档并保存。保存后自动触发 plan-review，评审通过后由用户确认执行
 - **Plan Review Mode**: 计划保存后自动进入，通过 `completeSimple()` 侧调用审查（同一 turn 内完成），最大 loop 由 prompt 自约束
 - **Work Mode**: 执行批准的计划，使用 `workflow_todo` 跟踪进度
