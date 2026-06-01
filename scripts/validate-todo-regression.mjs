@@ -767,7 +767,7 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"sidecall.ts: throws on errorMessage or stopReason error",
 	);
 
-	// Approve kickoff — scope to approve branch, check await and order
+	// Approve kickoff — scope to approve branch, check transition helper and order
 	const approveStart = toolsTs.indexOf('if (action === "approve")');
 	const approveEnd = toolsTs.indexOf('if (action === "read")', approveStart);
 	assert(
@@ -776,17 +776,47 @@ console.log("\n=== Check 7: Code review tooling ===");
 	);
 	const approveBlock = toolsTs.slice(approveStart, approveEnd);
 	assert(
-		/await\s+applyModeRuntime\s*\(/.test(approveBlock),
-		"tools.ts: approve awaits applyModeRuntime",
+		/await\s+transitionWorkflowMode\s*\(/.test(approveBlock),
+		"tools.ts: approve uses transitionWorkflowMode",
+	);
+	assert(
+		!/state\.mode\s*=\s*"work"/.test(approveBlock),
+		"tools.ts: approve does NOT directly set state.mode",
 	);
 	assert(
 		approveBlock.includes('deliverAs: "followUp"'),
 		"tools.ts: approve sends followUp kickoff message",
 	);
 	assert(
-		approveBlock.indexOf("applyModeRuntime") <
+		approveBlock.indexOf("transitionWorkflowMode") <
 			approveBlock.indexOf('deliverAs: "followUp"'),
-		"tools.ts: approve applies runtime before followUp kickoff",
+		"tools.ts: approve transitions workflow before followUp kickoff",
+	);
+
+	// mode.ts unified transition helper
+	assert(
+		/export\s+(async\s+)?function\s+transitionWorkflowMode\s*\(/.test(modeTs),
+		"mode.ts: exports transitionWorkflowMode",
+	);
+	assert(
+		modeTs.includes("setCurrentTurnGuardMode") && modeTs.includes("saveState"),
+		"mode.ts: transitionWorkflowMode syncs persist + guard cache",
+	);
+	assert(
+		modeTs.includes("clearCurrentTurnGuardMode"),
+		"mode.ts: transitionWorkflowMode clears guard for idle mode",
+	);
+
+	// Slash commands use transitionWorkflowMode
+	assert(
+		commandsTs.includes("transitionWorkflowMode"),
+		"commands.ts: slash commands call transitionWorkflowMode",
+	);
+	assert(
+		!/\bsaveState\(ctx\.cwd,\s*sessionKey,\s*state\)[^;]*\n\s*const\s+ok\s*=\s*await\s+applyModeRuntime/.test(
+			commandsTs,
+		),
+		"commands.ts: no bare saveState + applyModeRuntime in command handlers",
 	);
 	// Check 13: Workflow gating — defaults, schema, guards ───
 	console.log("\n=== Check 13: Workflow gating ===");

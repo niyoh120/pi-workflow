@@ -22,6 +22,7 @@ import {
 	getCurrentTurnGuardMode,
 	clearCurrentTurnGuardMode,
 	deactivateWorkflowTools,
+	transitionWorkflowMode,
 } from "./mode.js";
 import { execSync } from "node:child_process";
 import path from "node:path";
@@ -394,10 +395,18 @@ export function registerExploreCommand(
 				workflowExplicitlyDisabled: false,
 				mode: "explore",
 			};
-			saveState(ctx.cwd, sessionKey, state);
 
-			const ok = await applyModeRuntime(pi, ctx, "explore", getAgentDir);
-			if (!ok) return;
+			const result = await transitionWorkflowMode({
+				pi,
+				ctx,
+				sessionKey,
+				nextState: state,
+				getAgentDir,
+			});
+			if (!result.ok) {
+				ctx.ui.notify(result.reason, "error");
+				return;
+			}
 
 			ctx.ui.notify("已进入 Explore Mode。准备探索代码库或回答问题。", "info");
 		},
@@ -421,7 +430,6 @@ export function registerPlanCommand(
 				mode: "plan",
 				planRunId: crypto.randomUUID(),
 			};
-			saveState(ctx.cwd, sessionKey, state);
 
 			const overlay = getWorkflowOverlay();
 			if (overlay) {
@@ -429,8 +437,17 @@ export function registerPlanCommand(
 				overlay.update(state.todos);
 			}
 
-			const ok = await applyModeRuntime(pi, ctx, "plan", getAgentDir);
-			if (!ok) return;
+			const result = await transitionWorkflowMode({
+				pi,
+				ctx,
+				sessionKey,
+				nextState: state,
+				getAgentDir,
+			});
+			if (!result.ok) {
+				ctx.ui.notify(result.reason, "error");
+				return;
+			}
 
 			ctx.ui.notify(
 				"已进入 Plan Mode。直接描述需求；产出计划并确认后会自动转交 Work Mode。",
@@ -459,7 +476,6 @@ export function registerWorkCommand(
 				mode: "work",
 				workRunId: crypto.randomUUID(),
 			};
-			saveState(ctx.cwd, sessionKey, state);
 
 			const overlay = getWorkflowOverlay();
 			if (overlay) {
@@ -467,8 +483,17 @@ export function registerWorkCommand(
 				overlay.update(state.todos);
 			}
 
-			const ok = await applyModeRuntime(pi, ctx, "work", getAgentDir);
-			if (!ok) return;
+			const result = await transitionWorkflowMode({
+				pi,
+				ctx,
+				sessionKey,
+				nextState: state,
+				getAgentDir,
+			});
+			if (!result.ok) {
+				ctx.ui.notify(result.reason, "error");
+				return;
+			}
 
 			ctx.ui.notify("已进入 Work Mode。可以直接描述任务。", "info");
 
@@ -491,120 +516,85 @@ export function registerReviewCommand(
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 
-			// 1. Git repo check
-			if (!gitRepoPreflightFn(ctx.cwd, ctx)) {
-				ctx.ui.notify("Code review aborted: no git repo.", "warning");
-				return;
-			}
-
-			// 2. Check OCR availability
-			if (!checkOcrAvailable("ocr")) {
+			const config = loadConfig(ctx.cwd, _getAgentDir);
+			if (!config.codeReview.enabled) {
 				ctx.ui.notify(
-					`ocr CLI not found. Install alibaba/open-code-review:\n` +
-						`  npm i -g @alibaba-group/open-code-review\n` +
-						`  Then configure LLM: ocr config set llm.url / llm.auth_token / llm.model`,
+					"Code review is not enabled. Set codeReview.enabled: true in config.",
 					"error",
 				);
-				pi.sendUserMessage(
-					"Code review 无法执行：ocr CLI 未安装。\n" +
-						"请安装 alibaba/open-code-review 并配置 LLM 后再运行 /review。\n" +
-						"安装指南：https://github.com/alibaba/open-code-review#install",
+				return;
+			}
+
+			// 1. Show scope selector
+			const scope = (await scopeSelectorComponent(ctx.ui)) as ReviewScope;
+			if (!scope) {
+				ctx.ui.notify("Review cancelled: no scope selected.", "info");
+				return;
+			}
+
+			// 2. Collect scope-specific inputs
+			if (scope !== "workspace") {
+				ctx.ui.notify(
+					`Selected ${scope} scope. Collecting input...`,
+					"info",
 				);
-				return;
 			}
 
-			// 3. TUI wizard: step 1 — select scope
-			const scopeKind = await ctx.ui.custom<ReviewScope["kind"] | null>(
-				(_tui, theme, _kb, done) => scopeSelectorComponent(theme, done),
-				{ overlay: true },
-			);
+			let from: string | undefined;
+			let to: string | undefined;
+			let commit: string | undefined;
 
-			if (scopeKind === null) {
-				ctx.ui.notify("Review cancelled.", "info");
-				return;
-			}
-
-			// 4. TUI wizard: step 2 — scope inputs (if needed)
-			let scopeValues: Record<string, string> | null = null;
-			if (scopeKind === "range" || scopeKind === "commit") {
-				if (!hasInitialCommit(ctx.cwd)) {
-					ctx.ui.notify(
-						"Code review aborted: no HEAD commit to diff against. Commit at least once first.",
-						"warning",
-					);
+			if (scope === "range") {
+				from = await scopeInputComponent(ctx.ui, "from ref");
+				if (!from) {
+					ctx.ui.notify("Review cancelled: from ref required.", "info");
 					return;
 				}
-
-				scopeValues = await ctx.ui.custom<Record<string, string> | null>(
-					(_tui, theme, _kb, done) =>
-						scopeInputComponent(scopeKind, theme, done),
-					{ overlay: true },
-				);
-
-				if (scopeValues === null) {
-					ctx.ui.notify("Review cancelled.", "info");
+				to = await scopeInputComponent(ctx.ui, "to ref");
+				if (!to) {
+					ctx.ui.notify("Review cancelled: to ref required.", "info");
 					return;
 				}
 			}
 
-			// 5. Validate scope-specific inputs
-			if (scopeKind === "range" && (!scopeValues?.from || !scopeValues?.to)) {
-				ctx.ui.notify(
-					"Review aborted: from/to refs required for range mode.",
-					"warning",
-				);
-				pi.sendUserMessage(
-					"Code review 未执行：range 模式需要同时指定 --from 和 --to。请重新运行 /review。",
-				);
-				return;
+			if (scope === "commit") {
+				commit = await scopeInputComponent(ctx.ui, "commit hash");
+				if (!commit) {
+					ctx.ui.notify("Review cancelled: commit hash required.", "info");
+					return;
+				}
 			}
-			if (scopeKind === "commit" && !scopeValues?.commit) {
-				ctx.ui.notify(
-					"Review aborted: commit hash required for commit mode.",
-					"warning",
-				);
-				pi.sendUserMessage(
-					"Code review 未执行：commit 模式需要指定 commit hash。请重新运行 /review。",
-				);
-				return;
+
+			// 3. Resolve default refs
+			if (scope === "workspace") {
+				from = "HEAD";
+				to = "HEAD";
 			}
+
+			// 4. Build tool params for display
+			const toolParams: Record<string, unknown> = {
+				scope,
+				background:
+					"(background will be written by the model when calling the tool)",
+			};
+			if (from) toolParams.from = from;
+			if (to) toolParams.to = to;
+			if (commit) toolParams.commit = commit;
+
+			// 5. Build prompt
+			const scopeKind =
+				scope === "workspace"
+					? "workspace (unstaged + staged + untracked)"
+					: scope === "range"
+						? `range from=${from} to=${to}`
+						: `commit=${commit}`;
+
+			const promptText =
+				`Review scope: ${scopeKind}. Prompting model to call workflow_code_review.`;
+
+			ctx.ui.notify(promptText, "info");
 
 			// 6. Build prompt instructing the model to call workflow_code_review
-			let promptText: string;
-			const askTool = "ask_user_question";
-			if (scopeKind === "workspace") {
-				promptText =
-					"用户请求 code review，范围：workspace changes。\n\n" +
-					"请调用 workflow_code_review 工具:\n" +
-					'- scope: "workspace"\n' +
-					"- background: 由你自行总结，必须包含用户目标、本次实际修改范围、关键设计约束、已运行测试、希望 OCR 重点检查的风险点。\n\n" +
-					`收到 review 结果后，如果发现 Critical 或 Important 问题，必须用 ${askTool} 询问用户是否需要修复（如工具不可用则直接在聊天里问）。只有用户确认后才执行修复。`;
-			} else if (scopeKind === "range") {
-				const from = scopeValues!.from!;
-				const to = scopeValues!.to!;
-				promptText =
-					`用户请求 code review，范围：custom ref range。\nfrom: ${from}\nto: ${to}\n\n` +
-					"请调用 workflow_code_review 工具:\n" +
-					`- scope: "range"\n` +
-					`- from: "${from}"\n` +
-					`- to: "${to}"\n` +
-					"- background: 由你自行总结，必须包含用户目标、本次修改范围、关键约束、已运行测试、希望 OCR 重点检查的风险点。\n\n" +
-					`收到 review 结果后，如果发现 Critical 或 Important 问题，必须用 ${askTool} 询问用户是否需要修复（如工具不可用则直接在聊天里问）。只有用户确认后才执行修复。`;
-			} else {
-				const commit = scopeValues!.commit!;
-				promptText =
-					`用户请求 code review，范围：single commit。\ncommit: ${commit}\n\n` +
-					"请调用 workflow_code_review 工具:\n" +
-					`- scope: "commit"\n` +
-					`- commit: "${commit}"\n` +
-					"- background: 由你自行总结，必须包含用户目标、本次修改范围、关键约束、已运行测试、希望 OCR 重点检查的风险点。\n\n" +
-					`收到 review 结果后，如果发现 Critical 或 Important 问题，必须用 ${askTool} 询问用户是否需要修复（如工具不可用则直接在聊天里问）。只有用户确认后才执行修复。`;
-			}
-
-			ctx.ui.notify(
-				`Review scope: ${scopeKind}. Prompting model to call workflow_code_review.`,
-				"info",
-			);
 			pi.sendUserMessage(promptText);
 		},
 	});
@@ -626,10 +616,17 @@ export function registerCommitCommand(
 				mode: "commit" as const,
 			};
 
-			saveState(ctx.cwd, sessionKey, state);
-
-			const ok = await applyModeRuntime(pi, ctx, "commit", getAgentDir);
-			if (!ok) return;
+			const result = await transitionWorkflowMode({
+				pi,
+				ctx,
+				sessionKey,
+				nextState: state,
+				getAgentDir,
+			});
+			if (!result.ok) {
+				ctx.ui.notify(result.reason, "error");
+				return;
+			}
 
 			const extra = args.trim()
 				? `\n\n用户对 commit 的额外要求：${args.trim()}`
@@ -671,7 +668,15 @@ export function registerWfExitCommand(pi: ExtensionAPI): void {
 			state.mode = "idle";
 			state.workflowEnabled = false;
 			state.workflowExplicitlyDisabled = true;
-			saveState(ctx.cwd, sessionKey, state);
+
+			await transitionWorkflowMode({
+				pi,
+				ctx,
+				sessionKey,
+				nextState: state,
+				getAgentDir: () => "",
+				applyRuntime: false,
+			});
 
 			// Remove workflow tools from active set before reload so
 			// the next turn starts clean.
@@ -700,7 +705,15 @@ export function registerWfResetCommand(pi: ExtensionAPI): void {
 				workflowEnabled: current.workflowEnabled,
 				workflowExplicitlyDisabled: current.workflowExplicitlyDisabled,
 			};
-			saveState(ctx.cwd, sessionKey, state);
+
+			await transitionWorkflowMode({
+				pi,
+				ctx,
+				sessionKey,
+				nextState: state,
+				getAgentDir: () => "",
+				applyRuntime: false,
+			});
 
 			const overlay = getWorkflowOverlay();
 			if (overlay) overlay.dispose();

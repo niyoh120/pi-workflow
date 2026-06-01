@@ -1,7 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { Mode } from "./types.js";
+import type { Mode, WorkflowState } from "./types.js";
 import { loadConfig } from "./config.js";
 import { modeLabel } from "./helpers.js";
+import { saveState } from "./state.js";
 
 // ── Runtime mode switching ────────────────────────────────────────────────
 
@@ -106,7 +107,8 @@ export function activateWorkflowToolsIfAllowed(
 
 /**
  * Apply runtime (model / thinking / tools / status) for a mode.
- * Does NOT write workflow state. State must be saved separately.
+ * Does NOT write workflow state or update current-turn guard state.
+ * Prefer transitionWorkflowMode() for workflow mode transitions.
  */
 export async function applyModeRuntime(
 	pi: ExtensionAPI,
@@ -182,4 +184,71 @@ export function getCurrentTurnGuardMode(sessionKey: string): Mode | undefined {
 
 export function clearCurrentTurnGuardMode(sessionKey: string): void {
 	guardModes.delete(sessionKey);
+}
+
+// ── Unified mode transition ──────────────────────────────────────────────────
+
+export type WorkflowModeTransitionResult =
+	| { ok: true; state: WorkflowState }
+	| { ok: false; state: WorkflowState; reason: string };
+
+export interface WorkflowModeTransitionOptions {
+	pi: ExtensionAPI;
+	ctx: any;
+	sessionKey: string;
+	nextState: WorkflowState;
+	getAgentDir: () => string;
+	/**
+	 * Set false for teardown/reset paths that intentionally leave normal Pi runtime.
+	 */
+	applyRuntime?: boolean;
+}
+
+/**
+ * Persist mode, switch runtime (model / tools / status), and sync the current-turn
+ * guard cache in one atomic sequence. This is the single entry point for any
+ * workflow mode change so that the three layers (persisted state, runtime, and
+ * tool-call guard) never diverge.
+ *
+ * Persisted state — what future turns see on disk.
+ * Runtime mode — the model, thinking level, active tools, and TUI status bar.
+ * Current-turn guard mode — controls write / edit / bash permissions for the
+ * remainder of this turn.
+ *
+ * On runtime failure the persisted state is NOT written, so rollback is implicit.
+ */
+export async function transitionWorkflowMode({
+	pi,
+	ctx,
+	sessionKey,
+	nextState,
+	getAgentDir,
+	applyRuntime: shouldApplyRuntime = true,
+}: WorkflowModeTransitionOptions): Promise<WorkflowModeTransitionResult> {
+	const nextMode = nextState.mode;
+
+	if (shouldApplyRuntime) {
+		const runtimeApplied = await applyModeRuntime(
+			pi,
+			ctx,
+			nextMode,
+			getAgentDir,
+		);
+		if (!runtimeApplied) {
+			return {
+				ok: false,
+				state: nextState,
+				reason: `${modeLabel(nextMode)} runtime failed to activate.`,
+			};
+		}
+	}
+
+	saveState(ctx.cwd, sessionKey, nextState);
+	if (nextMode === "idle") {
+		clearCurrentTurnGuardMode(sessionKey);
+	} else {
+		setCurrentTurnGuardMode(sessionKey, nextMode);
+	}
+
+	return { ok: true, state: nextState };
 }

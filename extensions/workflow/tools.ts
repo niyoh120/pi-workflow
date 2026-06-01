@@ -15,7 +15,7 @@ import { todoText } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { executePlanReviewSidecall } from "./sidecall.js";
-import { applyModeRuntime } from "./mode.js";
+import { transitionWorkflowMode } from "./mode.js";
 import {
 	checkOcrAvailable,
 	buildReviewArgv,
@@ -270,34 +270,25 @@ export function registerPlanTool(
 					};
 				}
 
-				// Direct transition: plan → work — switch runtime and kick off immediately.
-				state.mode = "work";
-				state.workRunId = crypto.randomUUID();
+				const nextState: WorkflowState = {
+					...state,
+					mode: "work",
+					workRunId: crypto.randomUUID(),
+				};
 
-				saveState(ctx.cwd, sessionKey, state);
-
-				// Switch the model and tools to Work Mode now so the
-				// follow-up message runs under the correct runtime.
-				const runtimeApplied = await applyModeRuntime(
+				const result = await transitionWorkflowMode({
 					pi,
 					ctx,
-					"work",
+					sessionKey,
+					nextState,
 					getAgentDir,
-				);
-				if (!runtimeApplied) {
-					// Roll back state so we don't leave a broken work mode.
-					state.mode = "plan";
-					state.workRunId = undefined;
-					saveState(ctx.cwd, sessionKey, state);
+				});
+
+				if (!result.ok) {
 					return {
 						isError: true,
-						content: [
-							{
-								type: "text",
-								text: "Plan approval could not complete because Work Mode runtime failed to activate. Please try approving again.",
-							},
-						],
-						details: { state },
+						content: [{ type: "text", text: result.reason }],
+						details: { state: result.state },
 					};
 				}
 
@@ -313,11 +304,11 @@ export function registerPlanTool(
 							type: "text",
 							text:
 								`Plan approved. Work Mode activated.\n` +
-								`Work run: ${state.workRunId.slice(-8)}.\n` +
+								`Work run: ${result.state.workRunId!.slice(-8)}.\n` +
 								`A kick-off message has been queued — the Work agent will start implementing next.`,
 						},
 					],
-					details: { state },
+					details: { state: result.state },
 				};
 			}
 
@@ -350,14 +341,22 @@ export function registerPlanTool(
 					todos: [],
 					hiddenDoneIds: [],
 				};
-				saveState(ctx.cwd, sessionKey, cleared);
+
+				const result = await transitionWorkflowMode({
+					pi,
+					ctx,
+					sessionKey,
+					nextState: cleared,
+					getAgentDir,
+					applyRuntime: false,
+				});
 
 				const overlay = getWorkflowOverlay();
 				if (overlay) overlay.dispose();
 
 				return {
 					content: [{ type: "text", text: "Workflow state cleared." }],
-					details: { state: cleared },
+					details: { state: result.state },
 				};
 			}
 
