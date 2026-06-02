@@ -27,6 +27,18 @@ export interface ModelSpec {
 	thinking?: Thinking;
 }
 
+/**
+ * Deep-partial override of WorkflowConfig used as the highest-priority config
+ * layer (session scope). Any single nested field may be overridden without
+ * supplying the rest of its parent object.
+ */
+export interface WorkflowConfigOverride {
+	models?: Partial<Record<Role, Partial<ModelSpec>>>;
+	workflow?: Partial<WorkflowConfig["workflow"]>;
+	planReview?: Partial<WorkflowConfig["planReview"]>;
+	codeReview?: Partial<WorkflowConfig["codeReview"]>;
+}
+
 export interface WorkflowConfig {
 	models: Record<Role, ModelSpec>;
 	/** Workflow entry gate — disabled by default until /wf is run. */
@@ -61,4 +73,10 @@ export interface WorkflowState {
 	todos: TodoItem[];
 	/** IDs of completed todos that have been hidden from the overlay. */
 	hiddenDoneIds: string[];
+	/**
+	 * Session-scoped config overrides — highest-priority config layer.
+	 * Merged on top of DEFAULT ← global ← project when resolving config for
+	 * this session. Edited via /wf-settings (Session scope).
+	 */
+	sessionConfig?: WorkflowConfigOverride;
 }

@@ -24,6 +24,8 @@ import {
 
 import { registerAllWorkflowTools } from "./tools.js";
 
+import { registerWfSettingsCommand } from "./settings.js";
+
 import {
 	registerAllWorkflowCommands,
 	registerWfCommand,
@@ -58,8 +60,9 @@ function ensureWorkflowRegistered(
 export default function (pi: ExtensionAPI) {
 	const config = loadConfig(process.cwd(), getAgentDir());
 
-	// ── /wf is always registered ──────────────────
+	// ── /wf and /wf-settings are always registered ──
 	registerWfCommand(pi, getAgentDir);
+	registerWfSettingsCommand(pi, getAgentDir);
 
 	// ── Workflow commands/tools: conditional ──────
 	if (config.workflow.autoEnter) {

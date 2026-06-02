@@ -52,7 +52,12 @@ Workflow tools and commands are **opt-in by default**: only `/wf` is visible unt
 
 ### Config merge order
 
-`DEFAULT_CONFIG` ← `global config` ← `project config`
+`DEFAULT_CONFIG` ← `global config` ← `project config` ← `session overrides`
+
+The session layer is the highest priority. It is stored in the current session's
+runtime state (not a shared file) and edited via `/wf-settings` (Session scope).
+This lets one Pi process temporarily override models or flags without touching
+the shared project/global config files.
 
 ### Workflow entry gate
 
@@ -156,6 +161,46 @@ On load, pi-workflow strips stale config keys from old versions:
 - Removed `codeReview.auto` (no longer used)
 - Unknown models keys are stripped; only `explore/plan/planReview/work/review/commit` are recognized
 
+## Settings Menu (`/wf-settings`)
+
+`/wf-settings` opens a TUI to edit every config option without hand-editing JSON.
+It is always available, even before you run `/wf` (so you can set
+`workflow.autoEnter` up front).
+
+Flow:
+
+1. Pick a scope: **Session**, **Project**, or **Global** (or **Done** to close).
+2. Edit options in a searchable list:
+   - `models.<role>.provider` / `models.<role>.model` — free-text input (clear the field to inherit).
+   - `models.<role>.thinking` — cycle through `inherit / off / minimal / low / medium / high / xhigh`.
+   - `workflow.autoEnter`, `planReview.enabled`, `codeReview.enabled` — toggle through `inherit / true / false` (**Project / Global scopes only**, see below).
+3. Press Esc to return to the scope picker; pick **Done** to finish.
+
+Each row shows what the selected scope contributes on the right and the merged
+**effective** value in its description, so inherited values are easy to spot.
+Setting a row to `inherit` (or clearing a text field) removes that key from the
+layer, letting lower layers take over.
+
+### Where each scope writes
+
+| Scope | Storage | Visibility |
+|-------|---------|-----------|
+| Session | current session runtime state (`sessionConfig`) | this Pi process only |
+| Project | `.pi/workflow/config.json` | shared with the project |
+| Global | `~/.pi/agent/workflow/config.json` | all projects |
+
+### When changes take effect
+
+- **Model / thinking** changes apply immediately to the current and later turns
+  (the active mode's model is re-applied when the menu closes). These are
+  editable in all three scopes.
+- **`workflow.autoEnter`, `planReview.enabled`, `codeReview.enabled`** gate
+  command/tool registration, which happens at extension load time using the
+  Project/Global layers. They are editable only in **Project** and **Global**
+  scopes (the Session layer cannot influence load-time registration), and need
+  `/reload` (or the next startup) to take effect. The menu shows a reminder when
+  you change one of them.
+
 ## Plan Document Management
 
 ### Directory
@@ -191,6 +236,7 @@ This prevents wasting tokens when the user still wants to refine the design.
 | Command | Description |
 |---------|-------------|
 | `/wf` | Enter workflow mode — enables all other workflow commands and tools |
+| `/wf-settings` | Open the settings menu — edit all config options across session/project/global scopes (always available) |
 | `/explore` | Enter Explore Mode (non-destructive — preserves plan/todos) |
 | `/plan` | Enter Plan Mode |
 | `/go [--force]` | Approve current plan and hand off to Work Mode |
@@ -241,7 +287,7 @@ The session key is derived by hashing the Pi session ID or session file path —
 
 This means two Pi processes in the same project directory can run independent workflow state machines without overwriting each other. Plan files remain in the shared `.pi/workflow/plan/` directory with randomized names.
 
-Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) are directory/global scoped and shared intentionally.
+Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) are directory/global scoped and shared intentionally. Session-scoped config overrides (set via `/wf-settings` Session scope) live inside the session `state.json` as a `sessionConfig` field and are never shared across sessions.
 
 ## Tools
 

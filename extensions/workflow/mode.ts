@@ -1,8 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Mode, WorkflowState } from "./types.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, loadConfigForSession } from "./config.js";
 import { modeLabel } from "./helpers.js";
-import { saveState } from "./state.js";
+import { saveState, getSessionKey } from "./state.js";
 
 // ── Runtime mode switching ────────────────────────────────────────────────
 
@@ -17,7 +17,13 @@ export async function setRole(
 	getAgentDir: () => string,
 ): Promise<boolean> {
 	try {
-		const config = loadConfig(ctx.cwd, getAgentDir());
+		// Resolve config with this session's override layer so /wf-settings
+		// Session-scope model/thinking changes take effect immediately.
+		const config = loadConfigForSession(
+			ctx.cwd,
+			getAgentDir(),
+			getSessionKey(ctx.sessionManager),
+		);
 		const spec = config.models[role as keyof typeof config.models];
 
 		if (!spec) {

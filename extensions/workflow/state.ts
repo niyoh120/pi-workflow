@@ -65,6 +65,23 @@ export function normalizeState(raw: unknown): WorkflowState {
 					(id: any) => typeof id === "string",
 				)
 			: [],
+		// Preserve session config overrides as a plain object, stripping any
+		// dangerous keys (__proto__/constructor/prototype) so a corrupt or
+		// malicious state file can't pollute prototypes during later deepMerge.
+		// Per-field normalization happens in normalizeConfig() after merge.
+		...(() => {
+			const raw = obj.sessionConfig;
+			if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+			const dangerous = ["__proto__", "constructor", "prototype"];
+			const entries = Object.entries(raw as Record<string, unknown>).filter(
+				([key]) => !dangerous.includes(key),
+			);
+			return {
+				sessionConfig: Object.fromEntries(
+					entries,
+				) as WorkflowState["sessionConfig"],
+			};
+		})(),
 	};
 }
 

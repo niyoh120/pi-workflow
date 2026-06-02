@@ -417,6 +417,7 @@ console.log("\n=== Check 6: Source structure verification ===");
 	let nsBody = stateTs.slice(nsBodyStart + 1, nsFnEnd);
 	nsBody = nsBody.replace(/\bas\s+Record<[^>]*>/g, "");
 	nsBody = nsBody.replace(/\bas\s+WorkflowState\["mode"\]/g, "");
+	nsBody = nsBody.replace(/\bas\s+WorkflowState\["sessionConfig"\]/g, "");
 	nsBody = nsBody.replace(/\bas\s+WorkflowState\["todos"\]\[number\]/g, "");
 	nsBody = nsBody.replace(/\bas\s+any\b/g, "");
 	nsBody = nsBody.replace(/\bas\s+Array<[^>]*>/g, "");
@@ -453,6 +454,53 @@ console.log("\n=== Check 6: Source structure verification ===");
 	{
 		const r = normalizeState({ unknownField: 42 });
 		assert(!("unknownField" in r), "real normalizeState: unknown key dropped");
+	}
+	{
+		const r = normalizeState({
+			mode: "plan",
+			sessionConfig: {
+				models: { plan: { provider: "openai", model: "gpt-5.1" } },
+			},
+		});
+		assert(
+			r.sessionConfig &&
+				r.sessionConfig.models &&
+				r.sessionConfig.models.plan &&
+				r.sessionConfig.models.plan.provider === "openai",
+			"real normalizeState: sessionConfig preserved round-trip",
+		);
+	}
+	{
+		const r = normalizeState({ sessionConfig: "not-an-object" });
+		assert(
+			!("sessionConfig" in r),
+			"real normalizeState: invalid sessionConfig string dropped",
+		);
+	}
+	{
+		const r = normalizeState({ sessionConfig: [1, 2, 3] });
+		assert(
+			!("sessionConfig" in r),
+			"real normalizeState: array sessionConfig dropped",
+		);
+	}
+	{
+		const r = normalizeState({
+			sessionConfig: JSON.parse(
+				'{"__proto__":{"polluted":1},"planReview":{"enabled":false}}',
+			),
+		});
+		assert(
+			{}.polluted === undefined,
+			"real normalizeState: __proto__ key does not pollute Object prototype",
+		);
+		assert(
+			r.sessionConfig &&
+				r.sessionConfig.planReview &&
+				r.sessionConfig.planReview.enabled === false &&
+				!Object.hasOwn(r.sessionConfig, "__proto__"),
+			"real normalizeState: dangerous keys stripped, safe keys kept",
+		);
 	}
 	{
 		const r = normalizeState([1, 2, 3]);
