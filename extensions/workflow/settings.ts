@@ -71,14 +71,7 @@ interface SettingDescriptor {
 	reloadSensitive?: boolean;
 }
 
-const ROLES = [
-	"explore",
-	"plan",
-	"planReview",
-	"work",
-	"review",
-	"commit",
-] as const;
+const ROLES = ["explore", "plan", "planReview", "work", "commit"] as const;
 
 const THINKING_VALUES = [
 	"off",

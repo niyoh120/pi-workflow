@@ -22,11 +22,6 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
 			model: "claude-sonnet-4-5",
 			thinking: "medium",
 		},
-		review: {
-			provider: "openai",
-			model: "gpt-5.1",
-			thinking: "high",
-		},
 		commit: {
 			provider: "openai",
 			model: "gpt-5.1-mini",

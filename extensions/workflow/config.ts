@@ -138,7 +138,6 @@ function normalizeConfig(cfg: any): WorkflowConfig {
 		"plan",
 		"planReview",
 		"work",
-		"review",
 		"commit",
 	]);
 	if (cfg.models && typeof cfg.models === "object") {

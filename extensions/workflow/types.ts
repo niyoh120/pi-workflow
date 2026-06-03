@@ -1,13 +1,7 @@
 export type Thinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 /** Workflow roles — only the ones we actively configure models for. */
-export type Role =
-	| "explore"
-	| "plan"
-	| "planReview"
-	| "work"
-	| "review"
-	| "commit";
+export type Role = "explore" | "plan" | "planReview" | "work" | "commit";
 
 /** Simplified mode: idle plus explore/plan/work/commit workflow states. */
 export type Mode = "idle" | "explore" | "plan" | "work" | "commit";
