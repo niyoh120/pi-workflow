@@ -101,10 +101,10 @@ export const PLAN_PROMPT = `
 
 调用规则：
 - 如有需要，调用 workflow_plan_review(task="计划内容摘要", context="额外的背景或约束", instructions="审查重点")。reviewer 使用独立模型（配置在 models.planReview 中），在同 turn 内返回结果。
-- 如果 reviewer 提出 Critical 或 Important 问题，必须技术评估是否合理，不要盲目接受。合理则修订计划，重新 workflow_plan(save) 保存修订版，并可再次调用 workflow_plan_review 审查。
-- 如果你认为 reviewer 的问题不成立（误判、超出范围、与技术事实不符），用技术推理说明理由，不修改计划。
-- 重复审查-修订循环，直到达成共识（你和 reviewer 都没有 Critical/Important 反对意见），或分歧无法解决。
-- 🚫 不要无限制循环。如果 2-3 轮修订后仍有分歧，必须将分歧摘要呈现给用户，请用户裁决。
+- 收到 review 结果后，必须逐条技术评估 reviewer 提出的每个问题，不要盲目接受或拒绝。对合理的问题修订计划并重新 workflow_plan(save)；对不成立的问题（误判、超出范围、与技术事实不符）给出技术推理说明。
+- 修订计划后必须再次调用 workflow_plan_review 审查修订版。reviewer 会看到更新后的计划，继续就每个争议点辩论。
+- ⭐ 核心循环：主动与 reviewer 讨论、辩驳，直到双方就每个 Critical/Important 问题达成一致判断（无需修改或修改方案已确定），或分歧确实无法靠讨论解决。
+- 🚫 不要轻易放弃讨论。只有在经过充分技术辩论（2-3 轮）后仍无法达成一致的问题，才将分歧摘要呈现给用户，请用户裁决。
 - 如果 reviewer 只有 Minor 问题，可以接受并继续推进。
 
 共识达成或分歧交由用户裁决后，展示最终计划摘要（包含 plan path），并请用户确认执行。
@@ -161,15 +161,18 @@ export const WORK_PROMPT = `
 - 涉及安全、性能或数据完整性等关键领域
 
 调用规则：
-- 如有需要，调用 workflow_code_review 工具进行 code review。默认 scope 使用 workspace（覆盖 staged + unstaged + untracked 变更）。
+- 调用 workflow_code_review 工具进行 code review。默认 scope 使用 workspace（覆盖 staged + unstaged + untracked 变更）。
 - background 必须由你根据当前任务上下文自行总结，包含：用户目标、本轮实际修改范围、关键设计约束、已运行测试、希望 code review 重点检查的风险点。
 - 只有在用户明确要求 review 特定 commit 或 ref range 时才使用 range/commit scope。
 - 🚫 不要默认使用 --from <baselineRef> --to HEAD，因为这会漏掉未提交工作区变更。
-- 收到 review 结果后，如果发现 Critical 或 Important 问题，先在代码中验证问题是否真实存在。
-- 确认存在的问题，自行修复，修复后运行相关测试验证，然后可再次 review。
-- 如果你认为 reviewer 的某个问题不成立（误判、超出范围、与技术事实不符），用技术推理说明理由，但不修改代码。
-- 重复修复-审查循环，直到 reviewer 通过（只有 Minor 问题或无问题），或分歧无法解决。
-- 🚫 不要无限制循环。如果 2-3 轮修复后仍有无法解决的分歧，必须交给用户裁决。
+- 收到 review 结果后，逐条验证 reviewer 提出的每个 Critical 或 Important 问题是否真实存在。
+- 确认存在的问题，自行修复，修复后运行相关测试验证。
+- ⭐ 核心循环：修复后必须再次调用 workflow_code_review，reviewer 会基于更新后的代码重新审查。持续此循环，直到同时满足两个条件：
+  a) review 不再报告任何新的 Critical/Important 问题（reviewer 可能仍提及之前已讨论过的旧问题，但未提出新问题），且
+  b) 剩余未被修复的问题经技术判断确实不应修复（误判、超出范围、投入产出比不合理、或与项目约束冲突）。
+- 如果你认为 reviewer 的某个问题不成立，在下一轮 review 的 background 中说明技术理由，但不修改代码。
+- 🚫 不要一轮就停。至少完成 review → fix → re-review 一个完整循环，除非第一轮 review 就无任何 Critical/Important 问题。
+- 🚫 不要无限制循环。如果 2-3 轮修复后仍有 reviewer 坚持提出且你判断不应修复的问题，将分歧交给用户裁决。
 `;
 
 export const COMMIT_PROMPT = `
