@@ -15,12 +15,16 @@
  * inherited rows show "inherit" plus the effective merged value.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ModelRegistry,
+} from "@earendil-works/pi-coding-agent";
 import {
 	getSettingsListTheme,
 	DynamicBorder,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
 import {
 	Container,
 	Text,
@@ -28,6 +32,10 @@ import {
 	Input,
 	SelectList,
 	SettingsList,
+	fuzzyFilter,
+	getKeybindings,
+	truncateToWidth,
+	type Component,
 	type SelectItem,
 	type SettingItem,
 } from "@earendil-works/pi-tui";
@@ -53,15 +61,17 @@ const SCOPE_LABELS: Record<Scope, string> = {
 
 // ── Setting descriptors ─────────────────────────────────────────────────────
 
-type SettingKind = "boolean" | "thinking" | "string";
+type SettingKind = "boolean" | "thinking" | "string" | "model";
 
 interface SettingDescriptor {
 	id: string;
 	label: string;
 	description: string;
 	kind: SettingKind;
-	/** Path into the config object, e.g. ["models", "plan", "provider"]. */
+	/** Path into the config object, e.g. ["models", "plan", "model"]. */
 	path: string[];
+	/** Workflow role for combined provider/model settings. */
+	role?: (typeof ROLES)[number];
 	/**
 	 * True for options that gate command/tool registration, which happens at
 	 * extension load time using the non-session config layers. These cannot
@@ -122,18 +132,12 @@ function buildDescriptors(): SettingDescriptor[] {
 
 	for (const role of ROLES) {
 		list.push({
-			id: `models.${role}.provider`,
-			label: `${role} · provider`,
-			description: `Model provider for the ${role} role (e.g. anthropic, openai).`,
-			kind: "string",
-			path: ["models", role, "provider"],
-		});
-		list.push({
 			id: `models.${role}.model`,
 			label: `${role} · model`,
-			description: `Model id for the ${role} role (e.g. claude-sonnet-4-5).`,
-			kind: "string",
+			description: `Model for the ${role} role. Pick from Pi's currently available model list.`,
+			kind: "model",
 			path: ["models", role, "model"],
+			role,
 		});
 		list.push({
 			id: `models.${role}.thinking`,
@@ -254,7 +258,21 @@ function formatVal(v: any): string {
 function valuesFor(desc: SettingDescriptor): string[] | undefined {
 	if (desc.kind === "boolean") return ["inherit", "true", "false"];
 	if (desc.kind === "thinking") return ["inherit", ...THINKING_VALUES];
-	return undefined; // string → submenu
+	return undefined; // string/model → submenu
+}
+
+function modelPaths(role: (typeof ROLES)[number]): {
+	provider: string[];
+	model: string[];
+} {
+	return {
+		provider: ["models", role, "provider"],
+		model: ["models", role, "model"],
+	};
+}
+
+function formatModelRef(provider: any, model: any): string {
+	return `${formatVal(provider)}/${formatVal(model)}`;
 }
 
 function currentDisplay(
@@ -262,6 +280,22 @@ function currentDisplay(
 	layer: Record<string, any>,
 	effective: any,
 ): string {
+	if (desc.kind === "model" && desc.role) {
+		const paths = modelPaths(desc.role);
+		const rawProvider = getPath(layer, paths.provider);
+		const rawModel = getPath(layer, paths.model);
+		if (rawProvider !== undefined && rawModel !== undefined) {
+			return formatModelRef(rawProvider, rawModel);
+		}
+		if (rawProvider !== undefined || rawModel !== undefined) {
+			return `partial (${formatModelRef(rawProvider, rawModel)})`;
+		}
+		return `inherit (${formatModelRef(
+			getPath(effective, paths.provider),
+			getPath(effective, paths.model),
+		)})`;
+	}
+
 	const raw = getPath(layer, desc.path);
 	if (raw !== undefined) return formatVal(raw);
 	if (desc.kind === "string") {
@@ -271,11 +305,18 @@ function currentDisplay(
 }
 
 function descriptionFor(desc: SettingDescriptor, effective: any): string {
+	if (desc.kind === "model" && desc.role) {
+		const paths = modelPaths(desc.role);
+		return `${desc.description}  ·  effective: ${formatModelRef(
+			getPath(effective, paths.provider),
+			getPath(effective, paths.model),
+		)}`;
+	}
 	const eff = formatVal(getPath(effective, desc.path));
 	return `${desc.description}  ·  effective: ${eff}`;
 }
 
-// ── String input submenu ────────────────────────────────────────────────────
+// ── String/model submenus ───────────────────────────────────────────────────
 
 function makeStringInputSubmenu(
 	theme: Theme,
@@ -306,6 +347,199 @@ function makeStringInputSubmenu(
 		handleInput: (data: string) => {
 			input.handleInput(data);
 			container.invalidate();
+		},
+	};
+}
+
+const INHERIT_MODEL_VALUE = "__pi_workflow_inherit_model__";
+
+interface ModelPickerItem {
+	value: string;
+	label: string;
+	description: string;
+	model?: Model<any>;
+	searchText: string;
+}
+
+function encodeModelValue(model: Model<any>): string {
+	return JSON.stringify({ provider: model.provider, model: model.id });
+}
+
+function decodeModelValue(value: string): { provider: string; model: string } {
+	const parsed = JSON.parse(value) as { provider?: unknown; model?: unknown };
+	if (typeof parsed.provider !== "string" || typeof parsed.model !== "string") {
+		throw new Error("Invalid model selection");
+	}
+	return { provider: parsed.provider, model: parsed.model };
+}
+
+function modelPickerItems(
+	modelRegistry: ModelRegistry,
+	effectiveProvider: string,
+	effectiveModel: string,
+): { items: ModelPickerItem[]; error?: string } {
+	try {
+		modelRegistry.refresh();
+		const loadError = modelRegistry.getError();
+		const models = [...modelRegistry.getAvailable()].sort((a, b) => {
+			const aRef = `${a.provider}/${a.id}`;
+			const bRef = `${b.provider}/${b.id}`;
+			return aRef.localeCompare(bRef);
+		});
+		return {
+			items: [
+				{
+					value: INHERIT_MODEL_VALUE,
+					label: "inherit",
+					description: `Use effective model: ${formatModelRef(
+						effectiveProvider,
+						effectiveModel,
+					)}`,
+					searchText: `inherit ${effectiveProvider} ${effectiveModel}`,
+				},
+				...models.map((model) => ({
+					value: encodeModelValue(model),
+					label: model.id,
+					description: `${model.provider} · ${model.name}`,
+					model,
+					searchText: `${model.id} ${model.name} ${model.provider} ${model.provider}/${model.id}`,
+				})),
+			],
+			error: loadError,
+		};
+	} catch (e) {
+		return {
+			items: [
+				{
+					value: INHERIT_MODEL_VALUE,
+					label: "inherit",
+					description: `Use effective model: ${formatModelRef(
+						effectiveProvider,
+						effectiveModel,
+					)}`,
+					searchText: `inherit ${effectiveProvider} ${effectiveModel}`,
+				},
+			],
+			error: e instanceof Error ? e.message : String(e),
+		};
+	}
+}
+
+function makeModelPickerSubmenu({
+	theme,
+	title,
+	modelRegistry,
+	currentProvider,
+	currentModel,
+	effectiveProvider,
+	effectiveModel,
+	done,
+}: {
+	theme: Theme;
+	title: string;
+	modelRegistry: ModelRegistry;
+	currentProvider?: string;
+	currentModel?: string;
+	effectiveProvider: string;
+	effectiveModel: string;
+	done: (value?: string) => void;
+}): Component {
+	const input = new Input();
+	const { items, error } = modelPickerItems(
+		modelRegistry,
+		effectiveProvider,
+		effectiveModel,
+	);
+	let filteredItems = items;
+	let selectedIndex = Math.max(
+		0,
+		items.findIndex((item) =>
+			currentProvider && currentModel
+				? item.model?.provider === currentProvider &&
+					item.model.id === currentModel
+				: item.value === INHERIT_MODEL_VALUE,
+		),
+	);
+
+	const applyFilter = () => {
+		const query = input.getValue();
+		filteredItems = query
+			? fuzzyFilter(items, query, (item) => item.searchText)
+			: items;
+		selectedIndex = Math.min(
+			selectedIndex,
+			Math.max(0, filteredItems.length - 1),
+		);
+	};
+
+	input.onSubmit = () => {
+		if (filteredItems.length === 0) return;
+		const selected = filteredItems[selectedIndex];
+		if (selected) done(selected.value);
+	};
+	input.onEscape = () => done(undefined);
+
+	return {
+		render: (w: number) => {
+			const lines: string[] = [
+				theme.fg("accent", theme.bold(title)),
+				theme.fg(
+					"dim",
+					"type to search · enter select · esc cancel · choose inherit to clear this scope",
+				),
+				"",
+				...input.render(w),
+				"",
+			];
+			const maxVisible = 10;
+			const startIndex = Math.max(
+				0,
+				Math.min(
+					selectedIndex - Math.floor(maxVisible / 2),
+					filteredItems.length - maxVisible,
+				),
+			);
+			const endIndex = Math.min(startIndex + maxVisible, filteredItems.length);
+			if (filteredItems.length === 0) {
+				lines.push(theme.fg("muted", "  No matching models"));
+			} else {
+				for (let i = startIndex; i < endIndex; i++) {
+					const item = filteredItems[i];
+					if (!item) continue;
+					const selected = i === selectedIndex;
+					const prefix = selected ? theme.fg("accent", "→ ") : "  ";
+					const label = selected ? theme.fg("accent", item.label) : item.label;
+					const description = theme.fg("muted", `  ${item.description}`);
+					lines.push(truncateToWidth(prefix + label + description, w));
+				}
+				if (startIndex > 0 || endIndex < filteredItems.length) {
+					lines.push(
+						theme.fg("dim", `  (${selectedIndex + 1}/${filteredItems.length})`),
+					);
+				}
+			}
+			if (error) {
+				lines.push("", theme.fg("warning", `  models.json warning: ${error}`));
+			}
+			return lines;
+		},
+		invalidate: () => undefined,
+		handleInput: (data: string) => {
+			const kb = getKeybindings();
+			if (kb.matches(data, "tui.select.up")) {
+				if (filteredItems.length > 0) {
+					selectedIndex =
+						selectedIndex === 0 ? filteredItems.length - 1 : selectedIndex - 1;
+				}
+			} else if (kb.matches(data, "tui.select.down")) {
+				if (filteredItems.length > 0) {
+					selectedIndex =
+						selectedIndex === filteredItems.length - 1 ? 0 : selectedIndex + 1;
+				}
+			} else {
+				input.handleInput(data);
+				applyFilter();
+			}
 		},
 	};
 }
@@ -473,6 +707,32 @@ export function registerWfSettingsCommand(
 						const values = valuesFor(desc);
 						if (values) {
 							item.values = values;
+						} else if (desc.kind === "model" && desc.role) {
+							item.submenu = (_cur, submenuDone) => {
+								const layer = readLayer(scope, cwd, agentDir, sessionKey);
+								const effective = loadConfigForSession(
+									cwd,
+									agentDir,
+									sessionKey,
+								);
+								const paths = modelPaths(desc.role!);
+								const rawProvider = getPath(layer, paths.provider);
+								const rawModel = getPath(layer, paths.model);
+								return makeModelPickerSubmenu({
+									theme,
+									title: desc.label,
+									modelRegistry: ctx.modelRegistry,
+									currentProvider:
+										typeof rawProvider === "string" ? rawProvider : undefined,
+									currentModel:
+										typeof rawModel === "string" ? rawModel : undefined,
+									effectiveProvider: formatVal(
+										getPath(effective, paths.provider),
+									),
+									effectiveModel: formatVal(getPath(effective, paths.model)),
+									done: submenuDone,
+								});
+							};
 						} else {
 							// String field → single-line input submenu.
 							item.submenu = (_cur, submenuDone) => {
@@ -511,6 +771,25 @@ export function registerWfSettingsCommand(
 							const trimmed = newValue.trim();
 							if (trimmed === "") unsetPath(layer, desc.path);
 							else setPath(layer, desc.path, trimmed);
+						} else if (desc.kind === "model" && desc.role) {
+							const paths = modelPaths(desc.role);
+							if (newValue === INHERIT_MODEL_VALUE) {
+								unsetPath(layer, paths.provider);
+								unsetPath(layer, paths.model);
+							} else {
+								try {
+									const selected = decodeModelValue(newValue);
+									setPath(layer, paths.provider, selected.provider);
+									setPath(layer, paths.model, selected.model);
+								} catch (e) {
+									unsetPath(layer, paths.provider);
+									unsetPath(layer, paths.model);
+									ctx.ui.notify(
+										`Ignored invalid model selection: ${e instanceof Error ? e.message : String(e)}`,
+										"warning",
+									);
+								}
+							}
 						} else if (desc.kind === "boolean") {
 							if (newValue === "inherit") unsetPath(layer, desc.path);
 							else setPath(layer, desc.path, newValue === "true");
