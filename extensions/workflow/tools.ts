@@ -274,26 +274,13 @@ export function registerPlanTool(
 					...state,
 					mode: "work",
 					workRunId: crypto.randomUUID(),
+					pendingWorkHandoff: true,
 				};
 
-				const result = await transitionWorkflowMode({
-					pi,
-					ctx,
-					sessionKey,
-					nextState,
-					getAgentDir,
-				});
+				saveState(ctx.cwd, sessionKey, nextState);
 
-				if (!result.ok) {
-					return {
-						isError: true,
-						content: [{ type: "text", text: result.reason }],
-						details: { state: result.state },
-					};
-				}
-
-				// Queue a follow-up message that triggers the Work agent
-				// to start implementing the approved plan.
+				// Queue a follow-up message as the next-turn trigger. The message
+				// remains a minimal usable handoff if the one-time system prompt is lost.
 				pi.sendUserMessage("请读取已批准的计划并开始 Work Mode 实现。", {
 					deliverAs: "followUp",
 				});
@@ -303,12 +290,13 @@ export function registerPlanTool(
 						{
 							type: "text",
 							text:
-								`Plan approved. Work Mode activated.\n` +
-								`Work run: ${result.state.workRunId!.slice(-8)}.\n` +
-								`A kick-off message has been queued — the Work agent will start implementing next.`,
+								`Plan approved. Current turn will end now.\n` +
+								`Work run: ${nextState.workRunId!.slice(-8)}.\n` +
+								`A kick-off message has been queued — Work Mode will start in the next turn. Do not call any more tools in this turn.`,
 						},
 					],
-					details: { state: result.state },
+					details: { state: nextState },
+					terminate: true,
 				};
 			}
 

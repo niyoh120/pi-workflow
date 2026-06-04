@@ -843,7 +843,7 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"sidecall.ts: throws on errorMessage or stopReason error",
 	);
 
-	// Approve kickoff — scope to approve branch, check transition helper and order
+	// Approve kickoff — scope to approve branch, check deferred handoff behavior.
 	const approveStart = toolsTs.indexOf('if (action === "approve")');
 	const approveEnd = toolsTs.indexOf('if (action === "read")', approveStart);
 	assert(
@@ -852,21 +852,32 @@ console.log("\n=== Check 7: Code review tooling ===");
 	);
 	const approveBlock = toolsTs.slice(approveStart, approveEnd);
 	assert(
-		/await\s+transitionWorkflowMode\s*\(/.test(approveBlock),
-		"tools.ts: approve uses transitionWorkflowMode",
+		!/await\s+transitionWorkflowMode\s*\(/.test(approveBlock),
+		"tools.ts: approve does NOT switch runtime in the same turn",
 	);
 	assert(
-		!/state\.mode\s*=\s*"work"/.test(approveBlock),
-		"tools.ts: approve does NOT directly set state.mode",
+		/const\s+nextState\s*:\s*WorkflowState\s*=\s*\{\s*\.\.\.state/.test(
+			approveBlock,
+		),
+		"tools.ts: approve preserves existing workflow state fields",
+	);
+	assert(
+		approveBlock.includes('mode: "work"') &&
+			approveBlock.includes("workRunId: crypto.randomUUID()") &&
+			approveBlock.includes("pendingWorkHandoff: true"),
+		"tools.ts: approve persists work handoff state",
+	);
+	assert(
+		/saveState\(ctx\.cwd,\s*sessionKey,\s*nextState\)/.test(approveBlock),
+		"tools.ts: approve persists nextState directly",
 	);
 	assert(
 		approveBlock.includes('deliverAs: "followUp"'),
 		"tools.ts: approve sends followUp kickoff message",
 	);
 	assert(
-		approveBlock.indexOf("transitionWorkflowMode") <
-			approveBlock.indexOf('deliverAs: "followUp"'),
-		"tools.ts: approve transitions workflow before followUp kickoff",
+		approveBlock.includes("terminate: true"),
+		"tools.ts: approve terminates the current turn",
 	);
 
 	// mode.ts unified transition helper

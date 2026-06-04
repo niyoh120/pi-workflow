@@ -110,6 +110,8 @@ export const PLAN_PROMPT = `
 共识达成或分歧交由用户裁决后，展示最终计划摘要（包含 plan path），并请用户确认执行。
 
 11. 用户明确确认"执行 / 可以 / approved / go / 按计划做"后，调用 workflow_plan(action="approve")。
+   - 调用 approve 时必须单独调用，不要在同一批次调用任何其他工具。
+   - approve 会结束当前 turn，并在下一 turn 自动进入 Work Mode；调用后不要继续输出、不要尝试实现。
 12. 不要在 Plan Mode 里实现代码。
 
 最终计划建议格式：

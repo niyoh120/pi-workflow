@@ -26,11 +26,6 @@ import {
 } from "./mode.js";
 import { execSync } from "node:child_process";
 import path from "node:path";
-import {
-	hasInitialCommit,
-	gitRepoPreflight as gitRepoPreflightFn,
-} from "./baseline.js";
-import { checkOcrAvailable } from "./ocr-helpers.js";
 
 // ── /wf-init helpers ─────────────────────────────────────────────────────────
 
@@ -107,6 +102,20 @@ export function registerBeforeAgentStart(
 		const workflowActive =
 			(state.workflowEnabled || config.workflow.autoEnter) &&
 			!state.workflowExplicitlyDisabled;
+		let handoffPrompt = "";
+
+		// Consume one-time Plan → Work handoff before any early return so stale
+		// flags cannot survive mode changes, resets, or workflow exit paths.
+		if (state.pendingWorkHandoff) {
+			if (workflowActive && state.mode === "work" && state.planPath) {
+				handoffPrompt =
+					`\n\n# Approved Plan Handoff\n` +
+					`The approved plan is ${state.planPath}. Read the plan with workflow_plan(action="read"), ` +
+					`read the current workflow_todo list, then start implementing the approved todo list in order.\n`;
+			}
+			state.pendingWorkHandoff = false;
+			saveState(ctx.cwd, sessionKey, state);
+		}
 
 		// Tool activation: only when workflow is active.
 		if (workflowActive) {
@@ -155,7 +164,8 @@ export function registerBeforeAgentStart(
 				"\n\n" +
 				`# Current Workflow State\n` +
 				currentStatusText(state) +
-				"\n",
+				"\n" +
+				handoffPrompt,
 		};
 	});
 }
@@ -516,7 +526,7 @@ export function registerReviewCommand(
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 
-			const config = loadConfig(ctx.cwd, _getAgentDir);
+			const config = loadConfig(ctx.cwd, _getAgentDir());
 			if (!config.codeReview.enabled) {
 				ctx.ui.notify(
 					"Code review is not enabled. Set codeReview.enabled: true in config.",
@@ -526,16 +536,18 @@ export function registerReviewCommand(
 			}
 
 			// 1. Show scope selector
-			const scope = (await scopeSelectorComponent(ctx.ui)) as ReviewScope;
-			if (!scope) {
+			const scopeKind = await ctx.ui.custom<ReviewScope["kind"] | null>(
+				(_tui, theme, _kb, done) => scopeSelectorComponent(theme, done),
+			);
+			if (!scopeKind) {
 				ctx.ui.notify("Review cancelled: no scope selected.", "info");
 				return;
 			}
 
 			// 2. Collect scope-specific inputs
-			if (scope !== "workspace") {
+			if (scopeKind !== "workspace") {
 				ctx.ui.notify(
-					`Selected ${scope} scope. Collecting input...`,
+					`Selected ${scopeKind} scope. Collecting input...`,
 					"info",
 				);
 			}
@@ -544,21 +556,24 @@ export function registerReviewCommand(
 			let to: string | undefined;
 			let commit: string | undefined;
 
-			if (scope === "range") {
-				from = await scopeInputComponent(ctx.ui, "from ref");
-				if (!from) {
-					ctx.ui.notify("Review cancelled: from ref required.", "info");
-					return;
-				}
-				to = await scopeInputComponent(ctx.ui, "to ref");
-				if (!to) {
-					ctx.ui.notify("Review cancelled: to ref required.", "info");
+			if (scopeKind === "range") {
+				const values = await ctx.ui.custom<Record<string, string> | null>(
+					(_tui, theme, _kb, done) => scopeInputComponent("range", theme, done),
+				);
+				from = values?.from;
+				to = values?.to;
+				if (!from || !to) {
+					ctx.ui.notify("Review cancelled: from/to refs required.", "info");
 					return;
 				}
 			}
 
-			if (scope === "commit") {
-				commit = await scopeInputComponent(ctx.ui, "commit hash");
+			if (scopeKind === "commit") {
+				const values = await ctx.ui.custom<Record<string, string> | null>(
+					(_tui, theme, _kb, done) =>
+						scopeInputComponent("commit", theme, done),
+				);
+				commit = values?.commit;
 				if (!commit) {
 					ctx.ui.notify("Review cancelled: commit hash required.", "info");
 					return;
@@ -566,14 +581,14 @@ export function registerReviewCommand(
 			}
 
 			// 3. Resolve default refs
-			if (scope === "workspace") {
+			if (scopeKind === "workspace") {
 				from = "HEAD";
 				to = "HEAD";
 			}
 
 			// 4. Build tool params for display
 			const toolParams: Record<string, unknown> = {
-				scope,
+				scope: scopeKind,
 				background:
 					"(background will be written by the model when calling the tool)",
 			};
@@ -582,15 +597,14 @@ export function registerReviewCommand(
 			if (commit) toolParams.commit = commit;
 
 			// 5. Build prompt
-			const scopeKind =
-				scope === "workspace"
+			const scopeDescription =
+				scopeKind === "workspace"
 					? "workspace (unstaged + staged + untracked)"
-					: scope === "range"
+					: scopeKind === "range"
 						? `range from=${from} to=${to}`
 						: `commit=${commit}`;
 
-			const promptText =
-				`Review scope: ${scopeKind}. Prompting model to call workflow_code_review.`;
+			const promptText = `Review scope: ${scopeDescription}. Prompting model to call workflow_code_review.`;
 
 			ctx.ui.notify(promptText, "info");
 
