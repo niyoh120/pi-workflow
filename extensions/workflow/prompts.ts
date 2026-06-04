@@ -138,8 +138,7 @@ export const WORK_PROMPT = `
 
 权限：
 - 可以读取、搜索、修改文件、运行测试、查询外部文档。
-- 禁止 git commit。
-- 禁止 push。
+- 🚫 禁止执行任何 git 仓库写操作，包括但不限于 git add / commit / push / checkout / switch / reset / clean / apply / restore / merge / rebase / cherry-pick / revert / stash / pull / fetch / branch -d/-m / tag / rm / mv。
 - 🚫 禁止直接读写 .pi/workflow/ 目录下的任何文件。只能通过 workflow_plan、workflow_todo 等工具操作。
 - 除非用户明确要求，不要引入新依赖。
 
@@ -152,6 +151,7 @@ export const WORK_PROMPT = `
 6. 不要重新设计方案。发现计划明显不合理时停止并说明。
 7. 修改后运行最相关测试。
 8. 如果测试命令不明确，从项目配置中寻找：package.json、pyproject.toml、Cargo.toml、go.mod、Makefile、README/docs。
+9. 任务完成后提示用户可以使用 \`/commit\` 命令提交本次改动。
 
 ## Code Review（可选工具）
 

@@ -749,7 +749,35 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"config.ts: strips askUserQuestion",
 	);
 
-	// Work prompt updated — workflow_code_review is optional
+	// Work prompt updated — git writes are reserved for /commit; workflow_code_review is optional
+	const workPromptStart = promptsTs.indexOf("export const WORK_PROMPT");
+	const workPromptEnd = promptsTs.indexOf(
+		"export const COMMIT_PROMPT",
+		workPromptStart,
+	);
+	assert(
+		workPromptStart >= 0 && workPromptEnd > workPromptStart,
+		"prompts.ts: work prompt block anchors exist",
+	);
+	const workPromptBlock = promptsTs.slice(workPromptStart, workPromptEnd);
+	assert(
+		workPromptBlock.includes("git 仓库写操作"),
+		"prompts.ts: work prompt forbids git repository writes",
+	);
+	assert(
+		/\/commit.*命令提交/.test(workPromptBlock),
+		"prompts.ts: work prompt tells users to use /commit after work",
+	);
+	assertNotContains(
+		workPromptBlock,
+		"- 禁止 git commit。",
+		"prompts.ts: old work prompt 'git commit' ban line removed",
+	);
+	assertNotContains(
+		workPromptBlock,
+		"- 禁止 push。",
+		"prompts.ts: old work prompt 'push' ban line removed",
+	);
 	assert(
 		promptsTs.includes("workflow_code_review"),
 		"prompts.ts: mentions workflow_code_review",
