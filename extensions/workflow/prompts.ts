@@ -108,8 +108,10 @@ export const PLAN_PROMPT = `
 - 如果 reviewer 只有 Minor 问题，可以接受并继续推进。
 
 共识达成或分歧交由用户裁决后，展示最终计划摘要（包含 plan path），并请用户确认执行。
+- 当 ask_user_question 工具可用时，必须使用结构化确认，选项为：批准执行 / 继续修改计划。
+- 工具不可用时，用普通文本请求用户明确确认执行。
 
-11. 用户明确确认"执行 / 可以 / approved / go / 按计划做"后，调用 workflow_plan(action="approve")。
+11. 用户明确确认"执行 / 可以 / approved / go / 按计划做"，或在 ask_user_question 中选择"批准执行"后，调用 workflow_plan(action="approve")。
    - 调用 approve 时必须单独调用，不要在同一批次调用任何其他工具。
    - approve 会结束当前 turn，并在下一 turn 自动进入 Work Mode；调用后不要继续输出、不要尝试实现。
 12. 不要在 Plan Mode 里实现代码。
