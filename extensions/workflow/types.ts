@@ -63,12 +63,6 @@ export interface WorkflowState {
 	planRunId?: string;
 	/** Work run id — identifies a work session. */
 	workRunId?: string;
-	/**
-	 * Set by workflow_plan approve to queue a one-time Plan → Work handoff.
-	 * Consumed only by before_agent_start so the next Work turn receives the
-	 * handoff prompt after runtime / guard / system prompt are aligned.
-	 */
-	pendingWorkHandoff?: boolean;
 	/** Todo items tracking work progress. */
 	todos: TodoItem[];
 	/** IDs of completed todos that have been hidden from the overlay. */

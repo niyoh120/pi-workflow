@@ -133,6 +133,12 @@ export const PLAN_PROMPT = `
 ## Waiting for Approval
 `;
 
+export const WORK_HANDOFF_RUNTIME_NOTICE = `
+# Work Mode Runtime Handoff
+
+Workflow 扩展运行时已将 guard / tools / model 切换到 Work Mode。Plan Mode 的工具限制已在运行时解除，请按下面的 Work Mode 规则工作。
+`;
+
 export const WORK_PROMPT = `
 # Work Mode
 

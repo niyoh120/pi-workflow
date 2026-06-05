@@ -102,20 +102,6 @@ export function registerBeforeAgentStart(
 		const workflowActive =
 			(state.workflowEnabled || config.workflow.autoEnter) &&
 			!state.workflowExplicitlyDisabled;
-		let handoffPrompt = "";
-
-		// Consume one-time Plan → Work handoff before any early return so stale
-		// flags cannot survive mode changes, resets, or workflow exit paths.
-		if (state.pendingWorkHandoff) {
-			if (workflowActive && state.mode === "work" && state.planPath) {
-				handoffPrompt =
-					`\n\n# Approved Plan Handoff\n` +
-					`The approved plan is ${state.planPath}. Read the plan with workflow_plan(action="read"), ` +
-					`read the current workflow_todo list, then start implementing the approved todo list in order.\n`;
-			}
-			state.pendingWorkHandoff = false;
-			saveState(ctx.cwd, sessionKey, state);
-		}
 
 		// Tool activation: only when workflow is active.
 		if (workflowActive) {
@@ -164,8 +150,7 @@ export function registerBeforeAgentStart(
 				"\n\n" +
 				`# Current Workflow State\n` +
 				currentStatusText(state) +
-				"\n" +
-				handoffPrompt,
+				"\n",
 		};
 	});
 }

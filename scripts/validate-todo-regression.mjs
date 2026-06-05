@@ -456,6 +456,14 @@ console.log("\n=== Check 6: Source structure verification ===");
 		assert(!("unknownField" in r), "real normalizeState: unknown key dropped");
 	}
 	{
+		const r = normalizeState({ pendingWorkHandoff: true, mode: "work" });
+		assert(
+			!("pendingWorkHandoff" in r),
+			"real normalizeState: pendingWorkHandoff dropped",
+		);
+		assert(r.mode === "work", "real normalizeState: work mode preserved");
+	}
+	{
 		const r = normalizeState({
 			mode: "plan",
 			sessionConfig: {
@@ -843,7 +851,7 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"sidecall.ts: throws on errorMessage or stopReason error",
 	);
 
-	// Approve kickoff — scope to approve branch, check deferred handoff behavior.
+	// Approve kickoff — scope to approve branch, check immediate runtime handoff behavior.
 	const approveStart = toolsTs.indexOf('if (action === "approve")');
 	const approveEnd = toolsTs.indexOf('if (action === "read")', approveStart);
 	assert(
@@ -851,10 +859,6 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"tools.ts: approve branch anchors exist",
 	);
 	const approveBlock = toolsTs.slice(approveStart, approveEnd);
-	assert(
-		!/await\s+transitionWorkflowMode\s*\(/.test(approveBlock),
-		"tools.ts: approve does NOT switch runtime in the same turn",
-	);
 	assert(
 		/const\s+nextState\s*:\s*WorkflowState\s*=\s*\{\s*\.\.\.state/.test(
 			approveBlock,
@@ -864,12 +868,26 @@ console.log("\n=== Check 7: Code review tooling ===");
 	assert(
 		approveBlock.includes('mode: "work"') &&
 			approveBlock.includes("workRunId: crypto.randomUUID()") &&
-			approveBlock.includes("pendingWorkHandoff: true"),
-		"tools.ts: approve persists work handoff state",
+			!approveBlock.includes("pendingWorkHandoff: true"),
+		"tools.ts: approve persists work mode without pending handoff flag",
 	);
 	assert(
-		/saveState\(ctx\.cwd,\s*sessionKey,\s*nextState\)/.test(approveBlock),
-		"tools.ts: approve persists nextState directly",
+		/await\s+transitionWorkflowMode\s*\(/.test(approveBlock),
+		"tools.ts: approve switches runtime before followUp kickoff",
+	);
+	assert(
+		approveBlock.indexOf("transitionWorkflowMode") <
+			approveBlock.indexOf("pi.sendUserMessage"),
+		"tools.ts: approve switches runtime before sending followUp",
+	);
+	assert(
+		/if\s*\(\s*!result\.ok\s*\)[\s\S]*?isError:\s*true/.test(approveBlock),
+		"tools.ts: approve returns isError when runtime transition fails",
+	);
+	assert(
+		approveBlock.includes("WORK_HANDOFF_RUNTIME_NOTICE") &&
+			approveBlock.includes("WORK_PROMPT"),
+		"tools.ts: approve followUp includes runtime notice and Work prompt",
 	);
 	assert(
 		approveBlock.includes('deliverAs: "followUp"'),

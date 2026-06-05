@@ -11,6 +11,7 @@ import {
 	readPlan,
 } from "./state.js";
 import { loadConfig } from "./config.js";
+import { WORK_HANDOFF_RUNTIME_NOTICE, WORK_PROMPT } from "./prompts.js";
 import { todoText } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
@@ -274,28 +275,45 @@ export function registerPlanTool(
 					...state,
 					mode: "work",
 					workRunId: crypto.randomUUID(),
-					pendingWorkHandoff: true,
 				};
 
-				saveState(ctx.cwd, sessionKey, nextState);
-
-				// Queue a follow-up message as the next-turn trigger. The message
-				// remains a minimal usable handoff if the one-time system prompt is lost.
-				pi.sendUserMessage("请读取已批准的计划并开始 Work Mode 实现。", {
-					deliverAs: "followUp",
+				const result = await transitionWorkflowMode({
+					pi,
+					ctx,
+					sessionKey,
+					nextState,
+					getAgentDir,
 				});
+
+				if (!result.ok) {
+					return {
+						isError: true,
+						content: [{ type: "text", text: result.reason }],
+						details: { state: result.state },
+					};
+				}
+
+				const handoffMessage =
+					WORK_HANDOFF_RUNTIME_NOTICE +
+					"\n\n" +
+					WORK_PROMPT +
+					"\n\n" +
+					`已批准的计划在 ${result.state.planPath}. ` +
+					`请用 workflow_plan(action="read") 读取计划和当前 workflow_todo 列表，按 todo 顺序开始实现。`;
+
+				pi.sendUserMessage(handoffMessage, { deliverAs: "followUp" });
 
 				return {
 					content: [
 						{
 							type: "text",
 							text:
-								`Plan approved. Current turn will end now.\n` +
-								`Work run: ${nextState.workRunId!.slice(-8)}.\n` +
-								`A kick-off message has been queued — Work Mode will start in the next turn. Do not call any more tools in this turn.`,
+								`Plan approved. Work Mode runtime activated.\n` +
+								`Work run: ${result.state.workRunId!.slice(-8)}.\n` +
+								`A kick-off message has been queued. If it does not continue automatically, send a message to continue implementation. Do not call any more tools in this turn.`,
 						},
 					],
-					details: { state: nextState },
+					details: { state: result.state },
 					terminate: true,
 				};
 			}
