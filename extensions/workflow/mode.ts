@@ -1,8 +1,38 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { Mode, WorkflowState } from "./types.js";
+import type { Mode, WorkflowConfig, WorkflowState } from "./types.js";
 import { loadConfig, loadConfigForSession } from "./config.js";
 import { modeLabel } from "./helpers.js";
 import { saveState, getSessionKey } from "./state.js";
+
+// ── Workflow tool mode gating ─────────────────────────────────────────────
+
+export const WORKFLOW_GATED_TOOLS = [
+	"workflow_todo",
+	"workflow_plan",
+	"workflow_plan_review",
+	"workflow_code_review",
+] as const;
+
+export const WORKFLOW_TOOL_CLEANUP_NAMES = [
+	...WORKFLOW_GATED_TOOLS,
+	"workflow_subagent",
+] as const;
+
+export function isWorkflowToolMode(mode: Mode): boolean {
+	return mode === "plan" || mode === "work" || mode === "commit";
+}
+
+export function computeWorkflowToolNames(
+	mode: Mode,
+	config: WorkflowConfig,
+): string[] {
+	if (!isWorkflowToolMode(mode)) return [];
+
+	const names = ["workflow_todo", "workflow_plan"];
+	if (config.planReview.enabled) names.push("workflow_plan_review");
+	if (config.codeReview.enabled) names.push("workflow_code_review");
+	return names;
+}
 
 // ── Runtime mode switching ────────────────────────────────────────────────
 
@@ -60,13 +90,15 @@ export async function setRole(
 	}
 }
 
-/** Activate workflow tools when the current agent allows them.
- *  Skips when the current agent has already excluded workflow_todo
- *  (e.g. review subagents that block workflow tools via disallowed_tools). */
+/**
+ * Reconcile workflow tools for the current mode.
+ * Explore/idle hide workflow tools; plan/work/commit enable the mode-allowed set.
+ */
 export function activateWorkflowToolsIfAllowed(
 	pi: ExtensionAPI,
 	cwd: string,
 	getAgentDir: () => string,
+	mode: Mode,
 ): void {
 	try {
 		const active = pi.getActiveTools().map((tool: any) => {
@@ -74,25 +106,23 @@ export function activateWorkflowToolsIfAllowed(
 			return tool.name;
 		});
 
-		// Guard: if the agent already excludes workflow_todo, it is a restricted
-		// agent — do NOT re-add workflow tools.
-		if (!active.includes("workflow_todo")) return;
-
 		const next = new Set(active);
-		next.add("workflow_todo");
-		next.add("workflow_plan");
+		for (const toolName of WORKFLOW_TOOL_CLEANUP_NAMES) {
+			next.delete(toolName);
+		}
 
-		// Conditionally activate review tools based on config.
-		// Always remove first, then re-add — so a config change to false takes effect.
+		let workflowToolNames: string[] = [];
 		try {
 			const cfg = loadConfig(cwd, getAgentDir());
-			next.delete("workflow_subagent"); // old tool name, no longer registered
-			next.delete("workflow_plan_review");
-			next.delete("workflow_code_review");
-			if (cfg.planReview.enabled) next.add("workflow_plan_review");
-			if (cfg.codeReview.enabled) next.add("workflow_code_review");
+			workflowToolNames = computeWorkflowToolNames(mode, cfg);
 		} catch {
-			// If config load fails, skip review tool activation.
+			// Preserve the core plan/work tools if config cannot be read.
+			workflowToolNames = isWorkflowToolMode(mode)
+				? ["workflow_todo", "workflow_plan"]
+				: [];
+		}
+		for (const toolName of workflowToolNames) {
+			next.add(toolName);
 		}
 
 		// Auto-activate ask_user_question if the tool is installed (tool-name existence check only).
@@ -133,7 +163,7 @@ export async function applyModeRuntime(
 	const role = roleMap[mode];
 	try {
 		if (role && !(await setRole(pi, ctx, role, getAgentDir))) return false;
-		activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir);
+		activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir, mode);
 		ctx.ui.setStatus("lite-sp", modeLabel(mode));
 		return true;
 	} catch {
@@ -143,13 +173,8 @@ export async function applyModeRuntime(
 
 // ── Workflow tool activation / deactivation ──────────────────────────────
 
-/** All workflow tools that get enabled when workflow mode is active. */
-export const WORKFLOW_TOOL_NAMES = [
-	"workflow_todo",
-	"workflow_plan",
-	"workflow_plan_review",
-	"workflow_code_review",
-];
+/** All workflow tools that can be enabled in plan/work/commit modes. */
+export const WORKFLOW_TOOL_NAMES = WORKFLOW_GATED_TOOLS;
 
 /**
  * Remove all workflow tool names from the active tool set.
@@ -161,7 +186,7 @@ export function deactivateWorkflowTools(pi: ExtensionAPI): void {
 			if (typeof tool === "string") return tool;
 			return tool.name;
 		});
-		const workflowSet = new Set(WORKFLOW_TOOL_NAMES);
+		const workflowSet = new Set<string>(WORKFLOW_TOOL_NAMES);
 		const next = active.filter((t: string) => !workflowSet.has(t));
 		if (next.length < active.length) {
 			pi.setActiveTools(next);

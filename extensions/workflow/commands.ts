@@ -16,13 +16,13 @@ import { DEFAULT_STATE } from "./defaults.js";
 import { planDir } from "./paths.js";
 import { loadConfig } from "./config.js";
 import {
-	activateWorkflowToolsIfAllowed,
 	applyModeRuntime,
 	setCurrentTurnGuardMode,
 	getCurrentTurnGuardMode,
 	clearCurrentTurnGuardMode,
 	deactivateWorkflowTools,
 	transitionWorkflowMode,
+	isWorkflowToolMode,
 } from "./mode.js";
 import { execSync } from "node:child_process";
 import path from "node:path";
@@ -103,11 +103,6 @@ export function registerBeforeAgentStart(
 			(state.workflowEnabled || config.workflow.autoEnter) &&
 			!state.workflowExplicitlyDisabled;
 
-		// Tool activation: only when workflow is active.
-		if (workflowActive) {
-			activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir);
-		}
-
 		// Hide done items at the start of each new turn.
 		const overlay = getWorkflowOverlay();
 		if (overlay) {
@@ -167,7 +162,10 @@ export function registerToolCallGuard(
 			(state.workflowEnabled || config.workflow.autoEnter) &&
 			!state.workflowExplicitlyDisabled;
 
-		// Block workflow tool calls when the workflow is not enabled.
+		// Use per-turn effective guard mode; fall back to state mode.
+		const effectiveMode = getCurrentTurnGuardMode(sessionKey) ?? state.mode;
+
+		// Block workflow tool calls outside workflow-enabled implementation modes.
 		// This catches stale tool registrations and direct tool invocations.
 		if (
 			event.toolName === "workflow_plan" ||
@@ -182,11 +180,15 @@ export function registerToolCallGuard(
 						"Workflow is not enabled. Run /wf first to enable workflow tools.",
 				};
 			}
+			if (!isWorkflowToolMode(effectiveMode)) {
+				return {
+					block: true,
+					reason:
+						"当前模式禁止 workflow 计划/Todo/审查工具，请用 /plan 进入 Plan Mode。",
+				};
+			}
 			return;
 		}
-
-		// Use per-turn effective guard mode; fall back to state mode.
-		const effectiveMode = getCurrentTurnGuardMode(sessionKey) ?? state.mode;
 
 		// ── Plan directory protection: block write/edit to .pi/workflow/plan/ in all modes ──
 		if (event.toolName === "write" || event.toolName === "edit") {

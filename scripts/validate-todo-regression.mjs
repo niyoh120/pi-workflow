@@ -47,6 +47,19 @@ function inlineLoadState(wfDir, sessionKey) {
 	}
 }
 
+function inlineIsWorkflowToolMode(mode) {
+	return mode === "plan" || mode === "work" || mode === "commit";
+}
+
+function inlineComputeWorkflowToolNames(mode, config) {
+	if (!inlineIsWorkflowToolMode(mode)) return [];
+
+	const names = ["workflow_todo", "workflow_plan"];
+	if (config.planReview.enabled) names.push("workflow_plan_review");
+	if (config.codeReview.enabled) names.push("workflow_code_review");
+	return names;
+}
+
 // ═══════════════════════════════════════════════════════
 // 1. DEFAULT_STATE has empty todos
 // ═══════════════════════════════════════════════════════
@@ -596,27 +609,30 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"commands.ts: conditionally registers /review command",
 	);
 
-	// Conditional activation in mode.ts — always delete old names first
+	// Conditional activation in mode.ts — mode-aware delete-then-add
 	assert(
-		/next\.delete\(.*workflow_subagent/.test(modeTs),
-		"mode.ts: deletes old workflow_subagent from active tools",
+		modeTs.includes("WORKFLOW_GATED_TOOLS") &&
+			modeTs.includes("WORKFLOW_TOOL_CLEANUP_NAMES"),
+		"mode.ts: separates gated workflow tools from cleanup names",
 	);
 	assert(
-		/next\.delete\(.*workflow_plan_review/.test(modeTs),
-		"mode.ts: deletes workflow_plan_review before conditional add",
+		modeTs.includes('"workflow_subagent"') &&
+			modeTs.includes("WORKFLOW_TOOL_CLEANUP_NAMES"),
+		"mode.ts: keeps old workflow_subagent only in cleanup names",
 	);
 	assert(
-		/next\.delete\(.*workflow_code_review/.test(modeTs),
-		"mode.ts: deletes workflow_code_review before conditional add",
+		/for \(const toolName of WORKFLOW_TOOL_CLEANUP_NAMES\)[\s\S]*?next\.delete\(toolName\)/.test(
+			modeTs,
+		),
+		"mode.ts: deletes workflow cleanup names before re-adding allowed tools",
 	);
-	// workflow_subagent only appears in delete context (cleanup for upgrades)
-	const allWfSubagentMatches = [...modeTs.matchAll(/workflow_subagent/g)];
-	const deleteOnlyMatches = [
-		...modeTs.matchAll(/next\.delete\(.*workflow_subagent/g),
-	];
 	assert(
-		allWfSubagentMatches.length === deleteOnlyMatches.length,
-		"mode.ts: workflow_subagent only appears in next.delete calls (cleanup)",
+		/computeWorkflowToolNames\(mode, cfg\)/.test(modeTs),
+		"mode.ts: uses computeWorkflowToolNames for mode-aware activation",
+	);
+	assert(
+		!/if \(!active\.includes\("workflow_todo"\)\) return/.test(modeTs),
+		"mode.ts: removed implicit restricted-agent early return",
 	);
 
 	// Code review tool
@@ -1151,6 +1167,49 @@ console.log("\n=== Check 14: Explore mode ===");
 		"mode.ts: roleMap has explore: explore",
 	);
 
+	// mode.ts: workflow tool gating hides workflow tools in explore/idle.
+	const cfgAllReviewTools = {
+		planReview: { enabled: true },
+		codeReview: { enabled: true },
+	};
+	const cfgNoReviewTools = {
+		planReview: { enabled: false },
+		codeReview: { enabled: false },
+	};
+	assert(
+		inlineComputeWorkflowToolNames("explore", cfgAllReviewTools).length === 0 &&
+			inlineComputeWorkflowToolNames("idle", cfgAllReviewTools).length === 0,
+		"inline runtime: explore/idle compute no workflow tools",
+	);
+	assert(
+		inlineComputeWorkflowToolNames("plan", cfgAllReviewTools).join(",") ===
+			"workflow_todo,workflow_plan,workflow_plan_review,workflow_code_review" &&
+			inlineComputeWorkflowToolNames("work", cfgNoReviewTools).join(",") ===
+				"workflow_todo,workflow_plan" &&
+			inlineComputeWorkflowToolNames("commit", cfgAllReviewTools).includes(
+				"workflow_code_review",
+			),
+		"inline runtime: plan/work/commit compute config-aware workflow tools",
+	);
+	assert(
+		/export function isWorkflowToolMode\([\s\S]*?mode === "plan"[\s\S]*?mode === "work"[\s\S]*?mode === "commit"/.test(
+			modeTs14,
+		),
+		"mode.ts: isWorkflowToolMode allow-list is plan/work/commit",
+	);
+	assert(
+		/export function computeWorkflowToolNames[\s\S]*?!isWorkflowToolMode\(mode\)[\s\S]*?return \[\][\s\S]*?config\.planReview\.enabled[\s\S]*?config\.codeReview\.enabled/.test(
+			modeTs14,
+		),
+		"mode.ts: computeWorkflowToolNames mirrors inline runtime behavior",
+	);
+	assert(
+		/activateWorkflowToolsIfAllowed\([\s\S]*?mode: Mode[\s\S]*?computeWorkflowToolNames\(mode, cfg\)/.test(
+			modeTs14,
+		),
+		"mode.ts: activateWorkflowToolsIfAllowed receives mode and computes tool set",
+	);
+
 	// helpers.ts: modeLabel includes explore
 	assert(
 		helpersTs14.includes('explore: "Explore Mode"'),
@@ -1202,6 +1261,19 @@ console.log("\n=== Check 14: Explore mode ===");
 	assert(
 		wfCmdBlock.includes('state.mode = "explore"'),
 		"commands.ts: /wf sets mode to explore",
+	);
+
+	// commands.ts: workflow tools are blocked outside plan/work/commit.
+	assert(
+		commandsTs14.includes("isWorkflowToolMode") &&
+			commandsTs14.includes("当前模式禁止 workflow 计划/Todo/审查工具"),
+		"commands.ts: workflow tools blocked outside workflow tool modes",
+	);
+	assert(
+		!commandsTs14.includes(
+			"activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir)",
+		),
+		"commands.ts: before_agent_start does not pre-activate workflow tools without mode",
 	);
 
 	// commands.ts: scratch write allows explore mode
