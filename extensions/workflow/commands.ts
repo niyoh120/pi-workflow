@@ -773,31 +773,38 @@ export function registerWfInitCommand(pi: ExtensionAPI): void {
 				const filePath = path.join(root, existingFile);
 				pi.sendUserMessage(
 					`当前仓库已存在 ${existingFile} (${filePath})。\n\n` +
-						`是否需要更新 AGENTS.md？如果需要，请回复确认，` +
-						`我会读取当前的 ${existingFile} 内容和项目上下文，帮你更新内容。\n\n` +
-						`确认前不会修改已有文件。`,
+						`请向用户询问是否更新 AGENTS.md。ask_user_question 工具可用时使用该工具提问；` +
+						`工具不可用时，用普通文本提供选项让用户手动回复。\n\n` +
+						`选项：\n` +
+						`1. 更新 AGENTS.md：读取当前内容并结合项目上下文更新。\n` +
+						`2. 保持现状：不修改文件。\n\n` +
+						`用户选择更新后，再询问更新方向，然后读取 ${filePath} 并写回更新后的内容。`,
 				);
 				return;
 			}
 
 			if (isProjectEmpty(root)) {
 				pi.sendUserMessage(
-					`当前仓库还没有实质项目文件。在生成 AGENTS.md 之前，请先回答以下问题：\n\n` +
-						`1. 项目使用的编程语言/框架是什么？\n` +
-						`2. 项目的代码风格/规范（例如 eslint、prettier、rustfmt 等）？\n` +
-						`3. 如何构建和运行测试（例如 npm test、cargo test、pytest 等）？\n` +
-						`4. 提交信息需要遵循什么规范（例如 conventional commits）？\n` +
-						`5. 其他需要 agent 遵守的约定或限制？\n\n` +
-						`了解这些信息后，我会在仓库根目录生成 AGENTS.md。`,
+					`当前仓库还没有实质项目文件。请先向用户收集生成 AGENTS.md 所需信息。\n\n` +
+						`ask_user_question 工具可用时使用该工具提问；工具不可用时，用普通文本列出问题让用户手动输入。` +
+						`需要收集：\n` +
+						`1. 项目使用的编程语言和框架。\n` +
+						`2. 代码风格和规范（如 eslint、prettier、rustfmt）。\n` +
+						`3. 构建和测试命令（如 npm test、cargo test、pytest）。\n` +
+						`4. 提交信息规范（如 conventional commits）。\n` +
+						`5. 其他 agent 需要遵守的约定或限制。\n\n` +
+						`收集完毕后，使用 write 工具将 AGENTS.md 写入 ${path.join(root, "AGENTS.md")}。`,
 				);
 				return;
 			}
 
 			const rootRel = root === ctx.cwd ? "仓库根目录" : `仓库根目录 (${root})`;
 			pi.sendUserMessage(
-				`请在 ${rootRel} 生成 AGENTS.md。\n\n` +
-					`请先探索项目上下文：README、docs、package/build/test 配置、目录结构、相关源码等，` +
-					`然后生成一份适合该项目的 AGENTS.md，内容至少包含：\n` +
+				`请在 ${rootRel} 初始化 AGENTS.md。\n\n` +
+					`请先探索项目上下文：README、docs、package/build/test 配置、目录结构、相关源码等。` +
+					`探索后向用户确认生成方案：ask_user_question 工具可用时使用该工具提问；` +
+					`工具不可用时，用普通文本提供选项让用户手动回复。\n\n` +
+					`确认内容至少包含：\n` +
 					`- 项目概述\n` +
 					`- 构建/测试命令\n` +
 					`- 代码风格/规范\n` +
@@ -805,7 +812,7 @@ export function registerWfInitCommand(pi: ExtensionAPI): void {
 					`- 工作流规则（idle → plan → work → commit；plan review 使用内置 completeSimple 侧调用，code review 使用 OCR CLI）\n` +
 					`- 提交规范\n` +
 					`- 安全/禁止事项\n\n` +
-					`使用 write 工具将内容写入 ${path.join(root, "AGENTS.md")}。`,
+					`用户确认后，使用 write 工具将内容写入 ${path.join(root, "AGENTS.md")}。`,
 			);
 		},
 	});
