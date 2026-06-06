@@ -304,16 +304,14 @@ function currentDisplay(
 	return "inherit";
 }
 
-function descriptionFor(desc: SettingDescriptor, effective: any): string {
-	if (desc.kind === "model" && desc.role) {
-		const paths = modelPaths(desc.role);
-		return `${desc.description}  ·  effective: ${formatModelRef(
-			getPath(effective, paths.provider),
-			getPath(effective, paths.model),
-		)}`;
-	}
-	const eff = formatVal(getPath(effective, desc.path));
-	return `${desc.description}  ·  effective: ${eff}`;
+function descriptionFor(desc: SettingDescriptor, _effective: any): string {
+	// SettingsList renders descriptions as raw lines. Keep them short; the
+	// effective value is already shown in currentValue.
+	return desc.description;
+}
+
+function truncateRenderedLines(lines: string[], width: number): string[] {
+	return lines.map((line) => truncateToWidth(line, width));
 }
 
 // ── String/model submenus ───────────────────────────────────────────────────
@@ -342,7 +340,7 @@ function makeStringInputSubmenu(
 	container.addChild(input);
 
 	return {
-		render: (w: number) => container.render(w),
+		render: (w: number) => truncateRenderedLines(container.render(w), w),
 		invalidate: () => container.invalidate(),
 		handleInput: (data: string) => {
 			input.handleInput(data);
@@ -521,7 +519,7 @@ function makeModelPickerSubmenu({
 			if (error) {
 				lines.push("", theme.fg("warning", `  models.json warning: ${error}`));
 			}
-			return lines;
+			return truncateRenderedLines(lines, w);
 		},
 		invalidate: () => undefined,
 		handleInput: (data: string) => {
@@ -625,7 +623,7 @@ function scopeSelectorComponent(
 	container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 
 	return {
-		render: (w: number) => container.render(w),
+		render: (w: number) => truncateRenderedLines(container.render(w), w),
 		invalidate: () => container.invalidate(),
 		handleInput: (data: string) => {
 			selectList.handleInput(data);
@@ -841,7 +839,8 @@ export function registerWfSettingsCommand(
 					);
 
 					return {
-						render: (w: number) => container.render(w),
+						render: (w: number) =>
+							truncateRenderedLines(container.render(w), w),
 						invalidate: () => container.invalidate(),
 						handleInput: (data: string) => {
 							settingsList.handleInput(data);
