@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Mode, WorkflowConfig, WorkflowState } from "./types.js";
 import { loadConfig, loadConfigForSession } from "./config.js";
-import { modeLabel } from "./helpers.js";
+import { modeLabel, modeStatusLabel } from "./helpers.js";
 import { saveState, getSessionKey } from "./state.js";
 
 // ── Workflow tool mode gating ─────────────────────────────────────────────
@@ -218,9 +218,21 @@ export function clearCurrentTurnGuardMode(sessionKey: string): void {
 
 // ── Unified mode transition ──────────────────────────────────────────────────
 
+interface WorkflowStatusContext {
+	ui: {
+		setStatus(key: string, value: string | undefined): void;
+	};
+}
+
 /** Reflect the persisted workflow mode in the TUI status line. */
-export function setWorkflowStatus(ctx: any, mode: Mode): void {
-	ctx.ui.setStatus("lite-sp", mode === "idle" ? undefined : modeLabel(mode));
+export function setWorkflowStatus(
+	ctx: WorkflowStatusContext,
+	mode: Mode,
+): void {
+	ctx.ui.setStatus(
+		"lite-sp",
+		mode === "idle" ? undefined : modeStatusLabel(mode),
+	);
 }
 
 export type WorkflowModeTransitionResult =

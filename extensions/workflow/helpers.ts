@@ -12,7 +12,7 @@ export function todoText(s: WorkflowState): string {
 		.join("\n");
 }
 
-/** Map internal mode to user-visible label for TUI status. */
+/** Map internal mode to user-visible label. */
 export function modeLabel(mode: string): string {
 	const labels: Record<string, string> = {
 		idle: "Idle",
@@ -20,6 +20,18 @@ export function modeLabel(mode: string): string {
 		plan: "Plan Mode",
 		work: "Work Mode",
 		commit: "Commit Mode",
+	};
+	return labels[mode] ?? mode;
+}
+
+/** Map internal mode to a compact TUI status label. */
+export function modeStatusLabel(mode: string): string {
+	const labels: Record<string, string> = {
+		idle: "○ Idle",
+		explore: "🔎 Explore",
+		plan: "🧭 Plan",
+		work: "⚒ Work",
+		commit: "🚀 Commit",
 	};
 	return labels[mode] ?? mode;
 }
