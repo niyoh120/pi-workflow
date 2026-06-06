@@ -97,7 +97,7 @@ export function registerBeforeAgentStart(
 ): void {
 	pi.on("before_agent_start", async (event, ctx) => {
 		const sessionKey = ctxSessionKey(ctx);
-		const state = loadState(ctx.cwd, sessionKey);
+		let state = loadState(ctx.cwd, sessionKey);
 		const config = loadConfig(ctx.cwd, getAgentDir());
 		const workflowActive =
 			(state.workflowEnabled || config.workflow.autoEnter) &&
@@ -115,21 +115,35 @@ export function registerBeforeAgentStart(
 			return;
 		}
 
-		// Promote idle → explore: entry to workflow mode lands in Explore by default.
+		let runtimeAppliedViaTransition = false;
+		// Promote idle → explore through the unified transition path so
+		// persisted mode, status line, runtime, and guards stay aligned.
 		if (state.mode === "idle") {
-			state.mode = "explore";
-			saveState(ctx.cwd, sessionKey, state);
+			const result = await transitionWorkflowMode({
+				pi,
+				ctx,
+				sessionKey,
+				nextState: { ...state, mode: "explore" },
+				getAgentDir,
+			});
+			runtimeAppliedViaTransition = true;
+			state = result.state;
+			if (!result.ok) {
+				ctx.ui.notify(result.reason, "error");
+			}
+		} else {
+			// Set per-turn guard mode from persisted state
+			setCurrentTurnGuardMode(sessionKey, state.mode);
 		}
-
-		// Set per-turn guard mode from persisted state
-		setCurrentTurnGuardMode(sessionKey, state.mode);
 
 		if (overlay) {
 			overlay.update(state.todos);
 		}
 
-		// Apply mode runtime (model/tools/status) for non-idle modes
-		await applyModeRuntime(pi, ctx, state.mode, getAgentDir);
+		// Apply mode runtime (model/tools) for non-idle modes.
+		if (!runtimeAppliedViaTransition) {
+			await applyModeRuntime(pi, ctx, state.mode, getAgentDir);
+		}
 
 		// Inject system prompt
 		const modePrompt = promptForMode(state.mode);

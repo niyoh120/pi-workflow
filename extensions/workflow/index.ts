@@ -16,11 +16,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadState, getSessionKey } from "./state.js";
 import { loadConfig } from "./config.js";
-import {
-	WorkflowTodoOverlay,
-	setWorkflowOverlay,
-	getWorkflowOverlay,
-} from "./todo-overlay.js";
+import { setWorkflowStatus } from "./mode.js";
+import type { Mode } from "./types.js";
+import { WorkflowTodoOverlay, setWorkflowOverlay } from "./todo-overlay.js";
 
 import { registerAllWorkflowTools } from "./tools.js";
 
@@ -55,6 +53,37 @@ function ensureWorkflowRegistered(
 	_workflowRegistered.add(pi);
 }
 
+function statusModeForSessionStart(mode: Mode): Mode {
+	return mode === "idle" ? "explore" : mode;
+}
+
+function registerWorkflowSessionStartStatus(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.on("session_start", async (_event, ctx) => {
+		try {
+			const sessionKey = getSessionKey({
+				getSessionId: () => (ctx as any).sessionManager?.getSessionId?.(),
+				getSessionFile: () =>
+					(ctx as any).sessionManager?.getSessionFile?.() ?? null,
+			});
+			const state = loadState((ctx as any).cwd, sessionKey);
+			const config = loadConfig((ctx as any).cwd, getAgentDir());
+			const workflowActive =
+				(state.workflowEnabled || config.workflow.autoEnter) &&
+				!state.workflowExplicitlyDisabled;
+
+			setWorkflowStatus(
+				ctx,
+				workflowActive ? statusModeForSessionStart(state.mode) : "idle",
+			);
+		} catch {
+			// Silently skip if session state/status cannot be read or applied.
+		}
+	});
+}
+
 // ── Main entry point ────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -66,8 +95,9 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Workflow commands/tools: conditional ──────
 	if (config.workflow.autoEnter) {
-		// Auto-enter: register immediately at load time.
+		// Auto-enter: register immediately and show Explore status on session start.
 		ensureWorkflowRegistered(pi, getAgentDir, process.cwd());
+		registerWorkflowSessionStartStatus(pi, getAgentDir);
 	} else {
 		// Delayed registration: wait until /wf enables the session flag,
 		// then register on the next session_start after reload.
@@ -86,6 +116,7 @@ export default function (pi: ExtensionAPI) {
 				// Silently skip if session state cannot be read.
 			}
 		});
+		registerWorkflowSessionStartStatus(pi, getAgentDir);
 	}
 
 	// ── Event handlers (always registered) ────────

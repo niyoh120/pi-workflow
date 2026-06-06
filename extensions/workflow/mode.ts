@@ -164,7 +164,6 @@ export async function applyModeRuntime(
 	try {
 		if (role && !(await setRole(pi, ctx, role, getAgentDir))) return false;
 		activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir, mode);
-		ctx.ui.setStatus("lite-sp", modeLabel(mode));
 		return true;
 	} catch {
 		return false;
@@ -219,6 +218,11 @@ export function clearCurrentTurnGuardMode(sessionKey: string): void {
 
 // ── Unified mode transition ──────────────────────────────────────────────────
 
+/** Reflect the persisted workflow mode in the TUI status line. */
+export function setWorkflowStatus(ctx: any, mode: Mode): void {
+	ctx.ui.setStatus("lite-sp", mode === "idle" ? undefined : modeLabel(mode));
+}
+
 export type WorkflowModeTransitionResult =
 	| { ok: true; state: WorkflowState }
 	| { ok: false; state: WorkflowState; reason: string };
@@ -236,17 +240,15 @@ export interface WorkflowModeTransitionOptions {
 }
 
 /**
- * Persist mode, switch runtime (model / tools / status), and sync the current-turn
- * guard cache in one atomic sequence. This is the single entry point for any
- * workflow mode change so that the three layers (persisted state, runtime, and
- * tool-call guard) never diverge.
+ * Persist mode, switch runtime (model / tools), update status, and sync the
+ * current-turn guard cache in one atomic sequence. This is the single entry
+ * point for workflow mode transitions.
  *
  * Persisted state — what future turns see on disk.
- * Runtime mode — the model, thinking level, active tools, and TUI status bar.
+ * Runtime mode — the model, thinking level, and active tools.
+ * Status line — reflects the persisted mode even when runtime setup fails.
  * Current-turn guard mode — controls write / edit / bash permissions for the
  * remainder of this turn.
- *
- * On runtime failure the persisted state is NOT written, so rollback is implicit.
  */
 export async function transitionWorkflowMode({
 	pi,
@@ -257,6 +259,14 @@ export async function transitionWorkflowMode({
 	applyRuntime: shouldApplyRuntime = true,
 }: WorkflowModeTransitionOptions): Promise<WorkflowModeTransitionResult> {
 	const nextMode = nextState.mode;
+
+	saveState(ctx.cwd, sessionKey, nextState);
+	setWorkflowStatus(ctx, nextMode);
+	if (nextMode === "idle") {
+		clearCurrentTurnGuardMode(sessionKey);
+	} else {
+		setCurrentTurnGuardMode(sessionKey, nextMode);
+	}
 
 	if (shouldApplyRuntime) {
 		const runtimeApplied = await applyModeRuntime(
@@ -272,13 +282,6 @@ export async function transitionWorkflowMode({
 				reason: `${modeLabel(nextMode)} runtime failed to activate.`,
 			};
 		}
-	}
-
-	saveState(ctx.cwd, sessionKey, nextState);
-	if (nextMode === "idle") {
-		clearCurrentTurnGuardMode(sessionKey);
-	} else {
-		setCurrentTurnGuardMode(sessionKey, nextMode);
 	}
 
 	return { ok: true, state: nextState };
