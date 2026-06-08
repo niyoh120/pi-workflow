@@ -24,7 +24,7 @@ import {
 	DynamicBorder,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
-import type { Model } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
 import {
 	Container,
 	Text,
@@ -48,6 +48,7 @@ import {
 } from "./config.js";
 import { getSessionKey, loadState, saveState } from "./state.js";
 import { applyModeRuntime } from "./mode.js";
+import type { WorkflowConfig } from "./types.js";
 
 // ── Scopes ────────────────────────────────────────────────────────────────
 
@@ -145,6 +146,7 @@ function buildDescriptors(): SettingDescriptor[] {
 			description: `Thinking level for the ${role} role.`,
 			kind: "thinking",
 			path: ["models", role, "thinking"],
+			role,
 		});
 	}
 
@@ -255,10 +257,36 @@ function formatVal(v: any): string {
 	return String(v);
 }
 
-function valuesFor(desc: SettingDescriptor): string[] | undefined {
+function valuesFor(
+	desc: SettingDescriptor,
+	effective?: WorkflowConfig,
+	modelRegistry?: ModelRegistry,
+): string[] | undefined {
 	if (desc.kind === "boolean") return ["inherit", "true", "false"];
-	if (desc.kind === "thinking") return ["inherit", ...THINKING_VALUES];
+	if (desc.kind === "thinking") {
+		if (effective && modelRegistry) {
+			return thinkingValuesFor(desc, effective, modelRegistry);
+		}
+		return ["inherit", ...THINKING_VALUES];
+	}
 	return undefined; // string/model → submenu
+}
+
+/** Return thinking levels supported by the effective model for a role. */
+function thinkingValuesFor(
+	desc: SettingDescriptor,
+	effective: WorkflowConfig,
+	modelRegistry: ModelRegistry,
+): string[] {
+	if (!desc.role) return ["inherit", ...THINKING_VALUES];
+	try {
+		const spec = effective.models[desc.role];
+		const model = modelRegistry.find(spec.provider, spec.model);
+		if (!model) return ["inherit", ...THINKING_VALUES];
+		return ["inherit", ...getSupportedThinkingLevels(model)];
+	} catch {
+		return ["inherit", ...THINKING_VALUES];
+	}
 }
 
 function modelPaths(role: (typeof ROLES)[number]): {
@@ -570,11 +598,6 @@ const SCOPE_ITEMS: SelectItem[] = [
 		label: "Global (~/.pi/agent/workflow/config.json)",
 		description: "Applies to all projects. Lowest of the editable layers.",
 	},
-	{
-		value: "__exit__",
-		label: "Done — close settings",
-		description: "Finish editing and apply changes.",
-	},
 ];
 
 function scopeSelectorComponent(
@@ -597,9 +620,7 @@ function scopeSelectorComponent(
 		noMatch: (t: string) => theme.fg("warning", t),
 	});
 	selectList.onSelect = (item) => {
-		if (item.value === "__exit__") {
-			done(null);
-		} else if (
+		if (
 			item.value === "session" ||
 			item.value === "project" ||
 			item.value === "global"
@@ -653,7 +674,7 @@ export function registerWfSettingsCommand(
 			const changedScopes = new Set<Scope>();
 			const changedIds = new Set<string>();
 
-			// Loop: pick a scope, edit it, return to scope picker, until Done/Esc.
+			// Loop: pick a scope, edit it, return to scope picker, until Esc.
 			while (true) {
 				const scope = await ctx.ui.custom<Scope | null>(
 					(_tui, theme, _kb, done) => scopeSelectorComponent(theme, done),
@@ -702,7 +723,7 @@ export function registerWfSettingsCommand(
 								initialEffective,
 							),
 						};
-						const values = valuesFor(desc);
+						const values = valuesFor(desc, initialEffective, ctx.modelRegistry);
 						if (values) {
 							item.values = values;
 						} else if (desc.kind === "model" && desc.role) {
@@ -758,6 +779,13 @@ export function registerWfSettingsCommand(
 							if (!desc) continue;
 							item.currentValue = currentDisplay(desc, layer, effective);
 							item.description = descriptionFor(desc, effective);
+							if (desc.kind === "thinking" && desc.role) {
+								item.values = thinkingValuesFor(
+									desc,
+									effective,
+									ctx.modelRegistry,
+								);
+							}
 						}
 					};
 
