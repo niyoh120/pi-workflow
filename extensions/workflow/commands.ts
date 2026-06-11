@@ -519,15 +519,15 @@ export function registerWorkCommand(
 // (function signatures on L483 and L644)
 export function registerReviewCommand(
 	pi: ExtensionAPI,
-	_getAgentDir: () => string,
+	getAgentDir: () => string,
 ): void {
 	pi.registerCommand("review", {
 		description:
-			"Select code review scope via TUI, then prompt the model to call workflow_code_review",
+			"Select code review scope via TUI, then run the workflow_code_review loop",
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 
-			const config = loadConfig(ctx.cwd, _getAgentDir());
+			const config = loadConfig(ctx.cwd, getAgentDir());
 			if (!config.codeReview.enabled) {
 				ctx.ui.notify(
 					"Code review is not enabled. Set codeReview.enabled: true in config.",
@@ -581,35 +581,60 @@ export function registerReviewCommand(
 				}
 			}
 
-			// 3. Resolve default refs
-			if (scopeKind === "workspace") {
-				from = "HEAD";
-				to = "HEAD";
+			// 3. Move the next agent turn into Work runtime so the review loop can
+			// call workflow_code_review, edit files, and run tests when fixes are needed.
+			const sessionKey = ctxSessionKey(ctx);
+			const current = loadState(ctx.cwd, sessionKey);
+			const state: WorkflowState = {
+				...current,
+				mode: "work",
+				workRunId: current.workRunId ?? crypto.randomUUID(),
+			};
+			const result = await transitionWorkflowMode({
+				pi,
+				ctx,
+				sessionKey,
+				nextState: state,
+				getAgentDir,
+			});
+			if (!result.ok) {
+				ctx.ui.notify(result.reason, "error");
+				return;
 			}
 
-			// 4. Build tool params for display
-			const toolParams: Record<string, unknown> = {
-				scope: scopeKind,
-				background:
-					"(background will be written by the model when calling the tool)",
-			};
-			if (from) toolParams.from = from;
-			if (to) toolParams.to = to;
-			if (commit) toolParams.commit = commit;
+			// 4. Build prompt instructing the model to run the full review/fix loop.
+			let scopeDescription: string;
+			let toolArguments: string;
+			switch (scopeKind) {
+				case "workspace":
+					scopeDescription =
+						"workspace (unstaged + staged + untracked changes)";
+					toolArguments = 'scope="workspace"';
+					break;
+				case "range":
+					scopeDescription = `range from=${from} to=${to}`;
+					toolArguments = `scope="range", from=${JSON.stringify(from)}, to=${JSON.stringify(to)}`;
+					break;
+				case "commit":
+					scopeDescription = `commit=${commit}`;
+					toolArguments = `scope="commit", commit=${JSON.stringify(commit)}`;
+					break;
+			}
 
-			// 5. Build prompt
-			const scopeDescription =
-				scopeKind === "workspace"
-					? "workspace (unstaged + staged + untracked)"
-					: scopeKind === "range"
-						? `range from=${from} to=${to}`
-						: `commit=${commit}`;
+			const promptText = `请执行 code review 循环。
 
-			const promptText = `Review scope: ${scopeDescription}. Prompting model to call workflow_code_review.`;
+Review scope: ${scopeDescription}
 
-			ctx.ui.notify(promptText, "info");
+要求：
+1. 调用 workflow_code_review，参数使用 ${toolArguments}；background 由你根据当前任务上下文填写，包含用户目标、本轮修改范围、关键约束、已运行测试和希望 reviewer 重点检查的风险点。
+2. 收到 review 结果后，逐条验证每个 Critical/Important 问题是否真实存在。
+3. 对确认存在的 Critical/Important 问题进行修复，并运行最相关测试验证。
+4. 修复后再次调用 workflow_code_review，让 reviewer 基于更新后的代码重新审查；持续 review → fix → re-review，直到没有新的 Critical/Important 问题。
+5. 如果你判断某个 reviewer 问题是误判、超出范围、投入产出比不合理或与项目约束冲突，在下一轮 background 中说明技术理由。
+6. 第一轮 review 已经没有 Critical/Important 问题时，可以结束循环。2-3 轮后仍存在分歧时，停止并交给用户裁决。
+7. Minor 问题按价值选择处理，不能阻塞 review 通过。`;
 
-			// 6. Build prompt instructing the model to call workflow_code_review
+			ctx.ui.notify(`Starting code review loop: ${scopeDescription}.`, "info");
 			pi.sendUserMessage(promptText);
 		},
 	});

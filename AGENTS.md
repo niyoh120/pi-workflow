@@ -8,9 +8,8 @@
 - **Explore Mode** (默认) — 进入 workflow 后默认落点，只读探索代码库、回答问题
 - **Plan Mode** (`/plan`) — 生成实现计划
 - **Plan Review Mode** (自动) — same-turn `completeSimple()` 侧调用审查计划，无需子进程
-- **Work Mode** (`/work`) — 执行已批准的计划
-- **Fix Mode** (自动) — 修复 Code Review 发现的问题
-- **Code Review Mode** (`/review`) — 基于 alibaba/open-code-review CLI (`ocr review`) 的代码审查
+- **Work Mode** (`/work`) — 执行已批准的计划，完成后提示用户运行 `/review`
+- **Code Review Mode** (`/review`) — 基于 alibaba/open-code-review CLI (`ocr review`) 的代码审查与修复循环
 - **Commit Mode** (`/commit`) — 生成符合 Conventional Commits 的提交信息
 
 ### 依赖
@@ -52,7 +51,7 @@ node scripts/validate-todo-regression.mjs
 | `/plan` | 进入 Plan Mode |
 | `/go [--force]` | 批准计划并交予 Work Mode |
 | `/work [task]` | 跳过计划，直接实现 |
-| `/review` | 手动触发 Code Review (调用 `ocr review`) |
+| `/review` | 触发 Code Review 与修复循环 (调用 `ocr review`) |
 | `/commit [notes]` | 生成并执行 Conventional Commit |
 | `/wf-status` | 查看当前工作流状态 |
 | `/wf-exit` | 退出工作流模式 |
@@ -131,17 +130,15 @@ Workflow 命令和工具默认为 opt-in：普通 Pi 仅暴露 `/wf`，使用 `/
 在 config 中设置 `workflow.autoEnter: true` 可在启动时自动启用。
 
 ```
-/wf → idle → explore → plan → planReview → work → review ↔ fix → commit → /wf-exit
-        ↑____________________________________|   (auto loop)
+/wf → idle → explore → plan → work → /review loop → commit → /wf-exit
 ```
 
 - **Explore Mode**: 进入 workflow 后默认进入的只读模式，用于探索代码库、了解现状
 - **Entry**: 用户发起 `/wf`，启用 workflow 命令和工具，自动进入 Explore Mode
 - **Plan Mode**: 用户发起 `/plan`，AI 探索、讨论、确认需求充分后产出计划文档并保存。保存后自动触发 plan-review，评审通过后由用户确认执行
 - **Plan Review Mode**: 计划保存后自动进入，通过 `completeSimple()` 侧调用审查（同一 turn 内完成），最大 loop 由 prompt 自约束
-- **Work Mode**: 执行批准的计划，使用 `workflow_todo` 跟踪进度
-- **Code Review Mode**: Work 完成后或手动 `/review`，调用 `ocr review` CLI
-- **Fix Mode**: 审查发现 critical/important 问题后自动进入，修复后重新触发 review
+- **Work Mode**: 执行批准的计划，使用 `workflow_todo` 跟踪进度，完成后提示用户运行 `/review`
+- **Code Review Mode**: 用户发起 `/review` 后调用 `ocr review` CLI；模型修复确认存在的 Critical/Important 问题并重新触发 review，直到通过或将分歧交给用户裁决
 - **Commit Mode**: review 通过后，生成 Conventional Commit
 
 ### 核心规则

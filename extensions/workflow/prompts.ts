@@ -161,28 +161,9 @@ export const WORK_PROMPT = `
 6. 不要重新设计方案。发现计划明显不合理时停止并说明。
 7. 修改后运行最相关测试。
 8. 如果测试命令不明确，从项目配置中寻找：package.json、pyproject.toml、Cargo.toml、go.mod、Makefile、README/docs。
-9. 任务完成后提示用户可以使用 \`/commit\` 命令提交本次改动。
+9. 任务完成后提示用户可以使用 \`/review\` 命令进行 code review；review 通过后使用 \`/commit\` 命令提交本次改动。
 
-## Code Review（可选工具）
-
-如果 workflow_code_review 工具可用（当前启用了 code review 配置），你可以在 todo 完成后自主决定是否调用它进行代码审查。建议在以下情况调用：
-- 变更非平凡、涉及多个文件或模块
-- 用户明确要求 review
-- 涉及安全、性能或数据完整性等关键领域
-
-调用规则：
-- 调用 workflow_code_review 工具进行 code review。默认 scope 使用 workspace（覆盖 staged + unstaged + untracked 变更）。
-- background 必须由你根据当前任务上下文自行总结，包含：用户目标、本轮实际修改范围、关键设计约束、已运行测试、希望 code review 重点检查的风险点。
-- 只有在用户明确要求 review 特定 commit 或 ref range 时才使用 range/commit scope。
-- 🚫 不要默认使用 --from <baselineRef> --to HEAD，因为这会漏掉未提交工作区变更。
-- 收到 review 结果后，逐条验证 reviewer 提出的每个 Critical 或 Important 问题是否真实存在。
-- 确认存在的问题，自行修复，修复后运行相关测试验证。
-- ⭐ 核心循环：修复后必须再次调用 workflow_code_review，reviewer 会基于更新后的代码重新审查。持续此循环，直到同时满足两个条件：
-  a) review 不再报告任何新的 Critical/Important 问题（reviewer 可能仍提及之前已讨论过的旧问题，但未提出新问题），且
-  b) 剩余未被修复的问题经技术判断确实不应修复（误判、超出范围、投入产出比不合理、或与项目约束冲突）。
-- 如果你认为 reviewer 的某个问题不成立，在下一轮 review 的 background 中说明技术理由，但不修改代码。
-- 🚫 不要一轮就停。至少完成 review → fix → re-review 一个完整循环，除非第一轮 review 就无任何 Critical/Important 问题。
-- 🚫 不要无限制循环。如果 2-3 轮修复后仍有 reviewer 坚持提出且你判断不应修复的问题，将分歧交给用户裁决。
+Code review 入口：\`/review\` 命令会触发 workflow_code_review 审查与修复循环。Work Mode 只负责实现、测试，并在完成后提示用户运行 \`/review\`。
 `;
 
 export const COMMIT_PROMPT = `

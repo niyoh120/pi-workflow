@@ -692,7 +692,7 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"ocr-helpers.ts: buildReviewArgv body uses --background flag",
 	);
 
-	// /review now prompts model to call workflow_code_review
+	// /review owns the workflow_code_review review/fix loop
 	const reviewCmdStart = commandsTs.indexOf(
 		"export function registerReviewCommand",
 	);
@@ -706,8 +706,10 @@ console.log("\n=== Check 7: Code review tooling ===");
 	);
 	const reviewCmdBlock = commandsTs.slice(reviewCmdStart, reviewCmdEnd);
 	assert(
-		reviewCmdBlock.includes("workflow_code_review"),
-		"/review prompts workflow_code_review tool call",
+		reviewCmdBlock.includes("workflow_code_review") &&
+			reviewCmdBlock.includes("review → fix → re-review") &&
+			reviewCmdBlock.includes("transitionWorkflowMode"),
+		"/review command includes workflow_code_review review/fix loop",
 	);
 	assert(
 		!reviewCmdBlock.includes("async function runCodeReviewSubagent"),
@@ -773,7 +775,7 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"config.ts: strips askUserQuestion",
 	);
 
-	// Work prompt updated — git writes are reserved for /commit; workflow_code_review is optional
+	// Work prompt updated — git writes are reserved for /commit; code review is routed through /review
 	const workPromptStart = promptsTs.indexOf("export const WORK_PROMPT");
 	const workPromptEnd = promptsTs.indexOf(
 		"export const COMMIT_PROMPT",
@@ -789,8 +791,9 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"prompts.ts: work prompt forbids git repository writes",
 	);
 	assert(
-		/\/commit.*命令提交/.test(workPromptBlock),
-		"prompts.ts: work prompt tells users to use /commit after work",
+		/\/review.*code review/.test(workPromptBlock) &&
+			/\/commit.*命令提交/.test(workPromptBlock),
+		"prompts.ts: work prompt tells users to use /review then /commit after work",
 	);
 	assertNotContains(
 		workPromptBlock,
@@ -801,6 +804,11 @@ console.log("\n=== Check 7: Code review tooling ===");
 		workPromptBlock,
 		"- 禁止 push。",
 		"prompts.ts: old work prompt 'push' ban line removed",
+	);
+	assertNotContains(
+		workPromptBlock,
+		"自主决定是否调用它进行代码审查",
+		"prompts.ts: work prompt does not tell model to auto-review",
 	);
 	assert(
 		promptsTs.includes("workflow_code_review"),

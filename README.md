@@ -26,12 +26,12 @@ pi install .
 ## Architecture
 
 ```
-idle → explore → plan → work → review ⟷ fix → commit → idle
+idle → explore → plan → work → /review loop → commit → idle
 ```
 
 - **Explore Mode**: Default landing after `/wf`. Read-only codebase exploration and Q&A (same permissions as Plan Mode). Use `/plan` when ready to design.
 - **Plan Review**: Optional, model-initiated `workflow_plan_review` tool call — the plan agent may invoke it after saving a plan. Same-turn `completeSimple()` sidecall with curated context (plan text + auto-extracted key file snippets + tool inventory). Not a separate mode; runs within Plan Mode.
-- **Code Review**: Tool-driven via `workflow_code_review`. The model selects review scope (workspace by default) and provides context. `/review` is a TUI scope-selector that prompts the model to invoke the tool.
+- **Code Review**: `/review` selects scope, prompts the model to invoke `workflow_code_review`, and runs the review/fix/re-review loop. Work Mode points users to `/review` after implementation.
 
 ## Modes
 
@@ -44,8 +44,7 @@ Workflow tools and commands are **opt-in by default**: only `/wf` is visible unt
 | Explore Mode | `/explore` | Return to Explore Mode from any mode (non-destructive — keeps plan/todos) |
 | Plan Mode | `/plan` | Brainstorm and produce an implementation plan |
 | Work Mode | `/work` | Implement the approved plan |
-| Fix | (auto) | Fix critical/important issues from code review |
-| Code Review Mode | `/review` | Interactive TUI: choose scope, then run `ocr review` |
+| Review/Fix Loop | `/review` | Interactive TUI: choose scope, run `ocr review`, fix Critical/Important issues, and re-review |
 | Commit Mode | `/commit` | Generate and execute a conventional commit |
 
 ## Configuration
@@ -100,11 +99,6 @@ Set `workflow.autoEnter: true` to enable workflow commands and tools automatical
       "model": "claude-sonnet-4-5",
       "thinking": "medium"
     },
-    "review": {
-      "provider": "openai",
-      "model": "gpt-5.1",
-      "thinking": "high"
-    },
     "commit": {
       "provider": "openai",
       "model": "gpt-5.1-mini",
@@ -141,7 +135,7 @@ Code review is also **optional** — when `codeReview.enabled` is `true`, the `w
 - **Workspace** (default): reviews staged + unstaged + untracked changes.
 - **Custom ref range** or **single commit**: via `/review` command TUI.
 
-The model fills in the `--background` parameter based on current task context. The `/review` command opens a TUI for scope selection and then prompts the model to call the tool.
+The model fills in the `--background` parameter based on current task context. The `/review` command opens a TUI for scope selection, prompts the model to call the tool, and keeps the loop in the agent turn so confirmed Critical/Important findings are fixed and re-reviewed.
 
 The `ocr` binary is assumed to be in PATH (hardcoded). No additional OCR configuration is exposed.
 
@@ -159,7 +153,7 @@ On load, pi-workflow strips stale config keys from old versions:
 - Removed `codeReview.ocrBinary/timeoutMs/maxLoops` (hardcoded, no longer configurable)
 - Removed `planReview.maxLoops` (no longer used)
 - Removed `codeReview.auto` (no longer used)
-- Unknown models keys are stripped; only `explore/plan/planReview/work/review/commit` are recognized
+- Unknown models keys are stripped; only `explore/plan/planReview/work/commit` are recognized
 
 ## Settings Menu (`/wf-settings`)
 
@@ -241,7 +235,7 @@ This prevents wasting tokens when the user still wants to refine the design.
 | `/plan` | Enter Plan Mode |
 | `/go [--force]` | Approve current plan and hand off to Work Mode |
 | `/work [task]` | Skip Plan Mode, go straight to implementation |
-| `/review` | TUI scope selector for code review — prompts model to call workflow_code_review |
+| `/review` | TUI scope selector for code review — runs the workflow_code_review loop |
 | `/commit [notes]` | Generate commit message and commit |
 | `/wf-status` | Show current workflow state (includes plan path and run IDs) |
 | `/wf-exit` | Exit workflow mode |
@@ -273,7 +267,7 @@ The `workflow_code_review` tool:
 2. Requires a model-supplied `--background` with task context.
 3. Defaults to workspace scope (staged + unstaged + untracked changes).
 
-For interactive scope selection, use `/review` — it shows a TUI and prompts the model to call the tool.
+For interactive scope selection and the full review/fix/re-review loop, use `/review` — it shows a TUI and prompts the model to call the tool.
 
 ## Session-Scoped Runtime State
 

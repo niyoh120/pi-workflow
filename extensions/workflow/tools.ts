@@ -468,7 +468,7 @@ export function registerCodeReviewTool(
 		promptSnippet:
 			"workflow_code_review: run ocr review with model-supplied context.",
 		promptGuidelines: [
-			"Use workflow_code_review when completing work to review changes.",
+			"Use workflow_code_review when the /review command prompts a code review loop.",
 			"Default scope to workspace unless the user explicitly requested range or commit.",
 			"Provide a thoughtful background: user goal, actual changes, key constraints, tests run, and risk areas to check.",
 		],
