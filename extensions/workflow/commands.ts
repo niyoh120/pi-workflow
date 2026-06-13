@@ -23,6 +23,8 @@ import {
 	deactivateWorkflowTools,
 	transitionWorkflowMode,
 	isWorkflowToolMode,
+	WORKFLOW_GATED_TOOLS,
+	computeWorkflowToolNames,
 } from "./mode.js";
 import { execSync } from "node:child_process";
 import path from "node:path";
@@ -181,12 +183,7 @@ export function registerToolCallGuard(
 
 		// Block workflow tool calls outside workflow-enabled implementation modes.
 		// This catches stale tool registrations and direct tool invocations.
-		if (
-			event.toolName === "workflow_plan" ||
-			event.toolName === "workflow_todo" ||
-			event.toolName === "workflow_plan_review" ||
-			event.toolName === "workflow_code_review"
-		) {
+		if ((WORKFLOW_GATED_TOOLS as readonly string[]).includes(event.toolName)) {
 			if (!workflowActive) {
 				return {
 					block: true,
@@ -197,8 +194,17 @@ export function registerToolCallGuard(
 			if (!isWorkflowToolMode(effectiveMode)) {
 				return {
 					block: true,
-					reason:
-						"当前模式禁止 workflow 计划/Todo/审查工具，请用 /plan 进入 Plan Mode。",
+					reason: `当前模式(${effectiveMode})禁止使用 ${event.toolName}。请用 /plan 进入 Plan Mode 或 /work 进入 Work Mode。`,
+				};
+			}
+			if (
+				!computeWorkflowToolNames(effectiveMode, config).includes(
+					event.toolName,
+				)
+			) {
+				return {
+					block: true,
+					reason: `当前模式不可使用 ${event.toolName}。`,
 				};
 			}
 			return;
@@ -229,7 +235,7 @@ export function registerToolCallGuard(
 					return {
 						block: true,
 						reason:
-							"Plan files (.pi/workflow/plan/) must be updated via workflow_plan(action='save', markdown='完整计划内容'), " +
+							"Plan files (.pi/workflow/plan/) must be updated via workflow_plan_save(markdown='完整计划内容'), " +
 							"not with write/edit.",
 					};
 				}

@@ -48,16 +48,31 @@ function inlineLoadState(wfDir, sessionKey) {
 }
 
 function inlineIsWorkflowToolMode(mode) {
-	return mode === "plan" || mode === "work" || mode === "commit";
+	return mode === "plan" || mode === "work";
 }
 
 function inlineComputeWorkflowToolNames(mode, config) {
 	if (!inlineIsWorkflowToolMode(mode)) return [];
 
-	const names = ["workflow_todo", "workflow_plan"];
-	if (config.planReview.enabled) names.push("workflow_plan_review");
-	if (config.codeReview.enabled) names.push("workflow_code_review");
-	return names;
+	if (mode === "plan") {
+		const names = [
+			"workflow_todo",
+			"workflow_plan_read",
+			"workflow_plan_save",
+			"workflow_plan_approve",
+			"workflow_plan_clear",
+		];
+		if (config.planReview.enabled) names.push("workflow_plan_review");
+		return names;
+	}
+
+	if (mode === "work") {
+		const names = ["workflow_todo", "workflow_plan_read"];
+		if (config.codeReview.enabled) names.push("workflow_code_review");
+		return names;
+	}
+
+	return [];
 }
 
 // ═══════════════════════════════════════════════════════
@@ -357,31 +372,23 @@ console.log("\n=== Check 6: Source structure verification ===");
 		"renderWidget auto-hide does NOT call clearBookkeeping() (preserves hidden/done state)",
 	);
 
-	// workflow_plan save clears todos and bookkeeping within the save block
-	const planToolIdx = toolsTs.indexOf("workflow_plan");
-	const saveActionIdx = toolsTs.indexOf('action === "save"', planToolIdx);
-	const saveBodyStart = toolsTs.indexOf("{", saveActionIdx);
-	let saveDepth = 0,
-		saveEndIdx = saveBodyStart;
-	for (; saveEndIdx < toolsTs.length; saveEndIdx++) {
-		const ch = toolsTs[saveEndIdx];
-		if (ch === "{") saveDepth++;
-		else if (ch === "}" && --saveDepth === 0) {
-			saveEndIdx++;
-			break;
-		}
-	}
-	const saveBlock = toolsTs.slice(saveActionIdx, saveEndIdx);
+	// workflow_plan_save clears todos and bookkeeping within the save tool block
+	const planToolIdx = toolsTs.indexOf("export function registerPlanSaveTool");
+	const saveEndIdx = toolsTs.indexOf(
+		"export function registerPlanApproveTool",
+		planToolIdx,
+	);
+	const saveBlock = toolsTs.slice(planToolIdx, saveEndIdx);
 	assert(
 		planToolIdx >= 0 &&
-			saveActionIdx > planToolIdx &&
+			saveEndIdx > planToolIdx &&
 			saveBlock.includes("state.todos = []") &&
 			saveBlock.includes("state.hiddenDoneIds = []") &&
 			saveBlock.includes("overlay.clearBookkeeping()") &&
 			saveBlock.indexOf("state.todos = []") < saveBlock.indexOf("saveState(") &&
 			saveBlock.indexOf("saveState(") <
 				saveBlock.indexOf("overlay.clearBookkeeping()"),
-		"workflow_plan save: clear todos, then saveState, then overlay cleanup",
+		"workflow_plan_save: clear todos, then saveState, then overlay cleanup",
 	);
 
 	// /plan and /work call clearBookkeeping
@@ -616,9 +623,8 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"mode.ts: separates gated workflow tools from cleanup names",
 	);
 	assert(
-		modeTs.includes('"workflow_subagent"') &&
-			modeTs.includes("WORKFLOW_TOOL_CLEANUP_NAMES"),
-		"mode.ts: keeps old workflow_subagent only in cleanup names",
+		!modeTs.includes('"workflow_subagent"'),
+		"mode.ts: no old workflow_subagent cleanup entry",
 	);
 	assert(
 		/for \(const toolName of WORKFLOW_TOOL_CLEANUP_NAMES\)[\s\S]*?next\.delete\(toolName\)/.test(
@@ -875,9 +881,14 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"sidecall.ts: throws on errorMessage or stopReason error",
 	);
 
-	// Approve kickoff — scope to approve branch, check immediate runtime handoff behavior.
-	const approveStart = toolsTs.indexOf('if (action === "approve")');
-	const approveEnd = toolsTs.indexOf('if (action === "read")', approveStart);
+	// Approve kickoff — scope to approve tool, check immediate runtime handoff behavior.
+	const approveStart = toolsTs.indexOf(
+		"export function registerPlanApproveTool",
+	);
+	const approveEnd = toolsTs.indexOf(
+		"export function registerPlanClearTool",
+		approveStart,
+	);
 	assert(
 		approveStart >= 0 && approveEnd > approveStart,
 		"tools.ts: approve branch anchors exist",
@@ -1193,26 +1204,44 @@ console.log("\n=== Check 14: Explore mode ===");
 	);
 	assert(
 		inlineComputeWorkflowToolNames("plan", cfgAllReviewTools).join(",") ===
-			"workflow_todo,workflow_plan,workflow_plan_review,workflow_code_review" &&
+			"workflow_todo,workflow_plan_read,workflow_plan_save,workflow_plan_approve,workflow_plan_clear,workflow_plan_review" &&
+			inlineComputeWorkflowToolNames("work", cfgAllReviewTools).join(",") ===
+				"workflow_todo,workflow_plan_read,workflow_code_review" &&
 			inlineComputeWorkflowToolNames("work", cfgNoReviewTools).join(",") ===
-				"workflow_todo,workflow_plan" &&
-			inlineComputeWorkflowToolNames("commit", cfgAllReviewTools).includes(
-				"workflow_code_review",
+				"workflow_todo,workflow_plan_read" &&
+			inlineComputeWorkflowToolNames("commit", cfgAllReviewTools).length === 0,
+		"inline runtime: plan/work expose workflow tools; explore/idle/commit expose none",
+	);
+	assert(
+		/export function isWorkflowToolMode\([\s\S]*?mode === "plan"[\s\S]*?mode === "work"/.test(
+			modeTs14,
+		) &&
+			!/export function isWorkflowToolMode\([\s\S]*?mode === "commit"/.test(
+				modeTs14,
 			),
-		"inline runtime: plan/work/commit compute config-aware workflow tools",
+		"mode.ts: isWorkflowToolMode allow-list is plan/work",
 	);
 	assert(
-		/export function isWorkflowToolMode\([\s\S]*?mode === "plan"[\s\S]*?mode === "work"[\s\S]*?mode === "commit"/.test(
+		/const PLAN_WORKFLOW_TOOL_NAMES[\s\S]*?workflow_plan_save[\s\S]*?const WORK_WORKFLOW_TOOL_NAMES[\s\S]*?workflow_plan_read[\s\S]*?export function computeWorkflowToolNames[\s\S]*?config\.planReview\.enabled[\s\S]*?config\.codeReview\.enabled[\s\S]*?return \[\]/.test(
 			modeTs14,
 		),
-		"mode.ts: isWorkflowToolMode allow-list is plan/work/commit",
+		"mode.ts: computeWorkflowToolNames mirrors mode-specific runtime behavior",
 	);
-	assert(
-		/export function computeWorkflowToolNames[\s\S]*?!isWorkflowToolMode\(mode\)[\s\S]*?return \[\][\s\S]*?config\.planReview\.enabled[\s\S]*?config\.codeReview\.enabled/.test(
-			modeTs14,
-		),
-		"mode.ts: computeWorkflowToolNames mirrors inline runtime behavior",
-	);
+	const expectedWorkflowTools = [
+		"workflow_todo",
+		"workflow_plan_read",
+		"workflow_plan_save",
+		"workflow_plan_approve",
+		"workflow_plan_clear",
+		"workflow_plan_review",
+		"workflow_code_review",
+	];
+	for (const toolName of expectedWorkflowTools) {
+		assert(
+			modeTs14.includes(`"${toolName}"`),
+			`mode.ts: WORKFLOW_GATED_TOOLS includes ${toolName}`,
+		);
+	}
 	assert(
 		/activateWorkflowToolsIfAllowed\([\s\S]*?mode: Mode[\s\S]*?computeWorkflowToolNames\(mode, cfg\)/.test(
 			modeTs14,
@@ -1273,10 +1302,10 @@ console.log("\n=== Check 14: Explore mode ===");
 		"commands.ts: /wf sets mode to explore",
 	);
 
-	// commands.ts: workflow tools are blocked outside plan/work/commit.
+	// commands.ts: workflow tools are blocked outside plan/work.
 	assert(
 		commandsTs14.includes("isWorkflowToolMode") &&
-			commandsTs14.includes("当前模式禁止 workflow 计划/Todo/审查工具"),
+			commandsTs14.includes("当前模式(${effectiveMode})禁止使用"),
 		"commands.ts: workflow tools blocked outside workflow tool modes",
 	);
 	assert(

@@ -8,30 +8,47 @@ import { saveState, getSessionKey } from "./state.js";
 
 export const WORKFLOW_GATED_TOOLS = [
 	"workflow_todo",
-	"workflow_plan",
+	"workflow_plan_read",
+	"workflow_plan_save",
+	"workflow_plan_approve",
+	"workflow_plan_clear",
 	"workflow_plan_review",
 	"workflow_code_review",
 ] as const;
 
-export const WORKFLOW_TOOL_CLEANUP_NAMES = [
-	...WORKFLOW_GATED_TOOLS,
-	"workflow_subagent",
-] as const;
+export const WORKFLOW_TOOL_CLEANUP_NAMES = [...WORKFLOW_GATED_TOOLS] as const;
+
+const PLAN_WORKFLOW_TOOL_NAMES = [
+	"workflow_todo",
+	"workflow_plan_read",
+	"workflow_plan_save",
+	"workflow_plan_approve",
+	"workflow_plan_clear",
+];
+
+const WORK_WORKFLOW_TOOL_NAMES = ["workflow_todo", "workflow_plan_read"];
 
 export function isWorkflowToolMode(mode: Mode): boolean {
-	return mode === "plan" || mode === "work" || mode === "commit";
+	return mode === "plan" || mode === "work";
 }
 
 export function computeWorkflowToolNames(
 	mode: Mode,
 	config: WorkflowConfig,
 ): string[] {
-	if (!isWorkflowToolMode(mode)) return [];
+	if (mode === "plan") {
+		const names = [...PLAN_WORKFLOW_TOOL_NAMES];
+		if (config.planReview.enabled) names.push("workflow_plan_review");
+		return names;
+	}
 
-	const names = ["workflow_todo", "workflow_plan"];
-	if (config.planReview.enabled) names.push("workflow_plan_review");
-	if (config.codeReview.enabled) names.push("workflow_code_review");
-	return names;
+	if (mode === "work") {
+		const names = [...WORK_WORKFLOW_TOOL_NAMES];
+		if (config.codeReview.enabled) names.push("workflow_code_review");
+		return names;
+	}
+
+	return [];
 }
 
 // ── Runtime mode switching ────────────────────────────────────────────────
@@ -92,7 +109,7 @@ export async function setRole(
 
 /**
  * Reconcile workflow tools for the current mode.
- * Explore/idle hide workflow tools; plan/work/commit enable the mode-allowed set.
+ * Explore/idle/commit hide workflow tools; plan/work enable the mode-allowed set.
  */
 export function activateWorkflowToolsIfAllowed(
 	pi: ExtensionAPI,
@@ -116,10 +133,12 @@ export function activateWorkflowToolsIfAllowed(
 			const cfg = loadConfig(cwd, getAgentDir());
 			workflowToolNames = computeWorkflowToolNames(mode, cfg);
 		} catch {
-			// Preserve the core plan/work tools if config cannot be read.
-			workflowToolNames = isWorkflowToolMode(mode)
-				? ["workflow_todo", "workflow_plan"]
-				: [];
+			// Preserve core workflow tools if config cannot be read.
+			if (mode === "plan") {
+				workflowToolNames = [...PLAN_WORKFLOW_TOOL_NAMES];
+			} else if (mode === "work") {
+				workflowToolNames = [...WORK_WORKFLOW_TOOL_NAMES];
+			}
 		}
 		for (const toolName of workflowToolNames) {
 			next.add(toolName);
@@ -172,7 +191,7 @@ export async function applyModeRuntime(
 
 // ── Workflow tool activation / deactivation ──────────────────────────────
 
-/** All workflow tools that can be enabled in plan/work/commit modes. */
+/** All workflow tools that can be enabled in plan/work modes. */
 export const WORKFLOW_TOOL_NAMES = WORKFLOW_GATED_TOOLS;
 
 /**

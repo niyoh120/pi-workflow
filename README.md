@@ -203,7 +203,7 @@ All plan documents are stored under `.pi/workflow/plan/`.
 
 ### Random Naming
 
-Each `workflow_plan save` creates a new plan file with a random name:
+Each `workflow_plan_save` creates a new plan file with a random name:
 
 ```
 .pi/workflow/plan/plan-a3b9f2c1.md          ← plan document
@@ -221,7 +221,7 @@ Before producing and saving the final plan, Plan Mode explicitly asks whether th
 
 > "Is the discussion sufficient? Shall I write the final plan?"
 
-Only after the user confirms the discussion is complete does the agent write the final plan document and call `workflow_plan(action="save")`. If plan review is enabled, the agent may optionally call `workflow_plan_review` for an independent review.
+Only after the user confirms the discussion is complete does the agent write the final plan document and call `workflow_plan_save`. If plan review is enabled, the agent may optionally call `workflow_plan_review` for an independent review.
 
 This prevents wasting tokens when the user still wants to refine the design.
 
@@ -288,7 +288,10 @@ Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) ar
 | Tool | Purpose |
 |------|---------|
 | `workflow_todo` | Maintain the todo list (reset, add, set, list) |
-| `workflow_plan` | Manage plans (save, approve, read, clear) — responses include plan path |
+| `workflow_plan_read` | Read the active plan — response includes plan path |
+| `workflow_plan_save` | Save or revise the active plan |
+| `workflow_plan_approve` | Approve the active plan and hand off to Work Mode |
+| `workflow_plan_clear` | Clear workflow state and return to idle mode |
 | `workflow_plan_review` | Run an optional plan review sidecall via completeSimple |
 | `workflow_code_review` | Run OCR code review on workspace or git ref range |
 

@@ -163,204 +163,270 @@ export function registerTodoTool(
 	});
 }
 
-// ── workflow_plan tool ────────────────────────────────────
+// ── workflow plan tools ────────────────────────────────────
 
-export function registerPlanTool(
+function renderPlanToolResult(result: any, _options: any, theme: any): Text {
+	const state = result.details?.state as WorkflowState | undefined;
+	const planPath = state?.planPath;
+	const text = Array.isArray(result.content)
+		? result.content
+				.filter((block: any) => block?.type === "text")
+				.map((block: any) => block.text)
+				.join("\n")
+		: "";
+	const header = planPath
+		? `${theme.fg("accent", theme.bold("Plan"))}: ${theme.fg("muted", planPath)}\n\n`
+		: "";
+	return new Text(header + text, 0, 0);
+}
+
+export function registerPlanReadTool(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
 	pi.registerTool({
-		name: "workflow_plan",
-		label: "Workflow Plan",
-		description: "Save, approve, read, or clear the active workflow plan.",
-		promptSnippet:
-			"workflow_plan: save the active plan or approve it for implementation.",
+		name: "workflow_plan_read",
+		label: "Read Workflow Plan",
+		description: "Read the active workflow plan.",
+		promptSnippet: "workflow_plan_read: read the active workflow plan.",
+		promptGuidelines: ["Use workflow_plan_read to view the current plan."],
+		parameters: Type.Object({}),
+		renderResult: renderPlanToolResult,
+		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+			const denied = checkWorkflowEnabled(ctx, getAgentDir);
+			if (denied) return denied;
+
+			const sessionKey = getSessionKey(ctx.sessionManager);
+			const state = loadState(ctx.cwd, sessionKey);
+
+			if (!state.planPath) {
+				return {
+					content: [{ type: "text", text: "No active plan. Path: none." }],
+					details: { state },
+				};
+			}
+
+			const text = readPlan(ctx.cwd, state.planPath);
+
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Plan path: ${state.planPath}\n\n${text}`,
+					},
+				],
+				details: { state },
+			};
+		},
+	});
+}
+
+export function registerPlanSaveTool(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.registerTool({
+		name: "workflow_plan_save",
+		label: "Save Workflow Plan",
+		description: "Save or revise the active workflow plan.",
+		promptSnippet: "workflow_plan_save: save the final implementation plan.",
 		promptGuidelines: [
-			"Use workflow_plan save after producing a final implementation plan.",
-			"Use workflow_plan approve only after the user explicitly confirms the final plan.",
-			"Use workflow_plan read to view the current plan.",
-			"Use workflow_plan clear to reset workflow state.",
+			"Use workflow_plan_save after producing a final implementation plan.",
+			"Pass the complete plan text as markdown when revising a plan.",
 		],
 		parameters: Type.Object({
-			action: StringEnum(["save", "approve", "read", "clear"] as const),
 			title: Type.Optional(Type.String()),
-			markdown: Type.Optional(Type.String()),
+			markdown: Type.String(),
 		}),
-		renderResult(result: any, _options: any, theme: any) {
-			const state = result.details?.state as WorkflowState | undefined;
-			const planPath = state?.planPath;
-			const text = Array.isArray(result.content)
-				? result.content
-						.filter((block: any) => block?.type === "text")
-						.map((block: any) => block.text)
-						.join("\n")
-				: "";
-			const header = planPath
-				? `${theme.fg("accent", theme.bold("Plan"))}: ${theme.fg("muted", planPath)}\n\n`
-				: "";
-			return new Text(header + text, 0, 0);
-		},
+		renderResult: renderPlanToolResult,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const denied = checkWorkflowEnabled(ctx, getAgentDir);
 			if (denied) return denied;
 
 			const sessionKey = getSessionKey(ctx.sessionManager);
 			const state = loadState(ctx.cwd, sessionKey);
-			const { action } = params;
+			const markdown = params.markdown;
 
-			if (action === "save") {
-				if (!params.markdown) {
-					throw new Error("workflow_plan save requires markdown.");
-				}
-
-				// Distinguish first save (new plan) vs revision save (update existing plan)
-				const isRevision = !!state.planPath;
-				if (isRevision) {
-					// Revision: update existing plan file in-place
-					updatePlan(ctx.cwd, state.planPath!, params.markdown);
-					state.planTitle = params.title ?? state.planTitle ?? "Active Plan";
-				} else {
-					// First save: create new plan file
-					const planPath = writeNewPlan(ctx.cwd, params.markdown);
-					state.planPath = planPath;
-					state.planTitle = params.title ?? "Active Plan";
-					state.planRunId = crypto.randomUUID();
-				}
-
-				state.todos = [];
-				state.hiddenDoneIds = [];
-				saveState(ctx.cwd, sessionKey, state);
-
-				// Set session name for easier identification in /resume
-				pi.setSessionName(`plan: ${state.planTitle ?? "Active Plan"}`);
-
-				const overlay = getWorkflowOverlay();
-				if (overlay) {
-					overlay.clearBookkeeping();
-					overlay.update(state.todos);
-				}
-
-				return {
-					content: [
-						{
-							type: "text",
-							text: isRevision
-								? `Plan updated at ${state.planPath}.`
-								: `Plan created at ${state.planPath}.`,
-						},
-					],
-					details: { state },
-				};
+			if (state.mode !== "plan") {
+				throw new Error(
+					`workflow_plan_save only allowed in Plan Mode (current: ${state.mode}).`,
+				);
 			}
 
-			if (action === "approve") {
-				if (!state.planPath) {
-					throw new Error("No active plan. Save a plan first.");
-				}
-
-				if (state.mode !== "plan") {
-					throw new Error(
-						`Approve only allowed in Plan Mode (current: ${state.mode}).`,
-					);
-				}
-
-				const nextState: WorkflowState = {
-					...state,
-					mode: "work",
-					workRunId: crypto.randomUUID(),
-				};
-
-				const result = await transitionWorkflowMode({
-					pi,
-					ctx,
-					sessionKey,
-					nextState,
-					getAgentDir,
-				});
-
-				if (!result.ok) {
-					throw new Error(result.reason);
-				}
-
-				const handoffMessage =
-					WORK_HANDOFF_RUNTIME_NOTICE +
-					"\n\n" +
-					WORK_PROMPT +
-					"\n\n" +
-					`已批准的计划在 ${result.state.planPath}. ` +
-					`请用 workflow_plan(action="read") 读取计划和当前 workflow_todo 列表，按 todo 顺序开始实现。`;
-
-				// Set session name for easier identification in /resume
-				pi.setSessionName(`work: ${result.state.planTitle ?? "Active Plan"}`);
-
-				pi.sendUserMessage(handoffMessage, { deliverAs: "followUp" });
-
-				return {
-					content: [
-						{
-							type: "text",
-							text:
-								`Plan approved. Work Mode runtime activated.\n` +
-								`Work run: ${result.state.workRunId!.slice(-8)}.\n` +
-								`A kick-off message has been queued. If it does not continue automatically, send a message to continue implementation. Do not call any more tools in this turn.`,
-						},
-					],
-					details: { state: result.state },
-					terminate: true,
-				};
+			if (!markdown) {
+				throw new Error("workflow_plan_save requires markdown.");
 			}
 
-			if (action === "read") {
-				if (!state.planPath) {
-					return {
-						content: [{ type: "text", text: "No active plan. Path: none." }],
-						details: { state },
-					};
-				}
-
-				const text = readPlan(ctx.cwd, state.planPath);
-
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Plan path: ${state.planPath}\n\n${text}`,
-						},
-					],
-					details: { state },
-				};
+			// Distinguish first save (new plan) vs revision save (update existing plan)
+			const isRevision = !!state.planPath;
+			if (isRevision) {
+				// Revision: update existing plan file in-place
+				updatePlan(ctx.cwd, state.planPath!, markdown);
+				state.planTitle = params.title ?? state.planTitle ?? "Active Plan";
+			} else {
+				// First save: create new plan file
+				const planPath = writeNewPlan(ctx.cwd, markdown);
+				state.planPath = planPath;
+				state.planTitle = params.title ?? "Active Plan";
+				state.planRunId = crypto.randomUUID();
 			}
 
-			if (action === "clear") {
-				const cleared: WorkflowState = {
-					workflowEnabled: state.workflowEnabled,
-					workflowExplicitlyDisabled: state.workflowExplicitlyDisabled,
-					mode: "idle",
-					todos: [],
-					hiddenDoneIds: [],
-				};
+			state.todos = [];
+			state.hiddenDoneIds = [];
+			saveState(ctx.cwd, sessionKey, state);
 
-				const result = await transitionWorkflowMode({
-					pi,
-					ctx,
-					sessionKey,
-					nextState: cleared,
-					getAgentDir,
-					applyRuntime: false,
-				});
+			// Set session name for easier identification in /resume
+			pi.setSessionName(`plan: ${state.planTitle ?? "Active Plan"}`);
 
-				const overlay = getWorkflowOverlay();
-				if (overlay) overlay.dispose();
-
-				return {
-					content: [{ type: "text", text: "Workflow state cleared." }],
-					details: { state: result.state },
-				};
+			const overlay = getWorkflowOverlay();
+			if (overlay) {
+				overlay.clearBookkeeping();
+				overlay.update(state.todos);
 			}
 
 			return {
-				content: [{ type: "text", text: "Unknown workflow_plan action." }],
+				content: [
+					{
+						type: "text",
+						text: isRevision
+							? `Plan updated at ${state.planPath}.`
+							: `Plan created at ${state.planPath}.`,
+					},
+				],
 				details: { state },
+			};
+		},
+	});
+}
+
+export function registerPlanApproveTool(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.registerTool({
+		name: "workflow_plan_approve",
+		label: "Approve Workflow Plan",
+		description: "Approve the active workflow plan for implementation.",
+		promptSnippet:
+			"workflow_plan_approve: approve the active plan for implementation.",
+		promptGuidelines: [
+			"Use workflow_plan_approve only after the user explicitly confirms the final plan.",
+		],
+		parameters: Type.Object({}),
+		renderResult: renderPlanToolResult,
+		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+			const denied = checkWorkflowEnabled(ctx, getAgentDir);
+			if (denied) return denied;
+
+			const sessionKey = getSessionKey(ctx.sessionManager);
+			const state = loadState(ctx.cwd, sessionKey);
+
+			if (state.mode !== "plan") {
+				throw new Error(
+					`workflow_plan_approve only allowed in Plan Mode (current: ${state.mode}).`,
+				);
+			}
+
+			if (!state.planPath) {
+				throw new Error("No active plan. Save a plan first.");
+			}
+
+			const nextState: WorkflowState = {
+				...state,
+				mode: "work",
+				workRunId: crypto.randomUUID(),
+			};
+
+			const result = await transitionWorkflowMode({
+				pi,
+				ctx,
+				sessionKey,
+				nextState,
+				getAgentDir,
+			});
+
+			if (!result.ok) {
+				throw new Error(result.reason);
+			}
+
+			const handoffMessage =
+				WORK_HANDOFF_RUNTIME_NOTICE +
+				"\n\n" +
+				WORK_PROMPT +
+				"\n\n" +
+				`已批准的计划在 ${result.state.planPath}. ` +
+				`请用 workflow_plan_read 读取计划和当前 workflow_todo 列表，按 todo 顺序开始实现。`;
+
+			// Set session name for easier identification in /resume
+			pi.setSessionName(`work: ${result.state.planTitle ?? "Active Plan"}`);
+
+			pi.sendUserMessage(handoffMessage, { deliverAs: "followUp" });
+
+			return {
+				content: [
+					{
+						type: "text",
+						text:
+							`Plan approved. Work Mode runtime activated.\n` +
+							`Work run: ${result.state.workRunId!.slice(-8)}.\n` +
+							`A kick-off message has been queued. If it does not continue automatically, send a message to continue implementation. Do not call any more tools in this turn.`,
+					},
+				],
+				details: { state: result.state },
+				terminate: true,
+			};
+		},
+	});
+}
+
+export function registerPlanClearTool(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.registerTool({
+		name: "workflow_plan_clear",
+		label: "Clear Workflow Plan",
+		description: "Clear workflow state and return to idle mode.",
+		promptSnippet: "workflow_plan_clear: clear workflow state.",
+		promptGuidelines: ["Use workflow_plan_clear to reset workflow state."],
+		parameters: Type.Object({}),
+		renderResult: renderPlanToolResult,
+		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+			const denied = checkWorkflowEnabled(ctx, getAgentDir);
+			if (denied) return denied;
+
+			const sessionKey = getSessionKey(ctx.sessionManager);
+			const state = loadState(ctx.cwd, sessionKey);
+
+			if (state.mode !== "plan") {
+				throw new Error(
+					`workflow_plan_clear only allowed in Plan Mode (current: ${state.mode}).`,
+				);
+			}
+
+			const cleared: WorkflowState = {
+				workflowEnabled: state.workflowEnabled,
+				workflowExplicitlyDisabled: state.workflowExplicitlyDisabled,
+				mode: "idle",
+				todos: [],
+				hiddenDoneIds: [],
+			};
+
+			const result = await transitionWorkflowMode({
+				pi,
+				ctx,
+				sessionKey,
+				nextState: cleared,
+				getAgentDir,
+				applyRuntime: false,
+			});
+
+			const overlay = getWorkflowOverlay();
+			if (overlay) overlay.dispose();
+
+			return {
+				content: [{ type: "text", text: "Workflow state cleared." }],
+				details: { state: result.state },
 			};
 		},
 	});
@@ -397,10 +463,15 @@ export function registerPlanReviewTool(
 			const denied = checkWorkflowEnabled(ctx, getAgentDir);
 			if (denied) return denied;
 
-			const config = loadConfig(ctx.cwd, getAgentDir());
-
 			// Read the active plan from file if available
 			const state = loadState(ctx.cwd, getSessionKey(ctx.sessionManager));
+			if (state.mode !== "plan") {
+				throw new Error(
+					`workflow_plan_review only allowed in Plan Mode (current: ${state.mode}).`,
+				);
+			}
+
+			const config = loadConfig(ctx.cwd, getAgentDir());
 			const planMarkdown = state.planPath
 				? readPlan(ctx.cwd, state.planPath)
 				: params.task;
@@ -572,12 +643,6 @@ export function registerCodeReviewTool(
 
 const _workflowToolsRegistered = new WeakSet<ExtensionAPI>();
 
-/** Check whether workflow tools have already been registered this session. */
-export function isWorkflowToolsRegistered(): boolean {
-	// Legacy compat — WeakSet is the source of truth now.
-	return false;
-}
-
 /**
  * Register all workflow tools (todo, plan, plan review, code review).
  * Idempotent per ExtensionAPI instance — skips if already registered.
@@ -592,7 +657,10 @@ export function registerAllWorkflowTools(
 	const config = loadConfig(cwd, getAgentDir());
 
 	registerTodoTool(pi, getAgentDir);
-	registerPlanTool(pi, getAgentDir);
+	registerPlanReadTool(pi, getAgentDir);
+	registerPlanSaveTool(pi, getAgentDir);
+	registerPlanApproveTool(pi, getAgentDir);
+	registerPlanClearTool(pi, getAgentDir);
 	if (config.planReview.enabled) registerPlanReviewTool(pi, getAgentDir);
 	if (config.codeReview.enabled) registerCodeReviewTool(pi, getAgentDir);
 

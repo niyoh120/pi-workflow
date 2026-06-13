@@ -94,7 +94,7 @@ pi-workflow/
 │       ├── paths.ts                  # 文件系统路径工具
 │       ├── config.ts                 # 配置加载与合并
 │       ├── defaults.ts               # 默认配置/状态常量
-│       ├── tools.ts                  # 工具注册（workflow_todo / workflow_plan / workflow_subagent）
+│       ├── tools.ts                  # 工具注册（workflow_todo / workflow_plan_* / review 工具）
 │       ├── commands.ts               # 命令注册（/plan /work /review /commit /wf-*）
 │       ├── sidecall.ts               # Plan Review sidecall（completeSimple 侧调用）
 │       ├── prompts.ts                # 提示词和审查指令
@@ -143,10 +143,10 @@ Workflow 命令和工具默认为 opt-in：普通 Pi 仅暴露 `/wf`，使用 `/
 
 ### 核心规则
 1. **状态持久化**: 每次状态变更必须调用 `saveState()` 写盘
-2. **计划批准先行**: Work Mode 前必须通过 `workflow_plan approve` 排队 handoff（`mode=workPending + pendingWorkHandoff`），由 `before_agent_start` 最终确认进入 Work Mode。Approval 以持久化状态（`mode`、`pendingWorkHandoff`、review status）为准，不依赖当前 turn 的 in-memory guard。除非 `/work` 跳过计划。
-3. **审查隔离**: Plan Review 使用 same-turn `completeSimple()` 侧调用（`workflow_subagent` 工具）；Code Review 使用 OCR CLI 独立进程
+2. **计划批准先行**: Work Mode 前必须通过 `workflow_plan_approve` 批准计划并立即切换到 Work Mode。Approval 以持久化状态（`mode`、`workRunId`）为准。除非 `/work` 跳过计划。
+3. **审查隔离**: Plan Review 使用 same-turn `completeSimple()` 侧调用（`workflow_plan_review` 工具）；Code Review 使用 OCR CLI 独立进程
 4. **Review 循环防死锁**: Review loop 计数器作用域为每次 trigger，非全局 session
-5. **Todo 管理**: 计划开始后通过 `workflow_todo` 跟踪每步进度，Work 完成后 todo 列表在 `workflow_plan save` 时自动清空
+5. **Todo 管理**: 计划开始后通过 `workflow_todo` 跟踪每步进度，Work 完成后 todo 列表在 `workflow_plan_save` 时自动清空
 6. **进度叠加层**: 非 idle 模式下显示 todo 进度 widget，所有任务完成后自动隐藏（保留已隐藏的任务 ID，避免跨计划残留）
 7. **会话无泄漏**: 同一项目目录下两个 Pi 进程使用独立状态路径，互不影响
 
