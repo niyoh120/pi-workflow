@@ -345,6 +345,9 @@ export function registerWfCommand(
 			state.mode = "explore";
 			saveState(ctx.cwd, sessionKey, state);
 
+			// Set session name for easier identification in /resume
+			pi.setSessionName("workflow: explore");
+
 			ctx.ui.notify("已进入 Workflow 模式（Explore）。正在重载扩展...", "info");
 			await ctx.reload();
 		},
@@ -460,6 +463,9 @@ export function registerPlanCommand(
 				return;
 			}
 
+			// Set session name for easier identification in /resume
+			pi.setSessionName("workflow: plan");
+
 			ctx.ui.notify(
 				"已进入 Plan Mode。直接描述需求；产出计划并确认后会自动转交 Work Mode。",
 				"info",
@@ -506,6 +512,11 @@ export function registerWorkCommand(
 				return;
 			}
 
+			const sessionName = workArgs
+				? `work: ${workArgs.slice(0, 40)}`
+				: "workflow: work";
+			pi.setSessionName(sessionName);
+
 			ctx.ui.notify("已进入 Work Mode。可以直接描述任务。", "info");
 
 			if (workArgs) {
@@ -536,9 +547,24 @@ export function registerReviewCommand(
 				return;
 			}
 
-			// 1. Show scope selector
+			// Non-TUI mode: provide text-based instructions
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify(
+					"Code review requires interactive mode (TUI). " +
+						"In RPC/JSON/print mode, please use workflow_code_review tool directly. " +
+						"Parameters: scope (workspace|range|commit), background, from, to, commit, preview.",
+					"info",
+				);
+				return;
+			}
+
+			// 1. Show scope selector (TUI only)
 			const scopeKind = await ctx.ui.custom<ReviewScope["kind"] | null>(
 				(_tui, theme, _kb, done) => scopeSelectorComponent(theme, done),
+				{
+					overlay: true,
+					overlayOptions: { anchor: "center", width: "60%", minWidth: 48 },
+				},
 			);
 			if (!scopeKind) {
 				ctx.ui.notify("Review cancelled: no scope selected.", "info");
@@ -560,6 +586,10 @@ export function registerReviewCommand(
 			if (scopeKind === "range") {
 				const values = await ctx.ui.custom<Record<string, string> | null>(
 					(_tui, theme, _kb, done) => scopeInputComponent("range", theme, done),
+					{
+						overlay: true,
+						overlayOptions: { anchor: "center", width: "60%", minWidth: 48 },
+					},
 				);
 				from = values?.from;
 				to = values?.to;
@@ -573,6 +603,10 @@ export function registerReviewCommand(
 				const values = await ctx.ui.custom<Record<string, string> | null>(
 					(_tui, theme, _kb, done) =>
 						scopeInputComponent("commit", theme, done),
+					{
+						overlay: true,
+						overlayOptions: { anchor: "center", width: "60%", minWidth: 48 },
+					},
 				);
 				commit = values?.commit;
 				if (!commit) {
@@ -635,6 +669,7 @@ Review scope: ${scopeDescription}
 7. Minor 问题按价值选择处理，不能阻塞 review 通过。`;
 
 			ctx.ui.notify(`Starting code review loop: ${scopeDescription}.`, "info");
+			pi.setSessionName(`review: ${scopeKind}`);
 			pi.sendUserMessage(promptText);
 		},
 	});

@@ -195,14 +195,16 @@ export function extractConversationSummary(_ctx: ExtensionContext): string {
  */
 export function buildToolInventory(pi: ExtensionAPI): string {
 	try {
-		const tools = pi.getAllTools();
+		// Use getActiveTools to get only currently active tools, not all registered tools
+		const tools = pi.getActiveTools();
 		if (!tools || tools.length === 0) return "";
 
-		const names: string[] = [];
-		for (const tool of tools) {
-			if (typeof tool === "string") names.push(tool);
-			else if (tool && typeof tool.name === "string") names.push(tool.name);
-		}
+		const names: string[] = tools
+			.map((tool: any) => {
+				if (typeof tool === "string") return tool;
+				return tool.name;
+			})
+			.filter((name: any) => typeof name === "string");
 
 		if (names.length === 0) return "";
 		return `\n# Executor Tool Inventory\n\nThe executor model has access to these tools: ${names.join(", ")}`;

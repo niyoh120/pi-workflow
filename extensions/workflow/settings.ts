@@ -33,9 +33,9 @@ import {
 	SelectList,
 	SettingsList,
 	fuzzyFilter,
-	getKeybindings,
 	truncateToWidth,
 	type Component,
+	type Focusable,
 	type SelectItem,
 	type SettingItem,
 } from "@earendil-works/pi-tui";
@@ -226,13 +226,13 @@ function readLayer(
 	return readGlobalConfigRaw(agentDir);
 }
 
-function writeLayer(
+async function writeLayer(
 	scope: Scope,
 	layer: Record<string, any>,
 	cwd: string,
 	agentDir: string,
 	sessionKey: string,
-): void {
+): Promise<void> {
 	if (scope === "session") {
 		const state = loadState(cwd, sessionKey);
 		state.sessionConfig =
@@ -243,10 +243,10 @@ function writeLayer(
 		return;
 	}
 	if (scope === "project") {
-		writeProjectConfigRaw(cwd, layer);
+		await writeProjectConfigRaw(cwd, layer);
 		return;
 	}
-	writeGlobalConfigRaw(agentDir, layer);
+	await writeGlobalConfigRaw(agentDir, layer);
 }
 
 // ── Display helpers ─────────────────────────────────────────────────────────
@@ -460,6 +460,7 @@ function makeModelPickerSubmenu({
 	effectiveProvider,
 	effectiveModel,
 	done,
+	keybindings,
 }: {
 	theme: Theme;
 	title: string;
@@ -469,7 +470,8 @@ function makeModelPickerSubmenu({
 	effectiveProvider: string;
 	effectiveModel: string;
 	done: (value?: string) => void;
-}): Component {
+	keybindings: { matches(data: string, binding: string): boolean };
+}): Component & Focusable {
 	const input = new Input();
 	const { items, error } = modelPickerItems(
 		modelRegistry,
@@ -505,7 +507,22 @@ function makeModelPickerSubmenu({
 	};
 	input.onEscape = () => done(undefined);
 
+	let focused = false;
+	const setInputFocused = (value: boolean) => {
+		focused = value;
+		if ("focused" in input) {
+			input.focused = value;
+		}
+		input.invalidate();
+	};
+
 	return {
+		get focused() {
+			return focused;
+		},
+		set focused(value: boolean) {
+			setInputFocused(value);
+		},
 		render: (w: number) => {
 			const lines: string[] = [
 				theme.fg("accent", theme.bold(title)),
@@ -551,7 +568,7 @@ function makeModelPickerSubmenu({
 		},
 		invalidate: () => undefined,
 		handleInput: (data: string) => {
-			const kb = getKeybindings();
+			const kb = keybindings;
 			if (kb.matches(data, "tui.select.up")) {
 				if (filteredItems.length > 0) {
 					selectedIndex =
@@ -671,13 +688,31 @@ export function registerWfSettingsCommand(
 			const agentDir = getAgentDir();
 			const sessionKey = ctxSessionKey(ctx);
 
+			// Non-TUI mode: provide text-based instructions
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify(
+					"Settings menu requires interactive mode (TUI). " +
+						"In RPC/JSON/print mode, please edit config files directly:\n" +
+						"  - Session: stored in session state\n" +
+						"  - Project: .pi/workflow/config.json\n" +
+						"  - Global: ~/.pi/agent/workflow/config.json",
+					"info",
+				);
+				return;
+			}
+
 			const changedScopes = new Set<Scope>();
 			const changedIds = new Set<string>();
+			const pendingWrites: Promise<void>[] = [];
 
 			// Loop: pick a scope, edit it, return to scope picker, until Esc.
 			while (true) {
 				const scope = await ctx.ui.custom<Scope | null>(
 					(_tui, theme, _kb, done) => scopeSelectorComponent(theme, done),
+					{
+						overlay: true,
+						overlayOptions: { anchor: "center", width: "60%", minWidth: 54 },
+					},
 				);
 				if (!scope) break;
 
@@ -694,189 +729,217 @@ export function registerWfSettingsCommand(
 					continue;
 				}
 
-				await ctx.ui.custom<void>((tui, theme, _kb, done) => {
-					// Session scope can only carry options that take live effect
-					// (models/thinking). Reload-sensitive flags gate load-time
-					// registration via the non-session layers, so hide them here.
-					const scopeDescriptors =
-						scope === "session"
-							? descriptors.filter((d) => !d.reloadSensitive)
-							: descriptors;
+				await ctx.ui.custom<void>(
+					(tui, theme, _kb, done) => {
+						// Session scope can only carry options that take live effect
+						// (models/thinking). Reload-sensitive flags gate load-time
+						// registration via the non-session layers, so hide them here.
+						const scopeDescriptors =
+							scope === "session"
+								? descriptors.filter((d) => !d.reloadSensitive)
+								: descriptors;
 
-					// Hoist single read of layer + effective — avoid per-item IO. Pre-flight
-					// above already guarded against corrupt files, so this is safe.
-					const initialLayer = readLayer(scope, cwd, agentDir, sessionKey);
-					const initialEffective = loadConfigForSession(
-						cwd,
-						agentDir,
-						sessionKey,
-					);
+						// Hoist single read of layer + effective — avoid per-item IO. Pre-flight
+						// above already guarded against corrupt files, so this is safe.
+						const initialLayer = readLayer(scope, cwd, agentDir, sessionKey);
+						const initialEffective = loadConfigForSession(
+							cwd,
+							agentDir,
+							sessionKey,
+						);
 
-					const items: SettingItem[] = scopeDescriptors.map((desc) => {
-						const item: SettingItem = {
-							id: desc.id,
-							label: desc.label,
-							description: descriptionFor(desc, initialEffective),
-							currentValue: currentDisplay(
-								desc,
-								initialLayer,
-								initialEffective,
-							),
-						};
-						const values = valuesFor(desc, initialEffective, ctx.modelRegistry);
-						if (values) {
-							item.values = values;
-						} else if (desc.kind === "model" && desc.role) {
-							item.submenu = (_cur, submenuDone) => {
-								const layer = readLayer(scope, cwd, agentDir, sessionKey);
-								const effective = loadConfigForSession(
-									cwd,
-									agentDir,
-									sessionKey,
-								);
-								const paths = modelPaths(desc.role!);
-								const rawProvider = getPath(layer, paths.provider);
-								const rawModel = getPath(layer, paths.model);
-								return makeModelPickerSubmenu({
-									theme,
-									title: desc.label,
-									modelRegistry: ctx.modelRegistry,
-									currentProvider:
-										typeof rawProvider === "string" ? rawProvider : undefined,
-									currentModel:
-										typeof rawModel === "string" ? rawModel : undefined,
-									effectiveProvider: formatVal(
-										getPath(effective, paths.provider),
-									),
-									effectiveModel: formatVal(getPath(effective, paths.model)),
-									done: submenuDone,
-								});
-							};
-						} else {
-							// String field → single-line input submenu.
-							item.submenu = (_cur, submenuDone) => {
-								const raw = getPath(
-									readLayer(scope, cwd, agentDir, sessionKey),
-									desc.path,
-								);
-								const initial = raw === undefined ? "" : String(raw);
-								return makeStringInputSubmenu(
-									theme,
-									desc.label,
-									initial,
-									submenuDone,
-								);
-							};
-						}
-						return item;
-					});
-
-					const refreshItems = () => {
-						const layer = readLayer(scope, cwd, agentDir, sessionKey);
-						const effective = loadConfigForSession(cwd, agentDir, sessionKey);
-						for (const item of items) {
-							const desc = byId.get(item.id);
-							if (!desc) continue;
-							item.currentValue = currentDisplay(desc, layer, effective);
-							item.description = descriptionFor(desc, effective);
-							if (desc.kind === "thinking" && desc.role) {
-								item.values = thinkingValuesFor(
+						const items: SettingItem[] = scopeDescriptors.map((desc) => {
+							const item: SettingItem = {
+								id: desc.id,
+								label: desc.label,
+								description: descriptionFor(desc, initialEffective),
+								currentValue: currentDisplay(
 									desc,
-									effective,
-									ctx.modelRegistry,
-								);
-							}
-						}
-					};
-
-					const onChange = (id: string, newValue: string) => {
-						const desc = byId.get(id);
-						if (!desc) return;
-						const layer = readLayer(scope, cwd, agentDir, sessionKey);
-						if (desc.kind === "string") {
-							const trimmed = newValue.trim();
-							if (trimmed === "") unsetPath(layer, desc.path);
-							else setPath(layer, desc.path, trimmed);
-						} else if (desc.kind === "model" && desc.role) {
-							const paths = modelPaths(desc.role);
-							if (newValue === INHERIT_MODEL_VALUE) {
-								unsetPath(layer, paths.provider);
-								unsetPath(layer, paths.model);
+									initialLayer,
+									initialEffective,
+								),
+							};
+							const values = valuesFor(
+								desc,
+								initialEffective,
+								ctx.modelRegistry,
+							);
+							if (values) {
+								item.values = values;
+							} else if (desc.kind === "model" && desc.role) {
+								item.submenu = (_cur, submenuDone) => {
+									const layer = readLayer(scope, cwd, agentDir, sessionKey);
+									const effective = loadConfigForSession(
+										cwd,
+										agentDir,
+										sessionKey,
+									);
+									const paths = modelPaths(desc.role!);
+									const rawProvider = getPath(layer, paths.provider);
+									const rawModel = getPath(layer, paths.model);
+									return makeModelPickerSubmenu({
+										theme,
+										title: desc.label,
+										modelRegistry: ctx.modelRegistry,
+										currentProvider:
+											typeof rawProvider === "string" ? rawProvider : undefined,
+										currentModel:
+											typeof rawModel === "string" ? rawModel : undefined,
+										effectiveProvider: formatVal(
+											getPath(effective, paths.provider),
+										),
+										effectiveModel: formatVal(getPath(effective, paths.model)),
+										done: submenuDone,
+										keybindings: _kb,
+									});
+								};
 							} else {
-								try {
-									const selected = decodeModelValue(newValue);
-									setPath(layer, paths.provider, selected.provider);
-									setPath(layer, paths.model, selected.model);
-								} catch (e) {
-									unsetPath(layer, paths.provider);
-									unsetPath(layer, paths.model);
-									ctx.ui.notify(
-										`Ignored invalid model selection: ${e instanceof Error ? e.message : String(e)}`,
-										"warning",
+								// String field → single-line input submenu.
+								item.submenu = (_cur, submenuDone) => {
+									const raw = getPath(
+										readLayer(scope, cwd, agentDir, sessionKey),
+										desc.path,
+									);
+									const initial = raw === undefined ? "" : String(raw);
+									return makeStringInputSubmenu(
+										theme,
+										desc.label,
+										initial,
+										submenuDone,
+									);
+								};
+							}
+							return item;
+						});
+
+						const refreshItems = () => {
+							const layer = readLayer(scope, cwd, agentDir, sessionKey);
+							const effective = loadConfigForSession(cwd, agentDir, sessionKey);
+							for (const item of items) {
+								const desc = byId.get(item.id);
+								if (!desc) continue;
+								item.currentValue = currentDisplay(desc, layer, effective);
+								item.description = descriptionFor(desc, effective);
+								if (desc.kind === "thinking" && desc.role) {
+									item.values = thinkingValuesFor(
+										desc,
+										effective,
+										ctx.modelRegistry,
 									);
 								}
 							}
-						} else if (desc.kind === "boolean") {
-							if (newValue === "inherit") unsetPath(layer, desc.path);
-							else setPath(layer, desc.path, newValue === "true");
-						} else {
-							// thinking
-							if (newValue === "inherit") unsetPath(layer, desc.path);
-							else setPath(layer, desc.path, newValue);
-						}
-						writeLayer(scope, layer, cwd, agentDir, sessionKey);
-						changedScopes.add(scope);
-						changedIds.add(id);
-						refreshItems();
-					};
+						};
 
-					const settingsList = new SettingsList(
-						items,
-						Math.min(items.length + 2, 16),
-						getSettingsListTheme(),
-						onChange,
-						() => done(undefined),
-						{ enableSearch: true },
-					);
+						const onChange = (id: string, newValue: string) => {
+							const desc = byId.get(id);
+							if (!desc) return;
+							const layer = readLayer(scope, cwd, agentDir, sessionKey);
+							if (desc.kind === "string") {
+								const trimmed = newValue.trim();
+								if (trimmed === "") unsetPath(layer, desc.path);
+								else setPath(layer, desc.path, trimmed);
+							} else if (desc.kind === "model" && desc.role) {
+								const paths = modelPaths(desc.role);
+								if (newValue === INHERIT_MODEL_VALUE) {
+									unsetPath(layer, paths.provider);
+									unsetPath(layer, paths.model);
+								} else {
+									try {
+										const selected = decodeModelValue(newValue);
+										setPath(layer, paths.provider, selected.provider);
+										setPath(layer, paths.model, selected.model);
+									} catch (e) {
+										unsetPath(layer, paths.provider);
+										unsetPath(layer, paths.model);
+										ctx.ui.notify(
+											`Ignored invalid model selection: ${e instanceof Error ? e.message : String(e)}`,
+											"warning",
+										);
+									}
+								}
+							} else if (desc.kind === "boolean") {
+								if (newValue === "inherit") unsetPath(layer, desc.path);
+								else setPath(layer, desc.path, newValue === "true");
+							} else {
+								// thinking
+								if (newValue === "inherit") unsetPath(layer, desc.path);
+								else setPath(layer, desc.path, newValue);
+							}
+							const writePromise = writeLayer(
+								scope,
+								layer,
+								cwd,
+								agentDir,
+								sessionKey,
+							)
+								.then(() => {
+									changedScopes.add(scope);
+									changedIds.add(id);
+									refreshItems();
+								})
+								.catch((e) => {
+									ctx.ui.notify(
+										`Failed to write workflow settings: ${e instanceof Error ? e.message : String(e)}`,
+										"error",
+									);
+								});
+							pendingWrites.push(writePromise);
+						};
 
-					const container = new Container();
-					container.addChild(
-						new DynamicBorder((s: string) => theme.fg("accent", s)),
-					);
-					container.addChild(
-						new Text(
-							theme.fg("accent", theme.bold(`Scope: ${SCOPE_LABELS[scope]}`)),
-							1,
-							0,
-						),
-					);
-					container.addChild(
-						new Text(
-							theme.fg(
-								"dim",
-								"type to search · enter/space change · esc back to scopes",
+						const settingsList = new SettingsList(
+							items,
+							Math.min(items.length + 2, 16),
+							getSettingsListTheme(),
+							onChange,
+							() => done(undefined),
+							{ enableSearch: true },
+						);
+
+						const container = new Container();
+						container.addChild(
+							new DynamicBorder((s: string) => theme.fg("accent", s)),
+						);
+						container.addChild(
+							new Text(
+								theme.fg("accent", theme.bold(`Scope: ${SCOPE_LABELS[scope]}`)),
+								1,
+								0,
 							),
-							1,
-							0,
-						),
-					);
-					container.addChild(new Spacer(1));
-					container.addChild(settingsList);
-					container.addChild(
-						new DynamicBorder((s: string) => theme.fg("accent", s)),
-					);
+						);
+						container.addChild(
+							new Text(
+								theme.fg(
+									"dim",
+									"type to search · enter/space change · esc back to scopes",
+								),
+								1,
+								0,
+							),
+						);
+						container.addChild(new Spacer(1));
+						container.addChild(settingsList);
+						container.addChild(
+							new DynamicBorder((s: string) => theme.fg("accent", s)),
+						);
 
-					return {
-						render: (w: number) =>
-							truncateRenderedLines(container.render(w), w),
-						invalidate: () => container.invalidate(),
-						handleInput: (data: string) => {
-							settingsList.handleInput(data);
-							tui.requestRender();
-						},
-					};
-				});
+						return {
+							render: (w: number) =>
+								truncateRenderedLines(container.render(w), w),
+							invalidate: () => container.invalidate(),
+							handleInput: (data: string) => {
+								settingsList.handleInput(data);
+								tui.requestRender();
+							},
+						};
+					},
+					{
+						overlay: true,
+						overlayOptions: { anchor: "center", width: "80%", minWidth: 72 },
+					},
+				);
 			}
+
+			await Promise.all(pendingWrites);
 
 			if (changedIds.size === 0) {
 				ctx.ui.notify("Workflow settings: no changes.", "info");

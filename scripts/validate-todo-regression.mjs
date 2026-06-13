@@ -905,8 +905,10 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"tools.ts: approve switches runtime before sending followUp",
 	);
 	assert(
-		/if\s*\(\s*!result\.ok\s*\)[\s\S]*?isError:\s*true/.test(approveBlock),
-		"tools.ts: approve returns isError when runtime transition fails",
+		/if\s*\(\s*!result\.ok\s*\)[\s\S]*?throw\s+new\s+Error\(result\.reason\)/.test(
+			approveBlock,
+		),
+		"tools.ts: approve throws when runtime transition fails",
 	);
 	assert(
 		approveBlock.includes("WORK_HANDOFF_RUNTIME_NOTICE") &&

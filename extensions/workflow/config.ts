@@ -4,6 +4,7 @@ import type { WorkflowConfig, WorkflowConfigOverride } from "./types.js";
 import { DEFAULT_CONFIG } from "./defaults.js";
 import { globalConfigPath, configPath, ensureWorkflowDir } from "./paths.js";
 import { loadState } from "./state.js";
+import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 
 /** Keys that must never be merged — prevents prototype pollution from
  *  untrusted config files / session state. */
@@ -33,16 +34,12 @@ export function deepMerge<T>(base: T, override: Partial<T>): T {
 	return output;
 }
 
-/** Load merged config: DEFAULT ← global ← project ← session override.
- *  The optional sessionOverride is the highest-priority layer (used by
- *  /wf-settings Session scope). */
-export function loadConfig(
+function loadConfigInternal(
 	cwd: string,
 	agentDir: string,
-	sessionOverride?: WorkflowConfigOverride,
+	sessionOverride: WorkflowConfigOverride | undefined,
+	options: { includeProject: boolean },
 ): WorkflowConfig {
-	ensureWorkflowDir(cwd);
-
 	let merged = { ...DEFAULT_CONFIG };
 
 	// Layer global config
@@ -56,14 +53,16 @@ export function loadConfig(
 		}
 	}
 
-	// Layer project config
-	const ppath = configPath(cwd);
-	if (fs.existsSync(ppath)) {
-		try {
-			const projectCfg = JSON.parse(fs.readFileSync(ppath, "utf8"));
-			merged = deepMerge(merged, projectCfg);
-		} catch (e) {
-			console.error(`Warning: Could not parse project config ${ppath}: ${e}`);
+	// Layer project config only when project trust allows it.
+	if (options.includeProject) {
+		const ppath = configPath(cwd);
+		if (fs.existsSync(ppath)) {
+			try {
+				const projectCfg = JSON.parse(fs.readFileSync(ppath, "utf8"));
+				merged = deepMerge(merged, projectCfg);
+			} catch (e) {
+				console.error(`Warning: Could not parse project config ${ppath}: ${e}`);
+			}
 		}
 	}
 
@@ -76,9 +75,24 @@ export function loadConfig(
 
 	// Normalize: strip stale fields from old configs (e.g. the removed
 	// subagent section, old planReview.maxLoops/codeReview.maxLoops/codeReview.auto).
-	merged = normalizeConfig(merged);
+	return normalizeConfig(merged);
+}
 
-	return merged;
+/** Load merged config: DEFAULT ← global ← project ← session override.
+ *  The optional sessionOverride is the highest-priority layer (used by
+ *  /wf-settings Session scope).
+ *
+ *  NOTE: This is a read-only operation. It does NOT create directories.
+ *  For write operations, use writeProjectConfigRaw/writeGlobalConfigRaw
+ *  which handle directory creation. */
+export function loadConfig(
+	cwd: string,
+	agentDir: string,
+	sessionOverride?: WorkflowConfigOverride,
+): WorkflowConfig {
+	return loadConfigInternal(cwd, agentDir, sessionOverride, {
+		includeProject: true,
+	});
 }
 
 /** Load merged config including this session's override layer.
@@ -95,6 +109,29 @@ export function loadConfigForSession(
 	} catch {
 		sessionOverride = undefined;
 	}
+	return loadConfig(cwd, agentDir, sessionOverride);
+}
+
+/** Load config with Project Trust awareness.
+ *  When ctx.isProjectTrusted() returns true, loads all config layers.
+ *  When ctx is not trusted or not provided, falls back to DEFAULT + global only.
+ *  This prevents untrusted project config from being loaded at startup. */
+export function loadConfigIfTrusted(
+	cwd: string,
+	agentDir: string,
+	ctx?: { isProjectTrusted?: () => boolean },
+	sessionOverride?: WorkflowConfigOverride,
+): WorkflowConfig {
+	// Check project trust if ctx is provided
+	if (ctx && typeof ctx.isProjectTrusted === "function") {
+		const isTrusted = ctx.isProjectTrusted();
+		if (!isTrusted) {
+			return loadConfigInternal(cwd, agentDir, sessionOverride, {
+				includeProject: false,
+			});
+		}
+	}
+	// Trusted or no ctx: load full config as before
 	return loadConfig(cwd, agentDir, sessionOverride);
 }
 
@@ -179,20 +216,26 @@ export function readGlobalConfigRaw(agentDir: string): Record<string, any> {
 }
 
 /** Atomically write the raw project config layer. */
-export function writeProjectConfigRaw(
+export async function writeProjectConfigRaw(
 	cwd: string,
 	layer: Record<string, any>,
-): void {
+): Promise<void> {
 	ensureWorkflowDir(cwd);
-	writeRawJsonAtomic(configPath(cwd), layer);
+	const filePath = configPath(cwd);
+	await withFileMutationQueue(filePath, async () => {
+		writeRawJsonAtomic(filePath, layer);
+	});
 }
 
 /** Atomically write the raw global config layer. */
-export function writeGlobalConfigRaw(
+export async function writeGlobalConfigRaw(
 	agentDir: string,
 	layer: Record<string, any>,
-): void {
-	writeRawJsonAtomic(globalConfigPath(agentDir), layer);
+): Promise<void> {
+	const filePath = globalConfigPath(agentDir);
+	await withFileMutationQueue(filePath, async () => {
+		writeRawJsonAtomic(filePath, layer);
+	});
 }
 
 function readRawJson(filePath: string): Record<string, any> {

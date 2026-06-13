@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import crypto from "node:crypto";
 import {
@@ -30,6 +31,10 @@ import {
 /**
  * Check whether workflow is enabled for the current session.
  * Returns an error result if disabled, null if enabled.
+ *
+ * NOTE: This returns an error result rather than throwing because
+ * it's a business precondition check (permission denied style).
+ * The caller decides how to handle this non-error case.
  */
 function checkWorkflowEnabled(
 	ctx: any,
@@ -123,13 +128,7 @@ export function registerTodoTool(
 
 			if (params.action === "add") {
 				if (!params.title) {
-					return {
-						isError: true,
-						content: [
-							{ type: "text", text: "workflow_todo add requires title." },
-						],
-						details: { todos: state.todos },
-					};
+					throw new Error("workflow_todo add requires title.");
 				}
 
 				state.todos.push({
@@ -143,11 +142,7 @@ export function registerTodoTool(
 			if (params.action === "set") {
 				const item = state.todos.find((todo) => todo.id === params.id);
 				if (!item) {
-					return {
-						isError: true,
-						content: [{ type: "text", text: `Todo not found: ${params.id}` }],
-						details: { todos: state.todos },
-					};
+					throw new Error(`Todo not found: ${params.id}`);
 				}
 
 				if (params.title) item.title = params.title;
@@ -191,6 +186,20 @@ export function registerPlanTool(
 			title: Type.Optional(Type.String()),
 			markdown: Type.Optional(Type.String()),
 		}),
+		renderResult(result: any, _options: any, theme: any) {
+			const state = result.details?.state as WorkflowState | undefined;
+			const planPath = state?.planPath;
+			const text = Array.isArray(result.content)
+				? result.content
+						.filter((block: any) => block?.type === "text")
+						.map((block: any) => block.text)
+						.join("\n")
+				: "";
+			const header = planPath
+				? `${theme.fg("accent", theme.bold("Plan"))}: ${theme.fg("muted", planPath)}\n\n`
+				: "";
+			return new Text(header + text, 0, 0);
+		},
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const denied = checkWorkflowEnabled(ctx, getAgentDir);
 			if (denied) return denied;
@@ -201,13 +210,7 @@ export function registerPlanTool(
 
 			if (action === "save") {
 				if (!params.markdown) {
-					return {
-						isError: true,
-						content: [
-							{ type: "text", text: "workflow_plan save requires markdown." },
-						],
-						details: { state },
-					};
+					throw new Error("workflow_plan save requires markdown.");
 				}
 
 				// Distinguish first save (new plan) vs revision save (update existing plan)
@@ -227,6 +230,9 @@ export function registerPlanTool(
 				state.todos = [];
 				state.hiddenDoneIds = [];
 				saveState(ctx.cwd, sessionKey, state);
+
+				// Set session name for easier identification in /resume
+				pi.setSessionName(`plan: ${state.planTitle ?? "Active Plan"}`);
 
 				const overlay = getWorkflowOverlay();
 				if (overlay) {
@@ -249,26 +255,13 @@ export function registerPlanTool(
 
 			if (action === "approve") {
 				if (!state.planPath) {
-					return {
-						isError: true,
-						content: [
-							{ type: "text", text: "No active plan. Save a plan first." },
-						],
-						details: { state },
-					};
+					throw new Error("No active plan. Save a plan first.");
 				}
 
 				if (state.mode !== "plan") {
-					return {
-						isError: true,
-						content: [
-							{
-								type: "text",
-								text: `Approve only allowed in Plan Mode (current: ${state.mode}).`,
-							},
-						],
-						details: { state },
-					};
+					throw new Error(
+						`Approve only allowed in Plan Mode (current: ${state.mode}).`,
+					);
 				}
 
 				const nextState: WorkflowState = {
@@ -286,11 +279,7 @@ export function registerPlanTool(
 				});
 
 				if (!result.ok) {
-					return {
-						isError: true,
-						content: [{ type: "text", text: result.reason }],
-						details: { state: result.state },
-					};
+					throw new Error(result.reason);
 				}
 
 				const handoffMessage =
@@ -300,6 +289,9 @@ export function registerPlanTool(
 					"\n\n" +
 					`已批准的计划在 ${result.state.planPath}. ` +
 					`请用 workflow_plan(action="read") 读取计划和当前 workflow_todo 列表，按 todo 顺序开始实现。`;
+
+				// Set session name for easier identification in /resume
+				pi.setSessionName(`work: ${result.state.planTitle ?? "Active Plan"}`);
 
 				pi.sendUserMessage(handoffMessage, { deliverAs: "followUp" });
 
@@ -414,16 +406,9 @@ export function registerPlanReviewTool(
 				: params.task;
 
 			if (!planMarkdown) {
-				return {
-					isError: true,
-					content: [
-						{
-							type: "text",
-							text: "No plan content to review. Save a plan first or provide task text.",
-						},
-					],
-					details: {},
-				};
+				throw new Error(
+					"No plan content to review. Save a plan first or provide task text.",
+				);
 			}
 
 			const extraContext = [
@@ -497,19 +482,11 @@ export function registerCodeReviewTool(
 
 			// Validate OCR availability
 			if (!checkOcrAvailable(OCR_BINARY)) {
-				return {
-					isError: true,
-					content: [
-						{
-							type: "text",
-							text:
-								`ocr CLI not found. ` +
-								"Install alibaba/open-code-review: npm i -g @alibaba-group/open-code-review\n" +
-								"Then configure LLM with ocr config set llm.url / llm.auth_token / llm.model.",
-						},
-					],
-					details: {},
-				};
+				throw new Error(
+					"ocr CLI not found. " +
+						"Install alibaba/open-code-review: npm i -g @alibaba-group/open-code-review\n" +
+						"Then configure LLM with ocr config set llm.url / llm.auth_token / llm.model.",
+				);
 			}
 
 			// Validate required fields per scope
@@ -522,42 +499,17 @@ export function registerCodeReviewTool(
 			const preview = params.preview as boolean | undefined;
 
 			if (!background || !background.trim()) {
-				return {
-					isError: true,
-					content: [
-						{
-							type: "text",
-							text: "workflow_code_review requires a non-empty background describing task context and review focus.",
-						},
-					],
-					details: {},
-				};
+				throw new Error(
+					"workflow_code_review requires a non-empty background describing task context and review focus.",
+				);
 			}
 
 			if (scope === "range" && (!from || !to)) {
-				return {
-					isError: true,
-					content: [
-						{
-							type: "text",
-							text: "scope=range requires both from and to refs.",
-						},
-					],
-					details: {},
-				};
+				throw new Error("scope=range requires both from and to refs.");
 			}
 
 			if (scope === "commit" && !commit) {
-				return {
-					isError: true,
-					content: [
-						{
-							type: "text",
-							text: "scope=commit requires a commit hash.",
-						},
-					],
-					details: {},
-				};
+				throw new Error("scope=commit requires a commit hash.");
 			}
 
 			// Build argv and execute
@@ -604,21 +556,13 @@ export function registerCodeReviewTool(
 					typeof err === "object" && err !== null && "stderr" in err
 						? (err as { stderr?: unknown }).stderr
 						: "";
-				return {
-					isError: true,
-					content: [
-						{
-							type: "text",
-							text:
-								`ocr review failed.\n\n` +
-								`Command: ${cmdSummary}\n` +
-								`Error: ${errMsg}\n` +
-								`stderr: ${String(stderr).slice(0, 2000)}\n\n` +
-								`Check ocr config and LLM connectivity: ocr llm test`,
-						},
-					],
-					details: { command: cmdSummary, error: errMsg },
-				};
+				throw new Error(
+					`ocr review failed.\n\n` +
+						`Command: ${cmdSummary}\n` +
+						`Error: ${errMsg}\n` +
+						`stderr: ${String(stderr).slice(0, 2000)}\n\n` +
+						`Check ocr config and LLM connectivity: ocr llm test`,
+				);
 			}
 		},
 	});

@@ -15,7 +15,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadState, getSessionKey } from "./state.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, loadConfigIfTrusted } from "./config.js";
 import { setWorkflowStatus } from "./mode.js";
 import type { Mode } from "./types.js";
 import { WorkflowTodoOverlay, setWorkflowOverlay } from "./todo-overlay.js";
@@ -69,7 +69,12 @@ function registerWorkflowSessionStartStatus(
 					(ctx as any).sessionManager?.getSessionFile?.() ?? null,
 			});
 			const state = loadState((ctx as any).cwd, sessionKey);
-			const config = loadConfig((ctx as any).cwd, getAgentDir());
+			// Use trust-aware config loading in session context
+			const config = loadConfigIfTrusted(
+				(ctx as any).cwd,
+				getAgentDir(),
+				ctx as any,
+			);
 			const workflowActive =
 				(state.workflowEnabled || config.workflow.autoEnter) &&
 				!state.workflowExplicitlyDisabled;
