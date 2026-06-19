@@ -53,6 +53,7 @@ import type { WorkflowConfig } from "./types.js";
 // ── Scopes ────────────────────────────────────────────────────────────────
 
 type Scope = "session" | "project" | "global";
+type ScopeAction = Scope | "reset-session" | "reset-project";
 
 const SCOPE_LABELS: Record<Scope, string> = {
 	session: "Session (this Pi process)",
@@ -255,6 +256,20 @@ function formatVal(v: any): string {
 	if (typeof v === "boolean") return v ? "true" : "false";
 	if (v === undefined || v === null) return "(none)";
 	return String(v);
+}
+
+function descriptorHasValue(
+	desc: SettingDescriptor,
+	layer: Record<string, any>,
+): boolean {
+	if (desc.kind === "model" && desc.role) {
+		const paths = modelPaths(desc.role);
+		return (
+			getPath(layer, paths.provider) !== undefined ||
+			getPath(layer, paths.model) !== undefined
+		);
+	}
+	return getPath(layer, desc.path) !== undefined;
 }
 
 function valuesFor(
@@ -606,9 +621,19 @@ const SCOPE_ITEMS: SelectItem[] = [
 			"Highest priority. Stored in session state. Applies immediately to this Pi process.",
 	},
 	{
+		value: "reset-session",
+		label: "Reset Session",
+		description: "Clear session overrides so this Pi process inherits project/global/default settings.",
+	},
+	{
 		value: "project",
 		label: "Project (.pi/workflow/config.json)",
 		description: "Shared with the project. Overrides global.",
+	},
+	{
+		value: "reset-project",
+		label: "Reset Project",
+		description: "Clear project overrides so this project inherits global/default settings.",
 	},
 	{
 		value: "global",
@@ -619,7 +644,7 @@ const SCOPE_ITEMS: SelectItem[] = [
 
 function scopeSelectorComponent(
 	theme: Theme,
-	done: (value: Scope | null) => void,
+	done: (value: ScopeAction | null) => void,
 ) {
 	const container = new Container();
 	container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
@@ -640,7 +665,9 @@ function scopeSelectorComponent(
 		if (
 			item.value === "session" ||
 			item.value === "project" ||
-			item.value === "global"
+			item.value === "global" ||
+			item.value === "reset-session" ||
+			item.value === "reset-project"
 		) {
 			done(item.value);
 		} else {
@@ -707,14 +734,54 @@ export function registerWfSettingsCommand(
 
 			// Loop: pick a scope, edit it, return to scope picker, until Esc.
 			while (true) {
-				const scope = await ctx.ui.custom<Scope | null>(
+				const action = await ctx.ui.custom<ScopeAction | null>(
 					(_tui, theme, _kb, done) => scopeSelectorComponent(theme, done),
 					{
 						overlay: true,
 						overlayOptions: { anchor: "center", width: "60%", minWidth: 54 },
 					},
 				);
-				if (!scope) break;
+				if (!action) break;
+
+				let resetScope: Scope | undefined;
+				if (action === "reset-session") {
+					resetScope = "session";
+				} else if (action === "reset-project") {
+					resetScope = "project";
+				}
+				if (resetScope) {
+					try {
+						const layer = readLayer(resetScope, cwd, agentDir, sessionKey);
+						if (Object.keys(layer).length === 0) {
+							ctx.ui.notify(
+								`Workflow settings: ${resetScope} scope already inherits its parent.`,
+								"info",
+							);
+							continue;
+						}
+						const resetDescriptors =
+							resetScope === "session"
+								? descriptors.filter((d) => !d.reloadSensitive)
+								: descriptors;
+						for (const desc of resetDescriptors) {
+							if (descriptorHasValue(desc, layer)) changedIds.add(desc.id);
+						}
+						await writeLayer(resetScope, {}, cwd, agentDir, sessionKey);
+						changedScopes.add(resetScope);
+						ctx.ui.notify(
+							`Workflow settings: reset ${resetScope} scope to inherit.`,
+							"info",
+						);
+					} catch (e) {
+						ctx.ui.notify(
+							`Cannot reset ${resetScope} scope: ${e instanceof Error ? e.message : String(e)}`,
+							"error",
+						);
+					}
+					continue;
+				}
+
+				const scope = action as Scope;
 
 				// Pre-flight the layer read so a corrupt config.json surfaces a
 				// friendly message instead of crashing the editor (and prevents
@@ -941,7 +1008,7 @@ export function registerWfSettingsCommand(
 
 			await Promise.all(pendingWrites);
 
-			if (changedIds.size === 0) {
+			if (changedScopes.size === 0) {
 				ctx.ui.notify("Workflow settings: no changes.", "info");
 				return;
 			}

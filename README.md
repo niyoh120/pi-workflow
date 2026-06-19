@@ -163,12 +163,15 @@ It is always available, even before you run `/wf` (so you can set
 
 Flow:
 
-1. Pick a scope: **Session**, **Project**, or **Global** (or **Done** to close).
+1. Pick a scope: **Session**, **Project**, **Global**, **Reset Session**, or **Reset Project** (or **Done** to close).
 2. Edit options in a searchable list:
    - `models.<role>.provider` / `models.<role>.model` — free-text input (clear the field to inherit).
    - `models.<role>.thinking` — cycle through `inherit / off / minimal / low / medium / high / xhigh`.
    - `workflow.autoEnter`, `planReview.enabled`, `codeReview.enabled` — toggle through `inherit / true / false` (**Project / Global scopes only**, see below).
 3. Press Esc to return to the scope picker; pick **Done** to finish.
+
+**Reset Session** clears this Pi process's session overrides so it inherits Project / Global / default settings.
+**Reset Project** clears `.pi/workflow/config.json` so the project inherits Global / default settings.
 
 Each row shows what the selected scope contributes on the right and the merged
 **effective** value in its description, so inherited values are easy to spot.
