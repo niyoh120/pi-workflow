@@ -45,4 +45,5 @@ export const DEFAULT_STATE: WorkflowState = {
 	mode: "idle",
 	todos: [],
 	hiddenDoneIds: [],
+	grillTurns: [],
 };

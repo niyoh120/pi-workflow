@@ -78,18 +78,25 @@ export const PLAN_PROMPT = `
 4. 如果需求已经足够清楚，不要为了流程继续追问。
 5. 提出 2-3 个方案，说明取舍。
 6. 推荐一个最小可行方案，避免过度设计。
-7. ⭐ 在产出最终计划之前，必须询问用户当前讨论是否充分。使用 ask_user_question（如可用）或普通文本提问："讨论是否充分，是否可以开始写最终计划？"（推荐选项示例：开始写计划 / 先补充讨论）。
+7. ⭐ Grilling 阶段（无情拷问）：基于推荐方案遍历设计树的关键决策点（边界条件、错误处理、依赖选择、兼容性、测试策略、性能与安全等），逐个拷问。
+   - 一次只问一个问题。每问一题，先给出你的推荐答案。
+   - 能通过探索代码库回答的问题（查现有实现、工具 API、约定），就直接查代码库，不要问用户。
+   - 每个决策解决后，立即调用 workflow_grill_record 记录：question / recommendedAnswer / userAnswer / decisionStatus / notes。落盘是强制义务，不要在没有记录的情况下推进下一题。
+   - 沿设计树各分支逐个 resolve，不要堆问题。
+   - 用户随时可以说“开始写计划”提前结束 grilling；需求极简或用户明确拒绝时可跳过本阶段。
+8. ⭐ 在产出最终计划之前，必须询问用户当前讨论是否充分。使用 ask_user_question（如可用）或普通文本提问：“讨论是否充分，是否可以开始写最终计划？”（推荐选项示例：开始写计划 / 先补充讨论）。
    - 🚫 不要把普通澄清回复或方案确认当作写最终计划的许可。必须用户明确确认讨论充分后，才进入下一步。
    - 用户确认讨论充分后，进入下一步产出最终计划。
-8. 产出最终计划。最终计划必须包含：
+9. 产出最终计划。最终计划必须包含：
    - 目标
    - 推荐方案
    - 明确修改点
    - 3-8 个可执行 todo
    - 测试计划
    - 风险和回滚点
-9. 最终计划产出后，必须调用 workflow_plan_save 保存计划，并调用 workflow_todo(action="reset") 写入 todo。
-10. 保存后必须在回复中明确展示计划文件路径（例如 "Plan saved to .pi/workflow/plan/plan-xxx.md"），方便用户查看。
+   - 把 grilling 阶段的关键决策融入最终计划（可单列“## Key Decisions”或融入对应 section）。
+10. 最终计划产出后，必须调用 workflow_plan_save 保存计划，并调用 workflow_todo(action="reset") 写入 todo（plan_save 会同时清空 grillTurns）。
+11. 保存后必须在回复中明确展示计划文件路径（例如 "Plan saved to .pi/workflow/plan/plan-xxx.md"），方便用户查看。
 
 ## Plan Review（可选工具）
 
@@ -110,10 +117,10 @@ export const PLAN_PROMPT = `
 - 当 ask_user_question 工具可用时，必须使用结构化确认，选项为：批准执行 / 继续修改计划。
 - 工具不可用时，用普通文本请求用户明确确认执行。
 
-11. 用户明确确认"执行 / 可以 / approved / go / 按计划做"，或在 ask_user_question 中选择"批准执行"后，调用 workflow_plan_approve。
+12. 用户明确确认"执行 / 可以 / approved / go / 按计划做"，或在 ask_user_question 中选择"批准执行"后，调用 workflow_plan_approve。
    - 调用 approve 时必须单独调用，不要在同一批次调用任何其他工具。
    - approve 会结束当前 turn，并在下一 turn 自动进入 Work Mode；调用后不要继续输出、不要尝试实现。
-12. 不要在 Plan Mode 里实现代码。
+13. 不要在 Plan Mode 里实现代码。
 
 最终计划建议格式：
 

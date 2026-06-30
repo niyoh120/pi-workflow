@@ -273,6 +273,7 @@ export function registerPlanSaveTool(
 
 			state.todos = [];
 			state.hiddenDoneIds = [];
+			state.grillTurns = [];
 			saveState(ctx.cwd, sessionKey, state);
 
 			// Set session name for easier identification in /resume
@@ -410,6 +411,7 @@ export function registerPlanClearTool(
 				mode: "idle",
 				todos: [],
 				hiddenDoneIds: [],
+				grillTurns: [],
 			};
 
 			const result = await transitionWorkflowMode({
@@ -427,6 +429,92 @@ export function registerPlanClearTool(
 			return {
 				content: [{ type: "text", text: "Workflow state cleared." }],
 				details: { state: result.state },
+			};
+		},
+	});
+}
+
+// ── workflow_grill_record tool (grilling 阶段决策落盘) ───────
+
+const GrillDecisionStatusSchema = StringEnum([
+	"resolved",
+	"open",
+	"needs-codebase-check",
+] as const);
+
+export function registerGrillRecordTool(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.registerTool({
+		name: "workflow_grill_record",
+		label: "Grill Record Turn",
+		description:
+			"Record one grilling decision during Plan Mode: a single question, its recommended answer, the user answer, and decision status.",
+		promptSnippet:
+			"workflow_grill_record: record a single grilling decision (one question at a time).",
+		promptGuidelines: [
+			"Use workflow_grill_record after each grilling question is resolved or answered.",
+			"Do NOT record more than one question per call.",
+			"When a question can be answered by exploring the codebase, explore it instead of asking the user.",
+		],
+		parameters: Type.Object({
+			question: Type.String({
+				description: "The exact question asked, one question only.",
+			}),
+			recommendedAnswer: Type.String({
+				description: "The assistant's recommended answer to the question.",
+			}),
+			userAnswer: Type.Optional(
+				Type.String({ description: "The user's answer, if already provided." }),
+			),
+			decisionStatus: GrillDecisionStatusSchema,
+			notes: Type.Optional(
+				Type.String({
+					description: "Short rationale, dependency, or follow-up note.",
+				}),
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const denied = checkWorkflowEnabled(ctx, getAgentDir);
+			if (denied) return denied;
+
+			const sessionKey = getSessionKey(ctx.sessionManager);
+			const state = loadState(ctx.cwd, sessionKey);
+
+			if (state.mode !== "plan") {
+				throw new Error(
+					`workflow_grill_record only allowed in Plan Mode (current: ${state.mode}).`,
+				);
+			}
+
+			state.grillTurns.push({
+				question: params.question,
+				recommendedAnswer: params.recommendedAnswer,
+				userAnswer: params.userAnswer as string | undefined,
+				decisionStatus: params.decisionStatus as
+					| "resolved"
+					| "open"
+					| "needs-codebase-check",
+				notes: params.notes as string | undefined,
+			});
+			saveState(ctx.cwd, sessionKey, state);
+
+			const summary = state.grillTurns
+				.map(
+					(t, i) =>
+						`${i + 1}. [${t.decisionStatus}] ${t.question}`,
+				)
+				.join("\n");
+
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Recorded grill turn #${state.grillTurns.length} (status: ${params.decisionStatus}).\n\n${summary || "(no turns yet)"}`,
+					},
+				],
+				details: { count: state.grillTurns.length, grillTurns: state.grillTurns },
 			};
 		},
 	});
@@ -661,6 +749,7 @@ export function registerAllWorkflowTools(
 	registerPlanSaveTool(pi, getAgentDir);
 	registerPlanApproveTool(pi, getAgentDir);
 	registerPlanClearTool(pi, getAgentDir);
+	registerGrillRecordTool(pi, getAgentDir);
 	if (config.planReview.enabled) registerPlanReviewTool(pi, getAgentDir);
 	if (config.codeReview.enabled) registerCodeReviewTool(pi, getAgentDir);
 

@@ -65,6 +65,26 @@ export function normalizeState(raw: unknown): WorkflowState {
 					(id: any) => typeof id === "string",
 				)
 			: [],
+		grillTurns: Array.isArray(obj.grillTurns)
+			? (obj.grillTurns as Array<WorkflowState["grillTurns"][number]>)
+					.filter((t: any) => t && typeof t === "object")
+					.map((t: any) => ({
+						question: typeof t.question === "string" ? t.question : "",
+						recommendedAnswer:
+							typeof t.recommendedAnswer === "string"
+								? t.recommendedAnswer
+								: "",
+						userAnswer:
+							typeof t.userAnswer === "string" ? t.userAnswer : undefined,
+						decisionStatus:
+							t.decisionStatus === "resolved" ||
+							t.decisionStatus === "open" ||
+							t.decisionStatus === "needs-codebase-check"
+								? t.decisionStatus
+								: "open",
+						notes: typeof t.notes === "string" ? t.notes : undefined,
+					}))
+			: [],
 		// Preserve session config overrides as a plain object, stripping any
 		// dangerous keys (__proto__/constructor/prototype) so a corrupt or
 		// malicious state file can't pollute prototypes during later deepMerge.

@@ -12,6 +12,7 @@ export const WORKFLOW_GATED_TOOLS = [
 	"workflow_plan_save",
 	"workflow_plan_approve",
 	"workflow_plan_clear",
+	"workflow_grill_record",
 	"workflow_plan_review",
 	"workflow_code_review",
 ] as const;
@@ -24,6 +25,7 @@ const PLAN_WORKFLOW_TOOL_NAMES = [
 	"workflow_plan_save",
 	"workflow_plan_approve",
 	"workflow_plan_clear",
+	"workflow_grill_record",
 ];
 
 const WORK_WORKFLOW_TOOL_NAMES = ["workflow_todo", "workflow_plan_read"];

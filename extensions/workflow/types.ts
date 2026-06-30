@@ -15,6 +15,21 @@ export interface TodoItem {
 	notes?: string;
 }
 
+/** Grilling 决策状态 — grill-me 式拷问阶段每题的落盘记录。 */
+export type GrillDecisionStatus =
+	| "resolved"
+	| "open"
+	| "needs-codebase-check";
+
+/** 单次拷问记录：一个问题 + 推荐答案 + 用户答案 + 决策状态。 */
+export interface GrillTurn {
+	question: string;
+	recommendedAnswer: string;
+	userAnswer?: string;
+	decisionStatus: GrillDecisionStatus;
+	notes?: string;
+}
+
 export interface ModelSpec {
 	provider: string;
 	model: string;
@@ -67,6 +82,8 @@ export interface WorkflowState {
 	todos: TodoItem[];
 	/** IDs of completed todos that have been hidden from the overlay. */
 	hiddenDoneIds: string[];
+	/** Plan Mode grilling 阶段记录的设计决策拷问序列。 */
+	grillTurns: GrillTurn[];
 	/**
 	 * Session-scoped config overrides — highest-priority config layer.
 	 * Merged on top of DEFAULT ← global ← project when resolving config for
