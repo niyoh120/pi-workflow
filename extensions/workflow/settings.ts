@@ -12,7 +12,9 @@
  *
  * The editor mutates only the values explicitly stored in the selected scope
  * (a raw partial layer). Each row shows that layer's contribution on the right;
- * inherited rows show "inherit" plus the effective merged value.
+ * inherited rows show the scope-specific label ("inherit" for project/session,
+ * "default" for global, which falls back to DEFAULT_CONFIG) plus the effective
+ * merged value.
  */
 
 import type {
@@ -274,15 +276,17 @@ function descriptorHasValue(
 
 function valuesFor(
 	desc: SettingDescriptor,
+	scope: Scope,
 	effective?: WorkflowConfig,
 	modelRegistry?: ModelRegistry,
 ): string[] | undefined {
-	if (desc.kind === "boolean") return ["inherit", "true", "false"];
+	const label = inheritLabel(scope);
+	if (desc.kind === "boolean") return [label, "true", "false"];
 	if (desc.kind === "thinking") {
 		if (effective && modelRegistry) {
-			return thinkingValuesFor(desc, effective, modelRegistry);
+			return thinkingValuesFor(desc, scope, effective, modelRegistry);
 		}
-		return ["inherit", ...THINKING_VALUES];
+		return [label, ...THINKING_VALUES];
 	}
 	return undefined; // string/model → submenu
 }
@@ -290,17 +294,19 @@ function valuesFor(
 /** Return thinking levels supported by the effective model for a role. */
 function thinkingValuesFor(
 	desc: SettingDescriptor,
+	scope: Scope,
 	effective: WorkflowConfig,
 	modelRegistry: ModelRegistry,
 ): string[] {
-	if (!desc.role) return ["inherit", ...THINKING_VALUES];
+	const label = inheritLabel(scope);
+	if (!desc.role) return [label, ...THINKING_VALUES];
 	try {
 		const spec = effective.models[desc.role];
 		const model = modelRegistry.find(spec.provider, spec.model);
-		if (!model) return ["inherit", ...THINKING_VALUES];
-		return ["inherit", ...getSupportedThinkingLevels(model)];
+		if (!model) return [label, ...THINKING_VALUES];
+		return [label, ...getSupportedThinkingLevels(model)];
 	} catch {
-		return ["inherit", ...THINKING_VALUES];
+		return [label, ...THINKING_VALUES];
 	}
 }
 
@@ -320,6 +326,7 @@ function formatModelRef(provider: any, model: any): string {
 
 function currentDisplay(
 	desc: SettingDescriptor,
+	scope: Scope,
 	layer: Record<string, any>,
 	effective: any,
 ): string {
@@ -333,7 +340,7 @@ function currentDisplay(
 		if (rawProvider !== undefined || rawModel !== undefined) {
 			return `partial (${formatModelRef(rawProvider, rawModel)})`;
 		}
-		return `inherit (${formatModelRef(
+		return `${inheritLabel(scope)} (${formatModelRef(
 			getPath(effective, paths.provider),
 			getPath(effective, paths.model),
 		)})`;
@@ -342,9 +349,9 @@ function currentDisplay(
 	const raw = getPath(layer, desc.path);
 	if (raw !== undefined) return formatVal(raw);
 	if (desc.kind === "string") {
-		return `inherit (${formatVal(getPath(effective, desc.path))})`;
+		return `${inheritLabel(scope)} (${formatVal(getPath(effective, desc.path))})`;
 	}
-	return "inherit";
+	return inheritLabel(scope);
 }
 
 function descriptionFor(desc: SettingDescriptor, _effective: any): string {
@@ -361,6 +368,7 @@ function truncateRenderedLines(lines: string[], width: number): string[] {
 
 function makeStringInputSubmenu(
 	theme: Theme,
+	scope: Scope,
 	title: string,
 	initial: string,
 	done: (value?: string) => void,
@@ -374,7 +382,7 @@ function makeStringInputSubmenu(
 	container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
 	container.addChild(
 		new Text(
-			theme.fg("dim", "enter save · clear field = inherit · esc cancel"),
+			theme.fg("dim", `enter save · clear field = ${inheritLabel(scope)} · esc cancel`),
 			1,
 			0,
 		),
@@ -393,6 +401,14 @@ function makeStringInputSubmenu(
 }
 
 const INHERIT_MODEL_VALUE = "__pi_workflow_inherit_model__";
+
+/** Words that all mean "clear this scope". onChange matches any of them. */
+const INHERIT_WORDS = new Set(["inherit", "default"]);
+
+/** Label shown for the "clear this scope" option in a given scope. */
+function inheritLabel(scope: Scope): string {
+	return scope === "global" ? "default" : "inherit";
+}
 
 interface ModelPickerItem {
 	value: string;
@@ -416,9 +432,20 @@ function decodeModelValue(value: string): { provider: string; model: string } {
 
 function modelPickerItems(
 	modelRegistry: ModelRegistry,
+	scope: Scope,
 	effectiveProvider: string,
 	effectiveModel: string,
 ): { items: ModelPickerItem[]; error?: string } {
+	const label = inheritLabel(scope);
+	const mkInheritItem = (): ModelPickerItem => ({
+		value: INHERIT_MODEL_VALUE,
+		label,
+		description: `Use effective model: ${formatModelRef(
+			effectiveProvider,
+			effectiveModel,
+		)}`,
+		searchText: `${label} ${effectiveProvider} ${effectiveModel}`,
+	});
 	try {
 		modelRegistry.refresh();
 		const loadError = modelRegistry.getError();
@@ -429,15 +456,7 @@ function modelPickerItems(
 		});
 		return {
 			items: [
-				{
-					value: INHERIT_MODEL_VALUE,
-					label: "inherit",
-					description: `Use effective model: ${formatModelRef(
-						effectiveProvider,
-						effectiveModel,
-					)}`,
-					searchText: `inherit ${effectiveProvider} ${effectiveModel}`,
-				},
+				mkInheritItem(),
 				...models.map((model) => ({
 					value: encodeModelValue(model),
 					label: model.id,
@@ -450,17 +469,7 @@ function modelPickerItems(
 		};
 	} catch (e) {
 		return {
-			items: [
-				{
-					value: INHERIT_MODEL_VALUE,
-					label: "inherit",
-					description: `Use effective model: ${formatModelRef(
-						effectiveProvider,
-						effectiveModel,
-					)}`,
-					searchText: `inherit ${effectiveProvider} ${effectiveModel}`,
-				},
-			],
+			items: [mkInheritItem()],
 			error: e instanceof Error ? e.message : String(e),
 		};
 	}
@@ -470,6 +479,7 @@ function makeModelPickerSubmenu({
 	theme,
 	title,
 	modelRegistry,
+	scope,
 	currentProvider,
 	currentModel,
 	effectiveProvider,
@@ -480,6 +490,7 @@ function makeModelPickerSubmenu({
 	theme: Theme;
 	title: string;
 	modelRegistry: ModelRegistry;
+	scope: Scope;
 	currentProvider?: string;
 	currentModel?: string;
 	effectiveProvider: string;
@@ -490,6 +501,7 @@ function makeModelPickerSubmenu({
 	const input = new Input();
 	const { items, error } = modelPickerItems(
 		modelRegistry,
+		scope,
 		effectiveProvider,
 		effectiveModel,
 	);
@@ -543,7 +555,9 @@ function makeModelPickerSubmenu({
 				theme.fg("accent", theme.bold(title)),
 				theme.fg(
 					"dim",
-					"type to search · enter select · esc cancel · choose inherit to clear this scope",
+					"type to search · enter select · esc cancel · choose " +
+						inheritLabel(scope) +
+						" to clear this scope",
 				),
 				"",
 				...input.render(w),
@@ -822,12 +836,14 @@ export function registerWfSettingsCommand(
 								description: descriptionFor(desc, initialEffective),
 								currentValue: currentDisplay(
 									desc,
+									scope,
 									initialLayer,
 									initialEffective,
 								),
 							};
 							const values = valuesFor(
 								desc,
+								scope,
 								initialEffective,
 								ctx.modelRegistry,
 							);
@@ -848,6 +864,7 @@ export function registerWfSettingsCommand(
 										theme,
 										title: desc.label,
 										modelRegistry: ctx.modelRegistry,
+										scope,
 										currentProvider:
 											typeof rawProvider === "string" ? rawProvider : undefined,
 										currentModel:
@@ -870,6 +887,7 @@ export function registerWfSettingsCommand(
 									const initial = raw === undefined ? "" : String(raw);
 									return makeStringInputSubmenu(
 										theme,
+										scope,
 										desc.label,
 										initial,
 										submenuDone,
@@ -885,11 +903,12 @@ export function registerWfSettingsCommand(
 							for (const item of items) {
 								const desc = byId.get(item.id);
 								if (!desc) continue;
-								item.currentValue = currentDisplay(desc, layer, effective);
+								item.currentValue = currentDisplay(desc, scope, layer, effective);
 								item.description = descriptionFor(desc, effective);
 								if (desc.kind === "thinking" && desc.role) {
 									item.values = thinkingValuesFor(
 										desc,
+										scope,
 										effective,
 										ctx.modelRegistry,
 									);
@@ -925,11 +944,11 @@ export function registerWfSettingsCommand(
 									}
 								}
 							} else if (desc.kind === "boolean") {
-								if (newValue === "inherit") unsetPath(layer, desc.path);
+								if (INHERIT_WORDS.has(newValue)) unsetPath(layer, desc.path);
 								else setPath(layer, desc.path, newValue === "true");
 							} else {
 								// thinking
-								if (newValue === "inherit") unsetPath(layer, desc.path);
+								if (INHERIT_WORDS.has(newValue)) unsetPath(layer, desc.path);
 								else setPath(layer, desc.path, newValue);
 							}
 							const writePromise = writeLayer(
