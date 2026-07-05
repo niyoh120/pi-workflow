@@ -1,4 +1,5 @@
-import type { WorkflowState } from "./types.js";
+import type { Mode, WorkflowState } from "./types.js";
+import { promptForMode } from "./prompts.js";
 
 /** Format todos as a markdown checklist string. */
 export function todoText(s: WorkflowState): string {
@@ -36,7 +37,7 @@ export function modeStatusLabel(mode: string): string {
 	return labels[mode] ?? mode;
 }
 
-/** Build the current workflow status text block to inject into the system prompt. */
+/** Build the current workflow status text block for runtime message/tool-result injection. */
 export function currentStatusText(s: WorkflowState): string {
 	return [
 		`mode: ${s.mode}`,
@@ -47,4 +48,34 @@ export function currentStatusText(s: WorkflowState): string {
 		"todos:",
 		todoText(s),
 	].join("\n");
+}
+
+/** Build the mode-specific workflow runtime message body. */
+export function buildModeMessageBody(
+	mode: Mode,
+	state: WorkflowState,
+): string | undefined {
+	const modePrompt = promptForMode(mode);
+	if (!modePrompt) return undefined;
+
+	return [
+		modePrompt,
+		"# Current Workflow State",
+		currentStatusText(state),
+	].join("\n\n");
+}
+
+/** Build the hidden workflow mode custom message injected before model calls. */
+export function buildWorkflowModeMessage(
+	mode: Mode,
+	state: WorkflowState,
+): { customType: string; content: string; display: boolean } | undefined {
+	const content = buildModeMessageBody(mode, state);
+	if (!content) return undefined;
+
+	return {
+		customType: "workflow-mode",
+		content,
+		display: false,
+	};
 }

@@ -2,14 +2,14 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { getSessionKey, loadState, saveState } from "./state.js";
-import { COMMON_PROMPT, promptForMode } from "./prompts.js";
+import { COMMON_PROMPT } from "./prompts.js";
 import {
 	isWorkflowDataPath,
 	isReadonlyMode,
 	isLocalFileMutatingShell,
 	isAllowedPlanScratchPath,
 } from "./guards.js";
-import { currentStatusText } from "./helpers.js";
+import { buildWorkflowModeMessage, currentStatusText } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
@@ -147,21 +147,16 @@ export function registerBeforeAgentStart(
 			await applyModeRuntime(pi, ctx, state.mode, getAgentDir);
 		}
 
-		// Inject system prompt
-		const modePrompt = promptForMode(state.mode);
-		if (!modePrompt) return;
+		// Keep stable workflow rules in the system prompt; inject mutable mode
+		// context as a custom message so plan→work follow-ups do not leave a
+		// stale Plan Mode system prompt in the same agent loop.
+		const message = buildWorkflowModeMessage(state.mode, state);
+		const systemPrompt = event.systemPrompt + "\n\n" + COMMON_PROMPT;
+		if (!message) return { systemPrompt };
 
 		return {
-			systemPrompt:
-				event.systemPrompt +
-				"\n\n" +
-				COMMON_PROMPT +
-				"\n\n" +
-				modePrompt +
-				"\n\n" +
-				`# Current Workflow State\n` +
-				currentStatusText(state) +
-				"\n",
+			systemPrompt,
+			message,
 		};
 	});
 }

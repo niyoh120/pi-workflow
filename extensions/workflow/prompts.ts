@@ -142,7 +142,8 @@ export const PLAN_PROMPT = `
 export const WORK_HANDOFF_RUNTIME_NOTICE = `
 # Work Mode Runtime Handoff
 
-Workflow 扩展运行时已将 guard / tools / model 切换到 Work Mode。Plan Mode 的工具限制已在运行时解除，请按下面的 Work Mode 规则工作。
+Workflow 扩展运行时已将 guard / tools / model 切换到 Work Mode。
+本消息是扩展注入的权威运行时状态，覆盖此前对 Plan Mode 的描述。请以当前 Work Mode 指令为准。
 `;
 
 export const WORK_PROMPT = `

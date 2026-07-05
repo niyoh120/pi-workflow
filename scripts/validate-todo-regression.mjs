@@ -923,8 +923,8 @@ console.log("\n=== Check 7: Code review tooling ===");
 	);
 	assert(
 		approveBlock.includes("WORK_HANDOFF_RUNTIME_NOTICE") &&
-			approveBlock.includes("WORK_PROMPT"),
-		"tools.ts: approve followUp includes runtime notice and Work prompt",
+			approveBlock.includes('buildModeMessageBody("work", result.state)'),
+		"tools.ts: approve followUp includes runtime notice and shared Work mode body",
 	);
 	assert(
 		approveBlock.includes('deliverAs: "followUp"'),
