@@ -78,6 +78,12 @@ export interface WorkflowState {
 	planRunId?: string;
 	/** Work run id — identifies a work session. */
 	workRunId?: string;
+	/** Absolute path to the active git worktree used for this work run. */
+	worktreePath?: string;
+	/** Branch checked out in the active worktree. */
+	worktreeBranch?: string;
+	/** Base branch/ref the worktree was created from. */
+	worktreeBaseBranch?: string;
 	/** Todo items tracking work progress. */
 	todos: TodoItem[];
 	/** IDs of completed todos that have been hidden from the overlay. */

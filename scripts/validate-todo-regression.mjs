@@ -902,7 +902,8 @@ console.log("\n=== Check 7: Code review tooling ===");
 	);
 	assert(
 		approveBlock.includes('mode: "work"') &&
-			approveBlock.includes("workRunId: crypto.randomUUID()") &&
+			approveBlock.includes("const workRunId = crypto.randomUUID()") &&
+			approveBlock.includes("workRunId,") &&
 			!approveBlock.includes("pendingWorkHandoff: true"),
 		"tools.ts: approve persists work mode without pending handoff flag",
 	);
@@ -1445,6 +1446,94 @@ console.log("\n=== Check 15: isLocalFileMutatingShell redirect guard ===");
 		">/dev/null/../../etc/passwd IS mutating (path traversal not stripped)",
 	);
 }
+
+function validateWorktreeIntegrationStatic() {
+	console.log("\n=== Worktree integration static checks ===");
+	const root = process.cwd();
+	const types = fs.readFileSync(path.join(root, "extensions/workflow/types.ts"), "utf8");
+	const state = fs.readFileSync(path.join(root, "extensions/workflow/state.ts"), "utf8");
+	const worktree = fs.readFileSync(path.join(root, "extensions/workflow/worktree.ts"), "utf8");
+	const commands = fs.readFileSync(path.join(root, "extensions/workflow/commands.ts"), "utf8");
+	const tools = fs.readFileSync(path.join(root, "extensions/workflow/tools.ts"), "utf8");
+	const helpers = fs.readFileSync(path.join(root, "extensions/workflow/helpers.ts"), "utf8");
+	const guards = fs.readFileSync(path.join(root, "extensions/workflow/guards.ts"), "utf8");
+
+	assert(
+		types.includes("worktreePath?: string") &&
+			types.includes("worktreeBranch?: string") &&
+			types.includes("worktreeBaseBranch?: string"),
+		"WorkflowState has worktree fields",
+	);
+	assert(
+		state.includes("obj.worktreePath") &&
+			state.includes("path.isAbsolute(obj.worktreePath.trim())") &&
+			state.includes("worktreePrefix") &&
+			state.includes("/^[a-fA-F0-9]{8}/"),
+		"normalizeState validates worktree path against 8-hex workRunId prefix",
+	);
+	assert(
+		/execFileSync\(\s*["']git["']\s*,\s*args\b/.test(worktree) &&
+			/["']worktree["']\s*,\s*["']add["']\s*,\s*["']-b["']/.test(worktree),
+		"createWorktree uses git argv array",
+	);
+	assert(
+		worktree.includes("export function validateWorktreeState") &&
+			worktree.includes("worktreePath points to the current repo checkout"),
+		"validateWorktreeState rejects invalid worktrees",
+	);
+	assert(
+		/["']worktree["']\s*,\s*["']remove["']\s*,\s*state\.worktreePath/.test(worktree) &&
+			!/["']worktree["']\s*,\s*["']remove["']\s*,\s*["']--force["']/.test(worktree) &&
+			/["']branch["']\s*,\s*["']-d["']\s*,\s*branch/.test(worktree) &&
+			/\^wf\\\/\[a-fA-F0-9\]\{8\}\$/.test(worktree) &&
+			worktree.includes("Refusing to delete non-workflow branch"),
+		"reset helpers remove worktree safely and only delete workflow branches",
+	);
+	assert(
+		guards.includes("export function isInsideWorktree") &&
+			guards.includes("isSymbolicLink()") &&
+			guards.includes("nlink > 1"),
+		"isInsideWorktree guards symlink and hardlink escapes",
+	);
+	const writeGuard = commands.slice(
+		commands.indexOf("// Worktree-bound Work Mode"),
+		commands.indexOf("// Read-only modes"),
+	);
+	assert(
+		writeGuard.includes("validateWorktreeState(ctx.cwd, state)") &&
+			writeGuard.includes("isInsideWorktree(") &&
+			!writeGuard.includes("isAllowedPlanScratchPath"),
+		"tool guard validates worktree and confines write/edit paths",
+	);
+	assert(
+		!commands.includes("worktreeShellDenial") &&
+			tools.includes("registerBashOverrideTool") &&
+			tools.includes("createBashTool") &&
+			tools.includes('name: "bash"') &&
+			tools.includes("effectiveCwd = state.worktreePath"),
+		"bash override replaces shell parser and runs from worktree cwd",
+	);
+	assert(
+		commands.includes("Branch was not deleted") &&
+			commands.includes("worktree 已删除，但 branch 删除失败"),
+		"/wf-reset validates removal and preserves branch safety",
+	);
+	assert(
+		tools.includes("Git worktree") &&
+			tools.includes("plannedWorktreeInfo") &&
+			tools.includes("cleanupCreatedWorktree") &&
+			tools.includes("rollbackApproval"),
+		"plan approve creates worktree choice and rollback cleanup",
+	);
+	assert(
+		helpers.includes("worktreeRuntimeNotice") &&
+			helpers.includes("bash 已自动在 active worktree 中执行") &&
+			helpers.includes("promptLine"),
+		"worktreeRuntimeNotice describes file paths and bash cwd override",
+	);
+}
+
+validateWorktreeIntegrationStatic();
 
 function assertNotContains(haystack, needle, label) {
 	runs++;

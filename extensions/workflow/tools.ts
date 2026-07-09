@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createBashTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -14,6 +14,13 @@ import {
 import { loadConfig } from "./config.js";
 import { WORK_HANDOFF_RUNTIME_NOTICE } from "./prompts.js";
 import { buildModeMessageBody, todoText } from "./helpers.js";
+import {
+	createWorktree,
+	deleteWorktreeBranch,
+	plannedWorktreeInfo,
+	removeWorktree,
+	validateWorktreeState,
+} from "./worktree.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { executePlanReviewSidecall } from "./sidecall.js";
@@ -25,6 +32,48 @@ import {
 	runOcrReview,
 	type ReviewScopeKind,
 } from "./ocr-helpers.js";
+
+function cleanupCreatedWorktree(cwd: string, worktreePath: string, branch: string): void {
+	try {
+		removeWorktree(cwd, { worktreePath, worktreeBranch: branch });
+	} catch {
+		// best effort cleanup after failed approval; /wf-status or git worktree list can recover residue.
+	}
+	try {
+		deleteWorktreeBranch(cwd, branch);
+	} catch {
+		// branch may be absent or unmerged; preserving it is safer than forcing deletion.
+	}
+}
+
+export function registerBashOverrideTool(pi: ExtensionAPI, _getAgentDir: () => string, cwd: string): void {
+	const baseBashTool = createBashTool(cwd);
+	pi.registerTool({
+		...baseBashTool,
+		name: "bash",
+		description:
+			baseBashTool.description +
+			" In pi-workflow active worktree mode, commands run from the active worktree cwd.",
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			const sessionKey = getSessionKey(ctx.sessionManager);
+			const state = loadState(ctx.cwd, sessionKey);
+			let effectiveCwd = ctx.cwd;
+
+			if (state.worktreePath) {
+				const validation = validateWorktreeState(ctx.cwd, state);
+				if (!validation.ok) {
+					throw new Error(
+						`Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
+					);
+				}
+				effectiveCwd = state.worktreePath;
+			}
+
+			const bashTool = createBashTool(effectiveCwd);
+			return bashTool.execute(toolCallId, params, signal, onUpdate);
+		},
+	});
+}
 
 // ── Workflow-enabled guard ──────────────────────────────────────
 
@@ -332,21 +381,87 @@ export function registerPlanApproveTool(
 				throw new Error("No active plan. Save a plan first.");
 			}
 
+			const workRunId = crypto.randomUUID();
+			let worktreePath: string | undefined;
+			let worktreeBranch: string | undefined;
+			let worktreeBaseBranch: string | undefined;
+
+			const choice = ctx.ui.select
+				? await ctx.ui.select("执行方式", [
+						"当前目录",
+						"Git worktree",
+						"取消",
+					])
+				: "当前目录";
+			if (!choice || choice === "取消") {
+				return {
+					content: [{ type: "text", text: "Plan approval cancelled." }],
+					details: { state },
+				};
+			}
+
+			if (choice === "Git worktree") {
+				const planned = plannedWorktreeInfo(ctx.cwd, workRunId);
+				try {
+					const worktree = createWorktree(ctx.cwd, workRunId);
+					worktreePath = worktree.path;
+					worktreeBranch = worktree.branch;
+					worktreeBaseBranch = worktree.baseBranch;
+				} catch (err) {
+					try {
+						removeWorktree(ctx.cwd, {
+							worktreePath: planned.path,
+							worktreeBranch: planned.branch,
+						});
+					} catch {
+						// best effort cleanup after failed creation; avoid deleting a branch that may have pre-existed.
+					}
+					throw err;
+				}
+			}
+
 			const nextState: WorkflowState = {
 				...state,
 				mode: "work",
-				workRunId: crypto.randomUUID(),
+				workRunId,
+				worktreePath,
+				worktreeBranch,
+				worktreeBaseBranch,
 			};
 
-			const result = await transitionWorkflowMode({
-				pi,
-				ctx,
-				sessionKey,
-				nextState,
-				getAgentDir,
-			});
+			const rollbackApproval = async () => {
+				let rollbackSucceeded = false;
+				try {
+					await transitionWorkflowMode({
+						pi,
+						ctx,
+						sessionKey,
+						nextState: state,
+						getAgentDir,
+					});
+					rollbackSucceeded = true;
+				} catch {
+					// Preserve the original approval failure; /wf-reset can recover a rollback failure.
+				}
+				if (rollbackSucceeded && worktreePath && worktreeBranch) cleanupCreatedWorktree(ctx.cwd, worktreePath, worktreeBranch);
+			};
+
+			let result: Awaited<ReturnType<typeof transitionWorkflowMode>>;
+			try {
+				result = await transitionWorkflowMode({
+					pi,
+					ctx,
+					sessionKey,
+					nextState,
+					getAgentDir,
+				});
+			} catch (err) {
+				await rollbackApproval();
+				throw err;
+			}
 
 			if (!result.ok) {
+				await rollbackApproval();
 				throw new Error(result.reason);
 			}
 
@@ -750,6 +865,7 @@ export function registerAllWorkflowTools(
 
 	const config = loadConfig(cwd, getAgentDir());
 
+	registerBashOverrideTool(pi, getAgentDir, cwd);
 	registerTodoTool(pi, getAgentDir);
 	registerPlanReadTool(pi, getAgentDir);
 	registerPlanSaveTool(pi, getAgentDir);

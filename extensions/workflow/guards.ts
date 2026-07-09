@@ -148,6 +148,92 @@ export function isAllowedPlanScratchPath(
 	return null; // Allowed.
 }
 
+/**
+ * Check whether a work-mode write/edit target stays inside the active worktree.
+ * Requires an absolute path and rejects symlink/hard-link escapes.
+ */
+export function isInsideWorktree(
+	worktreePath: string,
+	targetPath: string,
+): string | null {
+	if (!path.isAbsolute(targetPath)) {
+		return `Worktree mode requires absolute paths under ${worktreePath}.`;
+	}
+
+	let canonicalRoot: string;
+	try {
+		const rootStat = lstatSync(worktreePath);
+		if (rootStat.isSymbolicLink()) {
+			return `Worktree root ${worktreePath} is a symlink — rejected.`;
+		}
+		if (!rootStat.isDirectory()) {
+			return `Worktree root ${worktreePath} is not a directory.`;
+		}
+		canonicalRoot = realpathSync(worktreePath);
+	} catch {
+		return `Cannot resolve worktree root: ${worktreePath}`;
+	}
+
+	const lexicalRoot = path.resolve(path.normalize(worktreePath));
+	const normalized = path.resolve(path.normalize(targetPath));
+	const rel = path.relative(lexicalRoot, normalized);
+	const escapesRoot =
+		rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+	if (rel === "" || escapesRoot || path.resolve(lexicalRoot, rel) !== normalized) {
+		return `Path must be under worktree ${worktreePath}.`;
+	}
+
+	const segments = rel.split(path.sep).filter(Boolean);
+	let accumulated = canonicalRoot;
+	for (let i = 0; i < segments.length; i++) {
+		accumulated = path.join(accumulated, segments[i]);
+		const isFinal = i === segments.length - 1;
+
+		// This preflight is not sufficient as a security boundary for the later
+		// built-in write/edit mutation. A controlled writer with no-follow traversal
+		// would be needed to close symlink-swap TOCTOU races completely.
+		let stat: ReturnType<typeof lstatSync>;
+		let canonical: string;
+		try {
+			stat = lstatSync(accumulated);
+			if (stat.isSymbolicLink()) {
+				return `Path component ${accumulated} is a symlink — rejected.`;
+			}
+
+			if (isFinal) {
+				if (!stat.isFile()) {
+					return `Target ${accumulated} exists but is not a regular file.`;
+				}
+				if (stat.nlink > 1) {
+					return `Target ${accumulated} has multiple hard links — rejected.`;
+				}
+			} else if (!stat.isDirectory()) {
+				return `Path component ${accumulated} is not a directory.`;
+			}
+
+			canonical = realpathSync(accumulated);
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code === "ENOENT" || code === "ENOTDIR") {
+				if (isFinal) continue;
+				return `Path component ${accumulated} does not exist.`;
+			}
+			return `Cannot validate path component: ${accumulated}`;
+		}
+
+		const relToRoot = path.relative(canonicalRoot, canonical);
+		const escapesRoot =
+			relToRoot === ".." ||
+			relToRoot.startsWith(`..${path.sep}`) ||
+			path.isAbsolute(relToRoot);
+		if (relToRoot === "" || escapesRoot) {
+			return `Path ${accumulated} resolves outside worktree.`;
+		}
+	}
+
+	return null;
+}
+
 /** Returns true if the given mode is read-only (no local file mutations). */
 export function isReadonlyMode(mode: Mode): boolean {
 	return mode === "explore" || mode === "plan";

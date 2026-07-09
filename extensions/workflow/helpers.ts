@@ -44,10 +44,31 @@ export function currentStatusText(s: WorkflowState): string {
 		`planPath: ${s.planPath ?? "none"}`,
 		`planRunId: ${s.planRunId ?? "none"}`,
 		`workRunId: ${s.workRunId ?? "none"}`,
+		`worktreePath: ${s.worktreePath ? promptLine(s.worktreePath) : "none"}`,
+		`worktreeBranch: ${s.worktreeBranch ? promptLine(s.worktreeBranch) : "none"}`,
 		"",
 		"todos:",
 		todoText(s),
 	].join("\n");
+}
+
+function promptLine(value: string): string {
+	return value.replace(/\r/g, "\\r").replace(/\n/g, "\\n");
+}
+
+export function worktreeRuntimeNotice(state: WorkflowState): string {
+	if (!state.worktreePath) return "";
+	const displayWorktreePath = promptLine(state.worktreePath);
+	return [
+		"# Active Git Worktree",
+		`工作目录：${displayWorktreePath}`,
+		state.worktreeBranch ? `分支：${promptLine(state.worktreeBranch)}` : undefined,
+		"所有文件工具 read/edit/write 必须使用 worktree 下的绝对路径。",
+		"bash 已自动在 active worktree 中执行；直接使用 bash 即可。",
+		"代码改动只写入 worktree；不要写主目录文件。",
+	]
+		.filter(Boolean)
+		.join("\n");
 }
 
 /** Build the mode-specific workflow runtime message body. */
@@ -60,9 +81,12 @@ export function buildModeMessageBody(
 
 	return [
 		modePrompt,
+		worktreeRuntimeNotice(state),
 		"# Current Workflow State",
 		currentStatusText(state),
-	].join("\n\n");
+	]
+		.filter(Boolean)
+		.join("\n\n");
 }
 
 /** Build the hidden workflow mode custom message injected before model calls. */

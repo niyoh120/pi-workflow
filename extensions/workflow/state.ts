@@ -33,6 +33,10 @@ export function normalizeState(raw: unknown): WorkflowState {
 		raw && typeof raw === "object" && !Array.isArray(raw)
 			? (raw as Record<string, unknown>)
 			: {};
+	const worktreePrefix =
+		typeof obj.workRunId === "string"
+			? obj.workRunId.match(/^[a-fA-F0-9]{8}/)?.[0]
+			: undefined;
 
 	return {
 		workflowEnabled:
@@ -50,6 +54,27 @@ export function normalizeState(raw: unknown): WorkflowState {
 		planTitle: typeof obj.planTitle === "string" ? obj.planTitle : undefined,
 		planRunId: typeof obj.planRunId === "string" ? obj.planRunId : undefined,
 		workRunId: typeof obj.workRunId === "string" ? obj.workRunId : undefined,
+		worktreePath:
+			worktreePrefix &&
+			typeof obj.worktreePath === "string" &&
+			typeof obj.worktreeBranch === "string" &&
+			obj.worktreePath.trim() &&
+			path.isAbsolute(obj.worktreePath.trim()) &&
+			path.basename(obj.worktreePath.trim()).endsWith(`-wf-${worktreePrefix}`) &&
+			obj.worktreeBranch.trim() === `wf/${worktreePrefix}`
+				? obj.worktreePath.trim()
+				: undefined,
+		worktreeBranch:
+			worktreePrefix &&
+			typeof obj.worktreeBranch === "string" &&
+			obj.worktreeBranch.trim() === `wf/${worktreePrefix}`
+				? obj.worktreeBranch.trim()
+				: undefined,
+		worktreeBaseBranch:
+			typeof obj.worktreeBaseBranch === "string" &&
+			obj.worktreeBaseBranch.trim()
+				? obj.worktreeBaseBranch
+				: undefined,
 		todos: Array.isArray(obj.todos)
 			? (obj.todos as Array<WorkflowState["todos"][number]>)
 					.filter((t: any) => t && typeof t === "object")

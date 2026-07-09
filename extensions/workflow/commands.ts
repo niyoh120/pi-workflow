@@ -8,8 +8,13 @@ import {
 	isReadonlyMode,
 	isLocalFileMutatingShell,
 	isAllowedPlanScratchPath,
+	isInsideWorktree,
 } from "./guards.js";
-import { buildWorkflowModeMessage, currentStatusText } from "./helpers.js";
+import {
+	buildWorkflowModeMessage,
+	currentStatusText,
+	worktreeRuntimeNotice,
+} from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
@@ -28,6 +33,12 @@ import {
 } from "./mode.js";
 import { execSync } from "node:child_process";
 import path from "node:path";
+import {
+	deleteWorktreeBranch,
+	gitStatusInWorktree,
+	removeWorktree,
+	validateWorktreeState,
+} from "./worktree.js";
 
 // ── /wf-init helpers ─────────────────────────────────────────────────────────
 
@@ -235,6 +246,43 @@ export function registerToolCallGuard(
 					};
 				}
 			}
+		}
+
+		// Worktree-bound Work Mode: code writes must stay inside the active worktree.
+		if (
+			effectiveMode === "work" &&
+			state.worktreePath &&
+			(event.toolName === "write" || event.toolName === "edit")
+		) {
+			const targetPath: string | undefined =
+				(event.input as any)?.path ?? (event.input as any)?.filePath;
+			if (!targetPath) {
+				return {
+					block: true,
+					reason: `Worktree mode: write/edit requires an absolute path under ${state.worktreePath}.`,
+				};
+			}
+
+			const validation = validateWorktreeState(ctx.cwd, state);
+			if (!validation.ok) {
+				return {
+					block: true,
+					reason: `Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
+				};
+			}
+
+			const worktreeDenial = isInsideWorktree(
+				state.worktreePath,
+				targetPath,
+			);
+			if (!worktreeDenial) return;
+
+			return {
+				block: true,
+				reason:
+					`Worktree mode: ${worktreeDenial} ` +
+					`Use an absolute path under ${state.worktreePath}.`,
+			};
 		}
 
 		// Read-only modes: block local file mutations.
@@ -488,11 +536,27 @@ export function registerWorkCommand(
 			const workArgs = args.trim();
 
 			const current = loadState(ctx.cwd, sessionKey);
+			if (current.worktreePath) {
+				const validation = validateWorktreeState(ctx.cwd, current);
+				if (!validation.ok) {
+					ctx.ui.notify(
+						`Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
+						"error",
+					);
+					return;
+				}
+			}
+
 			const state: WorkflowState = {
 				...DEFAULT_STATE,
 				workflowEnabled: current.workflowEnabled,
 				mode: "work",
-				workRunId: crypto.randomUUID(),
+				workRunId: current.worktreePath
+					? current.workRunId ?? crypto.randomUUID()
+					: crypto.randomUUID(),
+				worktreePath: current.worktreePath,
+				worktreeBranch: current.worktreeBranch,
+				worktreeBaseBranch: current.worktreeBaseBranch,
 			};
 
 			const overlay = getWorkflowOverlay();
@@ -520,8 +584,9 @@ export function registerWorkCommand(
 
 			ctx.ui.notify("已进入 Work Mode。可以直接描述任务。", "info");
 
-			if (workArgs) {
-				pi.sendUserMessage(workArgs);
+			const notice = worktreeRuntimeNotice(result.state);
+			if (workArgs || notice) {
+				pi.sendUserMessage([notice, workArgs].filter(Boolean).join("\n\n"));
 			}
 		},
 	});
@@ -620,6 +685,16 @@ export function registerReviewCommand(
 			// call workflow_code_review, edit files, and run tests when fixes are needed.
 			const sessionKey = ctxSessionKey(ctx);
 			const current = loadState(ctx.cwd, sessionKey);
+			if (current.worktreePath) {
+				const validation = validateWorktreeState(ctx.cwd, current);
+				if (!validation.ok) {
+					ctx.ui.notify(
+						`Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
+						"error",
+					);
+					return;
+				}
+			}
 			const state: WorkflowState = {
 				...current,
 				mode: "work",
@@ -668,10 +743,13 @@ Review scope: ${scopeDescription}
 5. 如果你判断某个 reviewer 问题是误判、超出范围、投入产出比不合理或与项目约束冲突，在下一轮 background 中说明技术理由。
 6. 第一轮 review 已经没有 Critical/Important 问题时，可以结束循环。2-3 轮后仍存在分歧时，停止并交给用户裁决。
 7. Minor 问题按价值选择处理，不能阻塞 review 通过。`;
+			const fullPromptText = [worktreeRuntimeNotice(state), promptText]
+				.filter(Boolean)
+				.join("\n\n");
 
 			ctx.ui.notify(`Starting code review loop: ${scopeDescription}.`, "info");
 			pi.setSessionName(`review: ${scopeKind}`);
-			pi.sendUserMessage(promptText);
+			pi.sendUserMessage(fullPromptText);
 		},
 	});
 }
@@ -687,8 +765,20 @@ export function registerCommitCommand(
 			await ctx.waitForIdle();
 			const sessionKey = ctxSessionKey(ctx);
 
+			const current = loadState(ctx.cwd, sessionKey);
+			if (current.worktreePath) {
+				const validation = validateWorktreeState(ctx.cwd, current);
+				if (!validation.ok) {
+					ctx.ui.notify(
+						`Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
+						"error",
+					);
+					return;
+				}
+			}
+
 			const state = {
-				...loadState(ctx.cwd, sessionKey),
+				...current,
 				mode: "commit" as const,
 			};
 
@@ -709,7 +799,12 @@ export function registerCommitCommand(
 				: "";
 
 			pi.sendUserMessage(
-				`请查看当前 diff，生成合适的 commit message，并直接执行 git add 和 git commit。${extra}`,
+				[
+					worktreeRuntimeNotice(state),
+					`请查看当前 diff，生成合适的 commit message，并直接执行 git add 和 git commit。${extra}`,
+				]
+					.filter(Boolean)
+					.join("\n\n"),
 			);
 		},
 	});
@@ -727,7 +822,12 @@ export function registerWfStatusCommand(
 
 			const state = loadState(ctx.cwd, sessionKey);
 
-			const msg = currentStatusText(state);
+			let msg = currentStatusText(state);
+			if (state.worktreePath) {
+				const validation = validateWorktreeState(ctx.cwd, state);
+				msg += `\n\nworktreeValidation: ${validation.ok ? "ok" : validation.reason}`;
+				msg += `\nworktreeStatus:\n${gitStatusInWorktree(state.worktreePath)}`;
+			}
 			ctx.ui.notify(msg, "info");
 		},
 	});
@@ -776,6 +876,49 @@ export function registerWfResetCommand(pi: ExtensionAPI): void {
 			const sessionKey = ctxSessionKey(ctx);
 
 			const current = loadState(ctx.cwd, sessionKey);
+			if (current.worktreePath) {
+				const choice = ctx.ui.select
+					? await ctx.ui.select("Active worktree", [
+							"保留 worktree，仅清 state",
+							"删除 worktree，保留 branch",
+							"删除 worktree 和 branch",
+							"取消",
+						])
+					: "保留 worktree，仅清 state";
+				if (!choice || choice === "取消") return;
+				if (choice === "删除 worktree，保留 branch" || choice === "删除 worktree 和 branch") {
+					try {
+						if (choice === "删除 worktree 和 branch") {
+							const validation = validateWorktreeState(ctx.cwd, current);
+							if (!validation.ok) {
+								ctx.ui.notify(
+									`Active worktree is invalid: ${validation.reason}. Branch was not deleted.`,
+									"error",
+								);
+								return;
+							}
+						}
+						removeWorktree(ctx.cwd, current);
+						if (choice === "删除 worktree 和 branch" && current.worktreeBranch) {
+							try {
+								deleteWorktreeBranch(ctx.cwd, current.worktreeBranch);
+							} catch (err: any) {
+								ctx.ui.notify(
+									`worktree 已删除，但 branch 删除失败：${err?.message ?? String(err)}`,
+									"error",
+								);
+							}
+						}
+					} catch (err: any) {
+						ctx.ui.notify(
+							`删除 worktree 失败：${err?.message ?? String(err)}`,
+							"error",
+						);
+						return;
+					}
+				}
+			}
+
 			const state: WorkflowState = {
 				...DEFAULT_STATE,
 				workflowEnabled: current.workflowEnabled,
