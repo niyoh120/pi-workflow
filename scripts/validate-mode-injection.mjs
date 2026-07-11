@@ -103,5 +103,23 @@ assert(
 	"plan approve still terminates current tool turn explicitly",
 );
 
+// Exhaustive mode dispatch (T1: assertNever guards closed Mode unions)
+assert(
+	/export function assertNever[\s\S]*?value: never/.test(helpers),
+	"helpers.ts: exports assertNever",
+);
+assert(
+	/promptForMode[\s\S]*?switch[\s\S]*?default:[\s\S]*?assertNever/.test(prompts),
+	"prompts.ts: promptForMode dispatch is exhaustive",
+);
+assert(
+	/modeLabel[\s\S]*?switch[\s\S]*?default:[\s\S]*?assertNever/.test(helpers),
+	"helpers.ts: modeLabel dispatch is exhaustive",
+);
+assert(
+	/modeStatusLabel[\s\S]*?switch[\s\S]*?default:[\s\S]*?assertNever/.test(helpers),
+	"helpers.ts: modeStatusLabel dispatch is exhaustive",
+);
+
 console.log(`\n${runs - failures}/${runs} checks passed.`);
 if (failures > 0) process.exit(1);

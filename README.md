@@ -243,7 +243,7 @@ This prevents wasting tokens when the user still wants to refine the design.
 | `/wf-status` | Show current workflow state (includes plan path and run IDs) |
 | `/wf-exit` | Exit workflow mode |
 | `/wf-reset` | Clear workflow state and plan directory |
-| `/wf-init` | Initialize agent workspace: ensure git repo, generate/update AGENTS.md |
+| `/wf-init` | Initialize agent workspace: ensure git repo, enter scoped Init Mode that audits/generates AGENTS.md via evidence-based grilling, then restore prior mode |
 
 ## Plan Review (Sidecall)
 

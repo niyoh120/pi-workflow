@@ -1,10 +1,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Mode, WorkflowConfig, WorkflowState } from "./types.js";
 import { loadConfig, loadConfigForSession } from "./config.js";
-import { modeLabel, modeStatusLabel } from "./helpers.js";
+import { assertNever, modeLabel, modeStatusLabel } from "./helpers.js";
 import { saveState, getSessionKey } from "./state.js";
 
-// ── Workflow tool mode gating ─────────────────────────────────────────────
+// ── Workflow tool mode gating ─────────────────────────────────────────────────
 
 export const WORKFLOW_GATED_TOOLS = [
 	"workflow_todo",
@@ -15,6 +15,7 @@ export const WORKFLOW_GATED_TOOLS = [
 	"workflow_grill_record",
 	"workflow_plan_review",
 	"workflow_code_review",
+	"workflow_init_complete",
 ] as const;
 
 export const WORKFLOW_TOOL_CLEANUP_NAMES = [...WORKFLOW_GATED_TOOLS] as const;
@@ -30,27 +31,40 @@ const PLAN_WORKFLOW_TOOL_NAMES = [
 
 const WORK_WORKFLOW_TOOL_NAMES = ["workflow_todo", "workflow_plan_read"];
 
+const INIT_WORKFLOW_TOOL_NAMES = ["workflow_init_complete"];
+
+/**
+ * Modes that may call gated workflow tools. `init` only permits
+ * workflow_init_complete (resolved per-mode by computeWorkflowToolNames).
+ */
 export function isWorkflowToolMode(mode: Mode): boolean {
-	return mode === "plan" || mode === "work";
+	return mode === "plan" || mode === "work" || mode === "init";
 }
 
 export function computeWorkflowToolNames(
 	mode: Mode,
 	config: WorkflowConfig,
 ): string[] {
-	if (mode === "plan") {
-		const names = [...PLAN_WORKFLOW_TOOL_NAMES];
-		if (config.planReview.enabled) names.push("workflow_plan_review");
-		return names;
+	switch (mode) {
+		case "plan": {
+			const names = [...PLAN_WORKFLOW_TOOL_NAMES];
+			if (config.planReview.enabled) names.push("workflow_plan_review");
+			return names;
+		}
+		case "work": {
+			const names = [...WORK_WORKFLOW_TOOL_NAMES];
+			if (config.codeReview.enabled) names.push("workflow_code_review");
+			return names;
+		}
+		case "init":
+			return [...INIT_WORKFLOW_TOOL_NAMES];
+		case "idle":
+		case "explore":
+		case "commit":
+			return [];
+		default:
+			return assertNever(mode);
 	}
-
-	if (mode === "work") {
-		const names = [...WORK_WORKFLOW_TOOL_NAMES];
-		if (config.codeReview.enabled) names.push("workflow_code_review");
-		return names;
-	}
-
-	return [];
 }
 
 // ── Runtime mode switching ────────────────────────────────────────────────
@@ -136,11 +150,7 @@ export function activateWorkflowToolsIfAllowed(
 			workflowToolNames = computeWorkflowToolNames(mode, cfg);
 		} catch {
 			// Preserve core workflow tools if config cannot be read.
-			if (mode === "plan") {
-				workflowToolNames = [...PLAN_WORKFLOW_TOOL_NAMES];
-			} else if (mode === "work") {
-				workflowToolNames = [...WORK_WORKFLOW_TOOL_NAMES];
-			}
+			workflowToolNames = computeFallbackWorkflowToolNames(mode);
 		}
 		for (const toolName of workflowToolNames) {
 			next.add(toolName);
@@ -173,21 +183,52 @@ export async function applyModeRuntime(
 	mode: Mode,
 	getAgentDir: () => string,
 ): Promise<boolean> {
-	// Simplified role mapping: plan→plan, work→work, commit→commit
-	const roleMap: Record<string, string> = {
-		explore: "explore",
-		idle: "explore", // idle uses explore model as default
-		plan: "plan",
-		work: "work",
-		commit: "commit",
-	};
-	const role = roleMap[mode];
+	const role = modeRole(mode);
 	try {
-		if (role && !(await setRole(pi, ctx, role, getAgentDir))) return false;
+		if (!(await setRole(pi, ctx, role, getAgentDir))) return false;
 		activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir, mode);
 		return true;
 	} catch {
 		return false;
+	}
+}
+
+/**
+ * Mode → model role. `init` reuses the explore model. `idle` has no prompt but
+ * also routes through explore to keep a stable default model.
+ */
+function modeRole(mode: Mode): string {
+	switch (mode) {
+		case "idle":
+		case "explore":
+		case "init":
+			return "explore";
+		case "plan":
+			return "plan";
+		case "work":
+			return "work";
+		case "commit":
+			return "commit";
+		default:
+			return assertNever(mode);
+	}
+}
+
+/** Fallback tool set when config cannot be read. Mirrors computeWorkflowToolNames. */
+function computeFallbackWorkflowToolNames(mode: Mode): string[] {
+	switch (mode) {
+		case "plan":
+			return [...PLAN_WORKFLOW_TOOL_NAMES];
+		case "work":
+			return [...WORK_WORKFLOW_TOOL_NAMES];
+		case "init":
+			return [...INIT_WORKFLOW_TOOL_NAMES];
+		case "idle":
+		case "explore":
+		case "commit":
+			return [];
+		default:
+			return assertNever(mode);
 	}
 }
 

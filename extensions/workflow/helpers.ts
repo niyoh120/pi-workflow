@@ -1,6 +1,15 @@
 import type { Mode, WorkflowState } from "./types.js";
 import { promptForMode } from "./prompts.js";
 
+/**
+ * Exhaustiveness check for closed unions (typically `Mode`).
+ * Place at the `default` branch of a switch over a closed union so the
+ * compiler flags any unhandled member when the union grows.
+ */
+export function assertNever(value: never): never {
+	throw new Error(`Unexpected value: ${String(value)}`);
+}
+
 /** Format todos as a markdown checklist string. */
 export function todoText(s: WorkflowState): string {
 	if (s.todos.length === 0) return "当前没有 todo。";
@@ -14,27 +23,43 @@ export function todoText(s: WorkflowState): string {
 }
 
 /** Map internal mode to user-visible label. */
-export function modeLabel(mode: string): string {
-	const labels: Record<string, string> = {
-		idle: "Idle",
-		explore: "Explore Mode",
-		plan: "Plan Mode",
-		work: "Work Mode",
-		commit: "Commit Mode",
-	};
-	return labels[mode] ?? mode;
+export function modeLabel(mode: Mode): string {
+	switch (mode) {
+		case "idle":
+			return "Idle";
+		case "explore":
+			return "Explore Mode";
+		case "init":
+			return "Init Mode";
+		case "plan":
+			return "Plan Mode";
+		case "work":
+			return "Work Mode";
+		case "commit":
+			return "Commit Mode";
+		default:
+			return assertNever(mode);
+	}
 }
 
 /** Map internal mode to a compact TUI status label. */
-export function modeStatusLabel(mode: string): string {
-	const labels: Record<string, string> = {
-		idle: "○ Idle",
-		explore: "🔎 Explore",
-		plan: "🧭 Plan",
-		work: "⚒ Work",
-		commit: "🚀 Commit",
-	};
-	return labels[mode] ?? mode;
+export function modeStatusLabel(mode: Mode): string {
+	switch (mode) {
+		case "idle":
+			return "○ Idle";
+		case "explore":
+			return "🔎 Explore";
+		case "init":
+			return "⚙ Init";
+		case "plan":
+			return "🧭 Plan";
+		case "work":
+			return "⚒ Work";
+		case "commit":
+			return "🚀 Commit";
+		default:
+			return assertNever(mode);
+	}
 }
 
 /** Build the current workflow status text block for runtime message/tool-result injection. */
@@ -46,6 +71,8 @@ export function currentStatusText(s: WorkflowState): string {
 		`workRunId: ${s.workRunId ?? "none"}`,
 		`worktreePath: ${s.worktreePath ? promptLine(s.worktreePath) : "none"}`,
 		`worktreeBranch: ${s.worktreeBranch ? promptLine(s.worktreeBranch) : "none"}`,
+		`initReturnMode: ${s.initReturnMode ?? "none"}`,
+		`initTargetPath: ${s.initTargetPath ? promptLine(s.initTargetPath) : "none"}`,
 		"",
 		"todos:",
 		todoText(s),

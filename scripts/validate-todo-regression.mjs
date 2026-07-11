@@ -48,31 +48,32 @@ function inlineLoadState(wfDir, sessionKey) {
 }
 
 function inlineIsWorkflowToolMode(mode) {
-	return mode === "plan" || mode === "work";
+	return mode === "plan" || mode === "work" || mode === "init";
 }
 
 function inlineComputeWorkflowToolNames(mode, config) {
-	if (!inlineIsWorkflowToolMode(mode)) return [];
-
-	if (mode === "plan") {
-		const names = [
-			"workflow_todo",
-			"workflow_plan_read",
-			"workflow_plan_save",
-			"workflow_plan_approve",
-			"workflow_plan_clear",
-		];
-		if (config.planReview.enabled) names.push("workflow_plan_review");
-		return names;
+	switch (mode) {
+		case "plan": {
+			const names = [
+				"workflow_todo",
+				"workflow_plan_read",
+				"workflow_plan_save",
+				"workflow_plan_approve",
+				"workflow_plan_clear",
+			];
+			if (config.planReview.enabled) names.push("workflow_plan_review");
+			return names;
+		}
+		case "work": {
+			const names = ["workflow_todo", "workflow_plan_read"];
+			if (config.codeReview.enabled) names.push("workflow_code_review");
+			return names;
+		}
+		case "init":
+			return ["workflow_init_complete"];
+		default:
+			return [];
 	}
-
-	if (mode === "work") {
-		const names = ["workflow_todo", "workflow_plan_read"];
-		if (config.codeReview.enabled) names.push("workflow_code_review");
-		return names;
-	}
-
-	return [];
 }
 
 // ═══════════════════════════════════════════════════════
@@ -474,6 +475,23 @@ console.log("\n=== Check 6: Source structure verification ===");
 	{
 		const r = normalizeState({ unknownField: 42 });
 		assert(!("unknownField" in r), "real normalizeState: unknown key dropped");
+	}
+	{
+		// Corrupt/unknown mode must fall back to DEFAULT_STATE.mode, not reach
+		// downstream assertNever switches.
+		const r = normalizeState({ mode: "bogus-mode" });
+		assert(r.mode === DEFAULT_STATE.mode, "real normalizeState: unknown mode falls back to default");
+	}
+	{
+		const r = normalizeState({ mode: "init", initReturnMode: "work", initTargetPath: "/tmp/AGENTS.md" });
+		assert(r.mode === "init", "real normalizeState: init mode preserved");
+		assert(r.initReturnMode === "work", "real normalizeState: initReturnMode preserved in init");
+		assert(r.initTargetPath === "/tmp/AGENTS.md", "real normalizeState: initTargetPath preserved in init");
+	}
+	{
+		// init fields are dropped outside init mode to prevent stale leakage.
+		const r = normalizeState({ mode: "explore", initReturnMode: "work", initTargetPath: "/tmp/AGENTS.md" });
+		assert(r.initReturnMode === undefined && r.initTargetPath === undefined, "real normalizeState: init fields dropped outside init mode");
 	}
 	{
 		const r = normalizeState({ pendingWorkHandoff: true, mode: "work" });
@@ -1179,13 +1197,14 @@ console.log("\n=== Check 14: Explore mode ===");
 		"prompts.ts: exports EXPLORE_PROMPT",
 	);
 	assert(
-		promptsTs14.includes('mode === "explore"'),
+		promptsTs14.includes('case "explore"'),
 		"prompts.ts: promptForMode handles explore",
 	);
 
 	// mode.ts: roleMap includes explore
 	assert(
-		modeTs14.includes('explore: "explore"'),
+		/case "explore":\s*\n\s*\n?\s*case "init":[\s\S]*?return "explore"/.test(modeTs14) ||
+			/modeRole[\s\S]*?case "explore"[\s\S]*?return "explore"/.test(modeTs14),
 		"mode.ts: roleMap has explore: explore",
 	);
 
@@ -1252,7 +1271,8 @@ console.log("\n=== Check 14: Explore mode ===");
 
 	// helpers.ts: modeLabel includes explore
 	assert(
-		helpersTs14.includes('explore: "Explore Mode"'),
+		helpersTs14.includes('case "explore":') &&
+			helpersTs14.includes('return "Explore Mode"'),
 		"helpers.ts: modeLabel has explore",
 	);
 
@@ -1545,6 +1565,52 @@ function assertNotContains(haystack, needle, label) {
 		console.log(`  PASS: ${label}`);
 	}
 }
+
+console.log("\n=== Init Mode static checks ===");
+function validateInitModeStatic() {
+	const typesTs = fs.readFileSync(path.join(CWD, "extensions/workflow/types.ts"), "utf8");
+	const modeTs = fs.readFileSync(path.join(CWD, "extensions/workflow/mode.ts"), "utf8");
+	const guardsTs = fs.readFileSync(path.join(CWD, "extensions/workflow/guards.ts"), "utf8");
+	const commandsTs2 = fs.readFileSync(path.join(CWD, "extensions/workflow/commands.ts"), "utf8");
+	const toolsTs2 = fs.readFileSync(path.join(CWD, "extensions/workflow/tools.ts"), "utf8");
+	const promptsTs2 = fs.readFileSync(path.join(CWD, "extensions/workflow/prompts.ts"), "utf8");
+	const helpersTs2 = fs.readFileSync(path.join(CWD, "extensions/workflow/helpers.ts"), "utf8");
+
+	assert(/export type Mode = "idle" \| "explore" \| "init"[\s\S]*"commit";/.test(typesTs), "types.ts: Mode includes init");
+	assert(/initReturnMode\?: "explore" \| "plan" \| "work" \| "commit";/.test(typesTs), "types.ts: initReturnMode narrowed to non-idle/init modes");
+	assert(/initTargetPath\?: string;/.test(typesTs), "types.ts: optional initTargetPath field");
+
+	assert(modeTs.includes("workflow_init_complete"), "mode.ts: WORKFLOW_GATED_TOOLS includes workflow_init_complete");
+	assert(modeTs.includes("case \"init\":") && modeTs.includes("INIT_WORKFLOW_TOOL_NAMES"), "mode.ts: computeWorkflowToolNames handles init via exhaustive switch");
+	assert(/modeRole[\s\S]*?case "init"[\s\S]*?return "explore"/.test(modeTs), "mode.ts: init reuses explore model role");
+	assert(/function modeRole[\s\S]*?default:[\s\S]*?assertNever/.test(modeTs), "mode.ts: modeRole switch uses assertNever");
+	assert(/function computeFallbackWorkflowToolNames[\s\S]*?default:[\s\S]*?assertNever/.test(modeTs), "mode.ts: fallback tool names switch uses assertNever");
+
+	assert(guardsTs.includes("isAllowedInitTargetPath"), "guards.ts: exports isAllowedInitTargetPath");
+	assert(/isReadonlyMode[\s\S]*?mode === "init"/.test(guardsTs), "guards.ts: init is read-only (inherits bash guard)");
+	assert(guardsTs.includes("has multiple hard links") && guardsTs.includes("is a symlink — rejected"), "guards.ts: init path validator rejects symlink + hardlink");
+
+	assert(commandsTs2.includes("effectiveMode === \"init\"") && commandsTs2.includes("isAllowedInitTargetPath"), "commands.ts: tool_call guard has init branch before readonly");
+	assert(/function isProjectEmpty[\s\S]*?ignore[\s\S]*?\.git[\s\S]*?\.pi/.test(commandsTs2), "commands.ts: isProjectEmpty ignores .git/.pi/AGENTS.md");
+	assert(commandsTs2.includes("registerWfInitCommand(\n\tpi: ExtensionAPI,\n\tgetAgentDir") || commandsTs2.includes("registerWfInitCommand(\n\tpi,\n\tgetAgentDir") || /registerWfInitCommand\([\s\S]*?getAgentDir/.test(commandsTs2), "commands.ts: registerWfInitCommand takes getAgentDir");
+	assert(commandsTs2.includes("state.mode === \"init\" && state.initTargetPath"), "commands.ts: wf-init resumes existing init without overwriting return mode");
+
+	assert(toolsTs2.includes("registerInitCompleteTool"), "tools.ts: registers registerInitCompleteTool");
+	assert(/name: "workflow_init_complete"[\s\S]*?status: InitCompleteStatusSchema/.test(toolsTs2), "tools.ts: workflow_init_complete has status param");
+	assert(toolsTs2.includes("workflow_init_complete only allowed in Init Mode"), "tools.ts: init_complete gates on init mode");
+	assert(toolsTs2.includes("target failed validation"), "tools.ts: init_complete completed re-validates target");
+	assert(toolsTs2.includes("mode: returnMode"), "tools.ts: init_complete restores prior mode");
+
+	assert(promptsTs2.includes("INIT_PROMPT") && promptsTs2.includes('case "init":'), "prompts.ts: INIT_PROMPT + exhaustive dispatch");
+	assert(helpersTs2.includes('case "init":') && helpersTs2.includes("Init Mode"), "helpers.ts: modeLabel has init");
+
+	// Inline runtime: init workflow tools
+	const initTools = inlineComputeWorkflowToolNames("init", { planReview: { enabled: true }, codeReview: { enabled: true } });
+	assert(JSON.stringify(initTools) === JSON.stringify(["workflow_init_complete"]), "inline runtime: init exposes only workflow_init_complete");
+	assert(inlineIsWorkflowToolMode("init") === true, "inline runtime: init is a workflow-tool mode");
+	assert(inlineIsWorkflowToolMode("idle") === false && inlineIsWorkflowToolMode("explore") === false, "inline runtime: idle/explore are not workflow-tool modes");
+}
+validateInitModeStatic();
 
 console.log(`\n=== Result: ${runs - failures}/${runs} passed ===`);
 if (failures > 0) {

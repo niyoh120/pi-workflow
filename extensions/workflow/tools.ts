@@ -25,6 +25,9 @@ import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { executePlanReviewSidecall } from "./sidecall.js";
 import { transitionWorkflowMode } from "./mode.js";
+import { isAllowedInitTargetPath } from "./guards.js";
+import * as path from "node:path";
+import * as fs from "node:fs";
 import {
 	checkOcrAvailable,
 	buildReviewArgv,
@@ -852,6 +855,116 @@ export function registerCodeReviewTool(
 
 const _workflowToolsRegistered = new WeakSet<ExtensionAPI>();
 
+// ── workflow_init_complete tool (Init Mode lifecycle close) ───────────────
+
+const InitCompleteStatusSchema = StringEnum([
+	"completed",
+	"skipped",
+	"cancelled",
+] as const);
+
+export function registerInitCompleteTool(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.registerTool({
+		name: "workflow_init_complete",
+		label: "Init Complete",
+		description:
+			"Close Init Mode: restore the prior mode after generating, skipping, or cancelling AGENTS.md. Only allowed in Init Mode.",
+		promptSnippet:
+			"workflow_init_complete: finish Init Mode (completed/skipped/cancelled) and restore the prior mode.",
+		promptGuidelines: [
+			"Call workflow_init_complete once when Init Mode work is done, skipped, or cancelled.",
+			"Use completed after AGENTS.md was written, skipped when the user chose not to change anything, or cancelled on user abort.",
+		],
+		parameters: Type.Object({
+			status: InitCompleteStatusSchema,
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const denied = checkWorkflowEnabled(ctx, getAgentDir);
+			if (denied) return denied;
+
+			const sessionKey = getSessionKey(ctx.sessionManager);
+			const state = loadState(ctx.cwd, sessionKey);
+
+			if (state.mode !== "init") {
+				throw new Error(
+					`workflow_init_complete only allowed in Init Mode (current: ${state.mode}).`,
+				);
+			}
+
+			const status = params.status as "completed" | "skipped" | "cancelled";
+			const targetPath = state.initTargetPath;
+
+			if (status === "completed") {
+				if (!targetPath) {
+					throw new Error(
+						"workflow_init_complete(completed): no target AGENTS.md configured.",
+					);
+				}
+				if (!fs.existsSync(targetPath)) {
+					throw new Error(
+						`workflow_init_complete(completed): target file does not exist: ${targetPath}`,
+					);
+				}
+				const stat = fs.statSync(targetPath);
+				if (!stat.isFile() || stat.size === 0) {
+					throw new Error(
+						`workflow_init_complete(completed): target must be a non-empty regular file: ${targetPath}`,
+					);
+				}
+				// Best-effort re-validation against the single-file rule.
+				const repoRoot = path.dirname(targetPath);
+				const denial = isAllowedInitTargetPath(
+					repoRoot,
+					targetPath,
+					targetPath,
+				);
+				if (denial) {
+					throw new Error(
+						`workflow_init_complete(completed): target failed validation: ${denial}`,
+					);
+				}
+			}
+
+			// initReturnMode is typed as "explore" | "plan" | "work" | "commit";
+			// fall back to explore when missing.
+			const returnMode: WorkflowState["mode"] = state.initReturnMode ?? "explore";
+
+			const nextState: WorkflowState = {
+				...state,
+				mode: returnMode,
+				initReturnMode: undefined,
+				initTargetPath: undefined,
+			};
+
+			const result = await transitionWorkflowMode({
+				pi,
+				ctx,
+				sessionKey,
+				nextState,
+				getAgentDir,
+			});
+			if (!result.ok) {
+				throw new Error(
+					`workflow_init_complete: failed to restore mode: ${result.reason}`,
+				);
+			}
+
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Init Mode ${status}. Restored mode: ${returnMode}.`,
+					},
+				],
+				details: { status, returnMode },
+			};
+		},
+	});
+}
+
 /**
  * Register all workflow tools (todo, plan, plan review, code review).
  * Idempotent per ExtensionAPI instance — skips if already registered.
@@ -874,6 +987,7 @@ export function registerAllWorkflowTools(
 	registerGrillRecordTool(pi, getAgentDir);
 	if (config.planReview.enabled) registerPlanReviewTool(pi, getAgentDir);
 	if (config.codeReview.enabled) registerCodeReviewTool(pi, getAgentDir);
+	registerInitCompleteTool(pi, getAgentDir);
 
 	_workflowToolsRegistered.add(pi);
 }

@@ -8,6 +8,7 @@ import {
 	isReadonlyMode,
 	isLocalFileMutatingShell,
 	isAllowedPlanScratchPath,
+	isAllowedInitTargetPath,
 	isInsideWorktree,
 } from "./guards.js";
 import {
@@ -74,9 +75,21 @@ function findExistingAgentsFile(root: string): string | null {
 	return null;
 }
 
-function isProjectEmpty(root: string): boolean {
+function isProjectEmpty(root: string, agentsFile: string | null): boolean {
+	// Workflow-only scaffolding and an existing AGENTS.md do not count as
+	// project evidence; everything else (including .github, .vscode, etc.) does.
+	const ignore = new Set([".git", ".pi"]);
+	if (agentsFile) {
+		// agentsFile may be a top-level filename ("AGENTS.md") or a nested path
+		// ("docs/AGENTS.md"); ignore the top-level entry so the whole container
+		// is excluded from the emptiness check.
+		const top = agentsFile.includes(path.sep)
+			? agentsFile.slice(0, agentsFile.indexOf(path.sep))
+			: agentsFile;
+		ignore.add(top);
+	}
 	const entries = fs.readdirSync(root, { withFileTypes: true });
-	const meaningful = entries.filter((e) => !e.name.startsWith("."));
+	const meaningful = entries.filter((e) => !ignore.has(e.name));
 	return meaningful.length === 0;
 }
 
@@ -285,6 +298,28 @@ export function registerToolCallGuard(
 			};
 		}
 
+		// Init Mode: only the recorded AGENTS.md target may be written/edited.
+		// Must run before the generic readonly branch (init is in isReadonlyMode
+		// to inherit the bash mutating-command guard).
+		if (effectiveMode === "init" &&
+			(event.toolName === "write" || event.toolName === "edit")) {
+			const targetPath: string | undefined =
+				(event.input as any)?.path ?? (event.input as any)?.filePath;
+			const repoRoot =
+				state.initTargetPath
+					? path.dirname(state.initTargetPath)
+					: ctx.cwd;
+			const denial = isAllowedInitTargetPath(
+				repoRoot,
+				state.initTargetPath,
+				targetPath,
+			);
+			if (denial) {
+				return { block: true, reason: denial };
+			}
+			return;
+		}
+
 		// Read-only modes: block local file mutations.
 		if (isReadonlyMode(effectiveMode)) {
 			if (event.toolName === "read") {
@@ -433,7 +468,7 @@ export function registerAllWorkflowCommands(
 	registerCommitCommand(pi, getAgentDir);
 	registerWfStatusCommand(pi, getAgentDir);
 	registerWfResetCommand(pi);
-	registerWfInitCommand(pi);
+	registerWfInitCommand(pi, getAgentDir);
 	registerWfExitCommand(pi);
 
 	_workflowCommandsRegistered.add(pi);
@@ -950,9 +985,12 @@ export function registerWfResetCommand(pi: ExtensionAPI): void {
 	});
 }
 
-export function registerWfInitCommand(pi: ExtensionAPI): void {
+export function registerWfInitCommand(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
 	pi.registerCommand("wf-init", {
-		description: "初始化 agent 工作区：确保 git 仓库存在，生成/更新 AGENTS.md",
+		description: "初始化 agent 工作区：确保 git 仓库存在，进入 Init Mode 生成/校准 AGENTS.md",
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 
@@ -972,52 +1010,89 @@ export function registerWfInitCommand(pi: ExtensionAPI): void {
 
 			const root = getGitRoot(ctx.cwd);
 			const existingFile = findExistingAgentsFile(root);
+			const targetFile = existingFile ?? "AGENTS.md";
+			const targetPath = path.join(root, targetFile);
+			const sessionKey = ctxSessionKey(ctx);
+			const state = loadState(ctx.cwd, sessionKey);
 
-			if (existingFile) {
-				const filePath = path.join(root, existingFile);
-				pi.sendUserMessage(
-					`当前仓库已存在 ${existingFile} (${filePath})。\n\n` +
-						`请向用户询问是否更新 AGENTS.md。ask_user_question 工具可用时使用该工具提问；` +
-						`工具不可用时，用普通文本提供选项让用户手动回复。\n\n` +
-						`选项：\n` +
-						`1. 更新 AGENTS.md：读取当前内容并结合项目上下文更新。\n` +
-						`2. 保持现状：不修改文件。\n\n` +
-						`用户选择更新后，再询问更新方向，然后读取 ${filePath} 并写回更新后的内容。`,
+			// Resume an already-active init instead of overwriting the return mode.
+			if (state.mode === "init" && state.initTargetPath) {
+				sendInitTaskMessage(
+					pi,
+					root,
+					ctx.cwd,
+					targetPath,
+					isProjectEmpty(root, existingFile) ? "empty" : "existing",
+					existingFile,
 				);
 				return;
 			}
 
-			if (isProjectEmpty(root)) {
-				pi.sendUserMessage(
-					`当前仓库还没有实质项目文件。请先向用户收集生成 AGENTS.md 所需信息。\n\n` +
-						`ask_user_question 工具可用时使用该工具提问；工具不可用时，用普通文本列出问题让用户手动输入。` +
-						`需要收集：\n` +
-						`1. 项目使用的编程语言和框架。\n` +
-						`2. 代码风格和规范（如 eslint、prettier、rustfmt）。\n` +
-						`3. 构建和测试命令（如 npm test、cargo test、pytest）。\n` +
-						`4. 提交信息规范（如 conventional commits）。\n` +
-						`5. 其他 agent 需要遵守的约定或限制。\n\n` +
-						`收集完毕后，使用 write 工具将 AGENTS.md 写入 ${path.join(root, "AGENTS.md")}。`,
-				);
+			const returnMode: WorkflowState["initReturnMode"] =
+				state.mode === "idle" || state.mode === "init"
+					? "explore"
+					: state.mode;
+
+			const nextState: WorkflowState = {
+				...state,
+				mode: "init",
+				initReturnMode: returnMode,
+				initTargetPath: targetPath,
+			};
+
+			const result = await transitionWorkflowMode({
+				pi,
+				ctx,
+				sessionKey,
+				nextState,
+				getAgentDir,
+			});
+			if (!result.ok) {
+				ctx.ui.notify(result.reason, "error");
 				return;
 			}
 
-			const rootRel = root === ctx.cwd ? "仓库根目录" : `仓库根目录 (${root})`;
-			pi.sendUserMessage(
-				`请在 ${rootRel} 初始化 AGENTS.md。\n\n` +
-					`请先探索项目上下文：README、docs、package/build/test 配置、目录结构、相关源码等。` +
-					`探索后向用户确认生成方案：ask_user_question 工具可用时使用该工具提问；` +
-					`工具不可用时，用普通文本提供选项让用户手动回复。\n\n` +
-					`确认内容至少包含：\n` +
-					`- 项目概述\n` +
-					`- 构建/测试命令\n` +
-					`- 代码风格/规范\n` +
-					`- 目录约定\n` +
-					`- 工作流规则（idle → plan → work → commit；plan review 使用内置 completeSimple 侧调用，code review 使用 OCR CLI）\n` +
-					`- 提交规范\n` +
-					`- 安全/禁止事项\n\n` +
-					`用户确认后，使用 write 工具将内容写入 ${path.join(root, "AGENTS.md")}。`,
+			sendInitTaskMessage(
+				pi,
+				root,
+				ctx.cwd,
+				targetPath,
+				isProjectEmpty(root, existingFile) ? "empty" : "existing",
+				existingFile,
 			);
 		},
 	});
+}
+
+/** Compose and send the Init Mode kickoff user message. */
+function sendInitTaskMessage(
+	pi: ExtensionAPI,
+	root: string,
+	cwd: string,
+	targetPath: string,
+	repoStatus: "empty" | "existing",
+	existingFile: string | null,
+): void {
+	const rootRel = root === cwd ? "仓库根目录" : `仓库根目录 (${root})`;
+	const targetRel = path.basename(targetPath);
+
+	const existingClause = existingFile
+		? `当前仓库已存在 ${existingFile}。请将它作为待验证的信息来源：审计过时/遗漏/冲突/冗余，按当前最佳效果重建，无需保守合并。`
+		: "当前仓库没有 AGENTS.md，将新建。";
+
+	const statusClause =
+		repoStatus === "empty"
+			? `仓库状态：empty（只有 git/.pi/AGENTS.md）。按空仓库流程逐项确认：项目目标与交付形态、语言/运行时/框架/包管理器、构建/测试/lint/格式化命令、目录与命名约定、提交规范；按项目形态补充部署/发布与关键兼容、安全、性能约束。`
+			: `仓库状态：existing。先扫描 README、docs、构建/CI 配置、源码、部署文件、git 历史；能由明确证据确认的事实直接采用，缺失、冲突、多方案或团队偏好逐项 grilling。`;
+
+	pi.sendUserMessage(
+		[
+			`# Init Mode 任务：${rootRel} 的 ${targetRel}`,
+			existingClause,
+			statusClause,
+			`目标文件：${targetPath}`,
+			`按 Init Mode 流程执行：收集证据→逐项确认/裁决→展示最终发现、用户确认的决策和计划删除的旧规则→重建紧凑版 AGENTS.md。`,
+			`完成后调用 workflow_init_complete(status="completed")；用户决定不更新/不生成时 skipped；用户取消时 cancelled。`,
+		].join("\n\n"),
+	);
 }

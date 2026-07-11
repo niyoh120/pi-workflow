@@ -3,8 +3,11 @@ export type Thinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 /** Workflow roles — only the ones we actively configure models for. */
 export type Role = "explore" | "plan" | "planReview" | "work" | "commit";
 
-/** Simplified mode: idle plus explore/plan/work/commit workflow states. */
-export type Mode = "idle" | "explore" | "plan" | "work" | "commit";
+/**
+ * Simplified mode: idle plus explore/init/plan/work/commit workflow states.
+ * `init` is a scoped write-only-for-AGENTS.md mode used by /wf-init.
+ */
+export type Mode = "idle" | "explore" | "init" | "plan" | "work" | "commit";
 
 export type TodoStatus = "pending" | "in_progress" | "done" | "blocked";
 
@@ -90,6 +93,18 @@ export interface WorkflowState {
 	hiddenDoneIds: string[];
 	/** Plan Mode grilling 阶段记录的设计决策拷问序列。 */
 	grillTurns: GrillTurn[];
+	/**
+	 * Mode to restore after Init Mode ends. Undefined when not in init.
+	 * `idle` and `init` are excluded as return targets (workflow auto-promotes
+	 * idle → explore; init → init is a no-op); init_complete falls back to
+	 * explore if the recorded value is missing or invalid.
+	 */
+	initReturnMode?: "explore" | "plan" | "work" | "commit";
+	/**
+	 * Absolute path of the single AGENTS.md file Init Mode may write/edit.
+	 * Undefined when not in init. Enforced strictly by the tool_call guard.
+	 */
+	initTargetPath?: string;
 	/**
 	 * Session-scoped config overrides — highest-priority config layer.
 	 * Merged on top of DEFAULT ← global ← project when resolving config for

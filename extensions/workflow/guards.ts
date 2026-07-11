@@ -234,9 +234,116 @@ export function isInsideWorktree(
 	return null;
 }
 
-/** Returns true if the given mode is read-only (no local file mutations). */
+/**
+ * Returns true if the given mode is read-only for local file mutations via
+ * bash and the generic write/edit path. `init` is treated as read-only so it
+ * inherits the bash mutating-command guard; its single-file AGENTS.md write
+ * exception is handled by a dedicated init branch before this generic path.
+ */
 export function isReadonlyMode(mode: Mode): boolean {
-	return mode === "explore" || mode === "plan";
+	return mode === "explore" || mode === "plan" || mode === "init";
+}
+
+/**
+ * Validate a write/edit target against the single Init Mode allow-file.
+ *
+ * Invariants:
+ *  - targetPath must be absolute and, after normalize+resolve, strictly equal
+ *    to the recorded init target path (no directory prefix, no traversal).
+ *  - the repo root (target's parent, as recorded by /wf-init) must be an
+ *    existing real directory and not a symlink.
+ *  - every existing path component from repo root down to the target must be
+ *    a real directory (no symlinks); the target itself, if it exists, must be
+ *    a regular file with a single hard link.
+ *
+ * This is a preflight before the built-in write/edit mutation. Like the
+ * worktree guard it shares the symlink-swap TOCTOU boundary; a fully
+ * no-follow controlled writer is out of scope.
+ *
+ * Returns null if allowed, otherwise a denial reason string.
+ */
+export function isAllowedInitTargetPath(
+	repoRoot: string,
+	initTargetPath: string | undefined,
+	targetPath: string | undefined,
+): string | null {
+	if (!initTargetPath) {
+		return "Init Mode has no target file configured.";
+	}
+	if (!targetPath) {
+		return "Init Mode: write/edit requires the target AGENTS.md path.";
+	}
+	if (!path.isAbsolute(targetPath)) {
+		return `Init Mode: write/edit requires an absolute path. Received: ${targetPath}`;
+	}
+
+	const normalizedTarget = path.resolve(path.normalize(targetPath));
+	const normalizedInit = path.resolve(path.normalize(initTargetPath));
+	if (normalizedTarget !== normalizedInit) {
+		return `Init Mode: only ${normalizedInit} may be written. Received: ${normalizedTarget}`;
+	}
+
+	// Repo root must be an existing real directory.
+	let rootReal: string;
+	try {
+		const rootStat = lstatSync(repoRoot);
+		if (rootStat.isSymbolicLink()) {
+			return `Repo root ${repoRoot} is a symlink — rejected.`;
+		}
+		if (!rootStat.isDirectory()) {
+			return `Repo root ${repoRoot} is not a directory.`;
+		}
+		rootReal = realpathSync(repoRoot);
+	} catch (err) {
+		return `Cannot resolve repo root: ${repoRoot} (${(err as Error).message})`;
+	}
+
+	// Walk the relative segments from repo root to target, enforcing no
+	// symlinks and real directories; the final segment, if present, must be a
+	// regular file with a single hard link. Nested paths (e.g. docs/AGENTS.md)
+	// under the repo root are intentionally allowed.
+	const rel = path.relative(rootReal, normalizedTarget);
+	if (
+		rel === "" ||
+		rel === ".." ||
+		rel.startsWith(`..${path.sep}`) ||
+		path.isAbsolute(rel)
+	) {
+		return `Init target ${normalizedTarget} resolves outside repo root.`;
+	}
+
+	const segments = rel.split(path.sep).filter(Boolean);
+	let accumulated = rootReal;
+	for (let i = 0; i < segments.length; i++) {
+		accumulated = path.join(accumulated, segments[i]);
+		const isFinal = i === segments.length - 1;
+
+		try {
+			const stat = lstatSync(accumulated);
+			if (stat.isSymbolicLink()) {
+				return `Path component ${accumulated} is a symlink — rejected.`;
+			}
+			if (isFinal) {
+				if (!stat.isFile()) {
+					return `Target ${accumulated} exists but is not a regular file.`;
+				}
+				if (stat.nlink > 1) {
+					return `Target ${accumulated} has multiple hard links — rejected.`;
+				}
+			} else if (!stat.isDirectory()) {
+				return `Path component ${accumulated} is not a directory.`;
+			}
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code === "ENOENT" || code === "ENOTDIR") {
+				if (isFinal) continue; // creating the target file is allowed
+				return `Path component ${accumulated} does not exist.`;
+			}
+			return `Cannot validate path component: ${accumulated} (${(err as Error).message})`;
+		}
+	}
+
+	return null;
 }
 
 /** Check whether a shell command would modify local files. */

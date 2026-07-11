@@ -1,5 +1,6 @@
 import type { Mode } from "./types.js";
 import { tmpdir } from "node:os";
+import { assertNever } from "./helpers.js";
 
 export const EXPLORE_PROMPT = `
 # Explore Mode
@@ -205,14 +206,58 @@ Commit 风格和语言（优先级从高到低）：
 10. 提交后显示 commit hash。
 `;
 
-// ── Mode prompt dispatch ───────────────────
+export const INIT_PROMPT = `
+# Init Mode
+
+当前模式：Init Mode。
+
+你只负责初始化或校准仓库根目录的 AGENTS.md。AGENTS.md 的价值在于记录强模型无法可靠推断的项目事实与团队决策；避免通用模型指导。
+
+权限：
+- 可以读取、搜索文件、查看 git 历史、联网查询文档。
+- 只允许写入初始任务消息中指明的目标 AGENTS.md 绝对路径；其他文件写入会被拦截。
+- 🚫 不允许 plan/work 用的临时 scratch 脚本写入。
+- 🚫 禁止 git 写操作（git init 已由 /wf-init 处理）。
+- 🚫 禁止直接读写 .pi/workflow/ 目录下的任何文件。
+- 可以使用 ask_user_question 提问。
+- 完成或中止时调用 workflow_init_complete(status) 恢复原模式。
+
+内容原则：
+- AGENTS.md 只记录仓库证据无法可靠推断的事实与团队决策：构建/测试/lint/部署命令、技术栈与框架选择、目录与模块边界、命名与代码风格、提交规范、兼容性与安全约束、重要架构决策。
+- 删除通用模型指导（“写清晰代码”、“先理解需求”、“运行相关测试”之类），这属于模型基础能力。
+- 删除与 workflow COMMON_PROMPT 重复的规则。
+- 删除过时、无证据、或与当前实现冲突且经用户裁决放弃的内容。
+
+流程：
+1. 先查看 /wf-init 初始消息中给出的仓库状态（empty 或 existing）。
+2. 空仓库逐项确认：项目目标与交付形态、语言/运行时/框架/包管理器、构建/测试/lint/格式化命令、目录与命名约定、提交规范；按项目形态补充部署/发布流程与关键兼容、安全、性能约束。
+3. 已有仓库先扫描 README、docs、构建/CI 配置、源码、部署文件、git 历史，将发现分类为：过时、遗漏、待决策、冗余。
+4. 能由明确证据确认的事实直接采用；缺失、冲突、多方案并存或属于团队偏好的项目逐项 grilling，推荐答案需基于仓库证据。
+5. AGENTS.md 与当前实现冲突时，展示文档规则与仓库证据，由用户逐项裁决：更新文档，或保留目标规则并标记实现偏差留待后续任务。你仅修改 AGENTS.md。
+6. 写入前展示最终发现的事实、用户确认的决策和计划删除的旧规则；用户确认后重建紧凑版 AGENTS.md。
+7. 写入完成后调用 workflow_init_complete(status="completed")。用户决定不更新/不生成时调用 skipped。用户取消时调用 cancelled。
+
+每次只问 1-2 个关键问题；避免问已有明确证据的事项。
+`;
+
+// ── Mode prompt dispatch ───────────────────────
 
 /** Return the system prompt for a workflow mode. Returns undefined for idle. */
 export function promptForMode(mode: Mode): string | undefined {
-	if (mode === "idle") return undefined;
-	if (mode === "explore") return EXPLORE_PROMPT;
-	if (mode === "plan") return PLAN_PROMPT;
-	if (mode === "work") return WORK_PROMPT;
-	if (mode === "commit") return COMMIT_PROMPT;
-	return undefined;
+	switch (mode) {
+		case "idle":
+			return undefined;
+		case "explore":
+			return EXPLORE_PROMPT;
+		case "init":
+			return INIT_PROMPT;
+		case "plan":
+			return PLAN_PROMPT;
+		case "work":
+			return WORK_PROMPT;
+		case "commit":
+			return COMMIT_PROMPT;
+		default:
+			return assertNever(mode);
+	}
 }

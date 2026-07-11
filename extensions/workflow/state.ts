@@ -47,9 +47,16 @@ export function normalizeState(raw: unknown): WorkflowState {
 			typeof obj.workflowExplicitlyDisabled === "boolean"
 				? obj.workflowExplicitlyDisabled
 				: DEFAULT_STATE.workflowExplicitlyDisabled,
-		mode: (typeof obj.mode === "string"
-			? obj.mode
-			: DEFAULT_STATE.mode) as WorkflowState["mode"],
+		mode:
+			typeof obj.mode === "string" &&
+			(obj.mode === "idle" ||
+				obj.mode === "explore" ||
+				obj.mode === "init" ||
+				obj.mode === "plan" ||
+				obj.mode === "work" ||
+				obj.mode === "commit")
+				? obj.mode
+				: DEFAULT_STATE.mode,
 		planPath: typeof obj.planPath === "string" ? obj.planPath : undefined,
 		planTitle: typeof obj.planTitle === "string" ? obj.planTitle : undefined,
 		planRunId: typeof obj.planRunId === "string" ? obj.planRunId : undefined,
@@ -110,6 +117,25 @@ export function normalizeState(raw: unknown): WorkflowState {
 						notes: typeof t.notes === "string" ? t.notes : undefined,
 					}))
 			: [],
+		// Init Mode lifecycle fields. Only honored when mode === "init" and
+		// the shape matches; everything else normalizes to undefined so stale
+		// values from a previous run cannot leak into another mode.
+		initReturnMode:
+			obj.mode === "init" &&
+			typeof obj.initReturnMode === "string" &&
+			(obj.initReturnMode === "explore" ||
+				obj.initReturnMode === "plan" ||
+				obj.initReturnMode === "work" ||
+				obj.initReturnMode === "commit")
+				? obj.initReturnMode
+				: undefined,
+		initTargetPath:
+			obj.mode === "init" &&
+			typeof obj.initTargetPath === "string" &&
+			obj.initTargetPath.trim() &&
+			path.isAbsolute(obj.initTargetPath.trim())
+				? obj.initTargetPath.trim()
+				: undefined,
 		// Preserve session config overrides as a plain object, stripping any
 		// dangerous keys (__proto__/constructor/prototype) so a corrupt or
 		// malicious state file can't pollute prototypes during later deepMerge.

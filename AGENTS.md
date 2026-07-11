@@ -56,7 +56,7 @@ node scripts/validate-todo-regression.mjs
 | `/wf-status` | 查看当前工作流状态 |
 | `/wf-exit` | 退出工作流模式 |
 | `/wf-reset` | 清空工作流状态和计划目录 |
-| `/wf-init` | 初始化 git 仓库并生成/更新 AGENTS.md |
+| `/wf-init` | 初始化 git 仓库并进入 Init Mode 审计/生成/校准 AGENTS.md（只允许写目标文件），完成后恢复原模式 |
 
 ## 代码风格/规范
 
