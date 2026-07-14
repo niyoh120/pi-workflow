@@ -365,9 +365,16 @@ export function registerPlanApproveTool(
 		promptGuidelines: [
 			"Use workflow_plan_approve only after the user explicitly confirms the final plan.",
 		],
-		parameters: Type.Object({}),
+		parameters: Type.Object({
+			branchName: Type.Optional(
+				Type.String({
+					description:
+						"Optional semantic branch name (e.g. 'feat/readable-name'). Suffix '@wf-<id>' is appended automatically.",
+				}),
+			),
+		}),
 		renderResult: renderPlanToolResult,
-		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const denied = checkWorkflowEnabled(ctx, getAgentDir);
 			if (denied) return denied;
 
@@ -404,9 +411,10 @@ export function registerPlanApproveTool(
 			}
 
 			if (choice === "Git worktree") {
-				const planned = plannedWorktreeInfo(ctx.cwd, workRunId);
+				const semanticBranch = params.branchName;
+				const planned = plannedWorktreeInfo(ctx.cwd, workRunId, semanticBranch);
 				try {
-					const worktree = createWorktree(ctx.cwd, workRunId);
+					const worktree = createWorktree(ctx.cwd, workRunId, semanticBranch);
 					worktreePath = worktree.path;
 					worktreeBranch = worktree.branch;
 					worktreeBaseBranch = worktree.baseBranch;

@@ -120,6 +120,7 @@ export const PLAN_PROMPT = `
 
 12. 用户明确确认"执行 / 可以 / approved / go / 按计划做"，或在 ask_user_question 中选择"批准执行"后，调用 workflow_plan_approve。
    - 调用 approve 时必须单独调用，不要在同一批次调用任何其他工具。
+   - approve 时可选传入 branchName（语义分支名，如 \'feat/readable-name\'、\'fix/bug-desc\'）。工具会自动追加 \'@wf-<id>\' 后缀保证唯一性。不传时回退为 \'wf/<id>\'。
    - approve 会结束当前 turn，并在下一 turn 自动进入 Work Mode；调用后不要继续输出、不要尝试实现。
 13. 不要在 Plan Mode 里实现代码。
 

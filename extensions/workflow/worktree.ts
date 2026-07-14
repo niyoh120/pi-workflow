@@ -19,8 +19,6 @@ export type WorktreeValidation =
 	| { ok: true }
 	| { ok: false; reason: string };
 
-type GitError = Error & { status?: number | null };
-
 function execGit(
 	cwd: string,
 	args: string[],
@@ -46,8 +44,48 @@ function slugName(name: string): string {
 		.slice(0, 48) || "repo";
 }
 
-export function generateWorktreeBranchName(workRunId: string): string {
-	return `wf/${workRunId.replace(/[^a-fA-F0-9-]/g, "").slice(0, 8) || "worktree"}`;
+const WORKRUN_ID_PREFIX_RE = /^([a-fA-F0-9]{8})/;
+
+/**
+ * Suffix tag marking a branch as workflow-owned. Used by state validation and
+ * deleteWorktreeBranch to scope safe deletion.
+ */
+export const WORKTREE_BRANCH_SUFFIX_RE = /@wf-([a-fA-F0-9]{8})$/;
+
+function workRunIdPrefix(workRunId: string): string {
+	return workRunId.replace(/[^a-fA-F0-9-]/g, "").slice(0, 8) || "worktree";
+}
+
+/**
+ * Build the full workflow branch name: `<semantic>@wf-<8hex>`.
+ * Falls back to a workflow-only name when no semantic part is provided.
+ */
+export function buildWorktreeBranchName(
+	workRunId: string,
+	semantic?: string,
+): string {
+	const tag = `@wf-${workRunIdPrefix(workRunId)}`;
+	const cleaned = (semantic ?? "").trim();
+	return cleaned ? `${cleaned}${tag}` : `wf/${workRunIdPrefix(workRunId)}`;
+}
+
+/**
+ * Validate a user-provided semantic branch name via git check-ref-format.
+ * Returns null when valid, otherwise a denial reason.
+ */
+export function validateSemanticBranchName(
+	cwd: string,
+	semantic: string,
+	deps: WorktreeDeps = {},
+): string | null {
+	const trimmed = semantic.trim();
+	if (!trimmed) return "Branch name is empty.";
+	try {
+		execGit(cwd, ["check-ref-format", "--branch", trimmed], deps);
+		return null;
+	} catch (err) {
+		return err instanceof Error ? err.message : String(err);
+	}
 }
 
 export function generateWorktreeDirName(cwd: string, workRunId: string): string {
@@ -68,6 +106,7 @@ export function resolveBaseRef(cwd: string, deps: WorktreeDeps = {}): string {
 export function plannedWorktreeInfo(
 	cwd: string,
 	workRunId: string,
+	semantic?: string,
 	deps: WorktreeDeps = {},
 ): WorktreeInfo {
 	const realpathSync = deps.realpathSync ?? fs.realpathSync;
@@ -76,7 +115,7 @@ export function plannedWorktreeInfo(
 		execGit(cwd, ["rev-parse", "--show-toplevel"], deps),
 		realpathSync,
 	);
-	const branch = generateWorktreeBranchName(workRunId);
+	const branch = buildWorktreeBranchName(workRunId, semantic);
 	const baseBranch = resolveBaseRef(repoRoot, deps);
 	return {
 		path: path.resolve(
@@ -91,6 +130,7 @@ export function plannedWorktreeInfo(
 export function createWorktree(
 	cwd: string,
 	workRunId: string,
+	semantic?: string,
 	deps: WorktreeDeps = {},
 ): WorktreeInfo {
 	const realpathSync = deps.realpathSync ?? fs.realpathSync;
@@ -99,24 +139,24 @@ export function createWorktree(
 		execGit(cwd, ["rev-parse", "--show-toplevel"], deps),
 		realpathSync,
 	);
-	const planned = plannedWorktreeInfo(cwd, workRunId, deps);
+	const planned = plannedWorktreeInfo(cwd, workRunId, semantic, deps);
 	const branch = planned.branch;
 	const baseBranch = planned.baseBranch;
 	const worktreePath = planned.path;
 	const existsSync = deps.existsSync ?? fs.existsSync;
 
+	if (semantic?.trim()) {
+		const denial = validateSemanticBranchName(repoRoot, semantic, deps);
+		if (denial) throw new Error(`Invalid branch name: ${denial}`);
+	}
+
 	if (existsSync(worktreePath)) {
 		throw new Error(`Worktree path already exists: ${worktreePath}`);
 	}
 
-	try {
-		execGit(repoRoot, ["show-ref", "--verify", `refs/heads/${branch}`], deps);
-		throw new Error(`Worktree branch already exists: ${branch}`);
-	} catch (err) {
-		if (err instanceof Error && err.message.includes("already exists")) throw err;
-		if ((err as GitError)?.status !== 1) throw err;
-	}
-
+	// No pre-check for branch existence: `git worktree add -b` atomically
+	// refuses if the branch already exists, avoiding both the TOCTOU window
+	// and the git exit-code variance seen across versions when probing refs.
 	try {
 		execGit(repoRoot, ["worktree", "add", "-b", branch, worktreePath, baseBranch], deps);
 	} catch (err) {
@@ -212,7 +252,9 @@ export function deleteWorktreeBranch(
 	branch: string,
 	deps: WorktreeDeps = {},
 ): void {
-	if (!/^wf\/[a-fA-F0-9]{8}$/.test(branch)) {
+	// Accept both the legacy `wf/<8hex>` form and the semantic `<slug>@wf-<8hex>` form.
+	const legacy = /^wf\/[a-fA-F0-9]{8}$/;
+	if (!legacy.test(branch) && !WORKTREE_BRANCH_SUFFIX_RE.test(branch)) {
 		throw new Error(`Refusing to delete non-workflow branch: ${branch}`);
 	}
 	execGit(cwd, ["branch", "-d", branch], deps);

@@ -38,6 +38,12 @@ export function normalizeState(raw: unknown): WorkflowState {
 			? obj.workRunId.match(/^[a-fA-F0-9]{8}/)?.[0]
 			: undefined;
 
+	// Branch belongs to this work run if it is the legacy `wf/<prefix>` form
+	// or the semantic `<slug>@wf-<prefix>` form.
+	const branchMatchesRun = (branch: string): boolean =>
+		branch === `wf/${worktreePrefix}` ||
+		branch.endsWith(`@wf-${worktreePrefix}`);
+
 	return {
 		workflowEnabled:
 			typeof obj.workflowEnabled === "boolean"
@@ -68,13 +74,13 @@ export function normalizeState(raw: unknown): WorkflowState {
 			obj.worktreePath.trim() &&
 			path.isAbsolute(obj.worktreePath.trim()) &&
 			path.basename(obj.worktreePath.trim()).endsWith(`-wf-${worktreePrefix}`) &&
-			obj.worktreeBranch.trim() === `wf/${worktreePrefix}`
+			branchMatchesRun(obj.worktreeBranch.trim())
 				? obj.worktreePath.trim()
 				: undefined,
 		worktreeBranch:
 			worktreePrefix &&
 			typeof obj.worktreeBranch === "string" &&
-			obj.worktreeBranch.trim() === `wf/${worktreePrefix}`
+			branchMatchesRun(obj.worktreeBranch.trim())
 				? obj.worktreeBranch.trim()
 				: undefined,
 		worktreeBaseBranch:

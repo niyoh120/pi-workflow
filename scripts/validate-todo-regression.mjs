@@ -1488,8 +1488,10 @@ function validateWorktreeIntegrationStatic() {
 		state.includes("obj.worktreePath") &&
 			state.includes("path.isAbsolute(obj.worktreePath.trim())") &&
 			state.includes("worktreePrefix") &&
-			state.includes("/^[a-fA-F0-9]{8}/"),
-		"normalizeState validates worktree path against 8-hex workRunId prefix",
+			state.includes("/^[a-fA-F0-9]{8}/") &&
+			state.includes("branchMatchesRun") &&
+			state.includes("@wf-"),
+		"normalizeState validates worktree path against 8-hex workRunId prefix and accepts semantic @wf-<id> branches",
 	);
 	assert(
 		/execFileSync\(\s*["']git["']\s*,\s*args\b/.test(worktree) &&
@@ -1542,8 +1544,19 @@ function validateWorktreeIntegrationStatic() {
 		tools.includes("Git worktree") &&
 			tools.includes("plannedWorktreeInfo") &&
 			tools.includes("cleanupCreatedWorktree") &&
-			tools.includes("rollbackApproval"),
-		"plan approve creates worktree choice and rollback cleanup",
+			tools.includes("rollbackApproval") &&
+			tools.includes("branchName") &&
+			tools.includes("params.branchName"),
+		"plan approve creates worktree choice, rollback cleanup, and accepts branchName",
+	);
+	assert(
+		worktree.includes("export function buildWorktreeBranchName") &&
+			worktree.includes("export function validateSemanticBranchName") &&
+			worktree.includes("check-ref-format") &&
+			worktree.includes("WORKTREE_BRANCH_SUFFIX_RE") &&
+			worktree.includes("@wf-") &&
+			!/show-ref/.test(worktree),
+		"createWorktree builds semantic@wf-<id> names and validates via git check-ref-format without show-ref pre-check",
 	);
 	assert(
 		helpers.includes("worktreeRuntimeNotice") &&
