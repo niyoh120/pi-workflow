@@ -121,5 +121,61 @@ assert(
 	"helpers.ts: modeStatusLabel dispatch is exhaustive",
 );
 
+// Trimmed COMMON_PROMPT: generic engineering guidance removed
+assert(
+	!/不要扩大范围|最小可行|避免过度设计|不要重新设计|严重级别|reviewer 的意见/.test(prompts),
+	"COMMON_PROMPT no longer embeds scope/style/reviewer guidance",
+);
+assert(
+	/prompts.ts/.test("prompts.ts") && prompts.includes("用户是最终决策者"),
+	"COMMON_PROMPT keeps user as final decision maker",
+);
+assert(
+	prompts.includes("只能使用 workflow_* 工具访问工作流状态"),
+	"COMMON_PROMPT keeps .pi/workflow tool-only access rule",
+);
+
+// Protocol-level checks per mode prompt
+assert(
+	/EXPLORE_PROMPT[\s\S]*?项目文件只读/.test(prompts),
+	"EXPLORE_PROMPT keeps read-only project files protocol",
+);
+assert(
+	/PLAN_PROMPT[\s\S]*?workflow_grill_record/.test(prompts),
+	"PLAN_PROMPT keeps grilling record protocol",
+);
+assert(
+	/PLAN_PROMPT[\s\S]*?讨论是否充分/.test(prompts),
+	"PLAN_PROMPT keeps pre-save discussion-sufficiency gate",
+);
+assert(
+	/PLAN_PROMPT[\s\S]*?workflow_plan_review/.test(prompts),
+	"PLAN_PROMPT keeps optional Plan Review tool protocol",
+);
+assert(
+	/PLAN_PROMPT[\s\S]*?workflow_plan_approve/.test(prompts),
+	"PLAN_PROMPT keeps approval handoff protocol",
+);
+assert(
+	/WORK_PROMPT[\s\S]*?workflow_plan_read/.test(prompts),
+	"WORK_PROMPT keeps plan read protocol",
+);
+assert(
+	/WORK_PROMPT[\s\S]*?workflow_todo/.test(prompts),
+	"WORK_PROMPT keeps todo protocol",
+);
+assert(
+	/COMMIT_PROMPT[\s\S]*?git log --oneline -20/.test(prompts),
+	"COMMIT_PROMPT keeps project history learning protocol",
+);
+assert(
+	/INIT_PROMPT[\s\S]*?workflow_init_complete/.test(prompts),
+	"INIT_PROMPT keeps lifecycle close protocol",
+);
+assert(
+	prompts.includes("覆盖此前对 Plan Mode 的描述"),
+	"WORK_HANDOFF_RUNTIME_NOTICE keeps authoritative override semantics",
+);
+
 console.log(`\n${runs - failures}/${runs} checks passed.`);
 if (failures > 0) process.exit(1);
