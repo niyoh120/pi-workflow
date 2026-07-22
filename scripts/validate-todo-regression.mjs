@@ -1448,6 +1448,37 @@ console.log("\n=== Check 15: isLocalFileMutatingShell redirect guard ===");
 	);
 	assert(isLocalFileMutatingShell("rm foo") === true, "rm IS mutating");
 	assert(isLocalFileMutatingShell("touch bar") === true, "touch IS mutating");
+	assert(
+		isLocalFileMutatingShell("git add foo") === true,
+		"git add IS mutating",
+	);
+	assert(
+		isLocalFileMutatingShell("rtk git add foo") === true,
+		"rtk git add IS mutating",
+	);
+	assert(
+		isLocalFileMutatingShell("RTK git add foo") === true,
+		"RTK (case-insensitive) git add IS mutating",
+	);
+	assert(
+		isLocalFileMutatingShell("rtk rtk git commit -m x") === true,
+		"double rtk git commit IS mutating",
+	);
+	assert(
+		isLocalFileMutatingShell("rtk git status") === false,
+		"rtk git status NOT mutating",
+	);
+	assert(
+		isLocalFileMutatingShell("rtk echo x > f.txt") === true,
+		"rtk + file redirect IS mutating",
+	);
+	// Residual: env/compound prefixes are outside leading-rtk normalization.
+	assert(
+		isLocalFileMutatingShell(
+			"export RTK_DB_PATH=/tmp/x; rtk git add foo",
+		) === false,
+		"env-prefixed rtk git add remains undetected (leading-strip only)",
+	);
 
 	// Pure reads — must NOT be flagged.
 	assert(isLocalFileMutatingShell("cat foo") === false, "cat NOT mutating");

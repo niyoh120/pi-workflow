@@ -348,7 +348,11 @@ export function isAllowedInitTargetPath(
 
 /** Check whether a shell command would modify local files. */
 export function isLocalFileMutatingShell(command: string): boolean {
-	const cmd = command.trim();
+	// RTK rewrite may prefix commands (`rtk git add foo`); strip those so
+	// existing ^git / ^npm mutation patterns still match.
+	// Leading tokens only — compound/env forms (`ENV=x rtk git add`,
+	// `export …; rtk git add`) still miss ^-anchored patterns, same as `sudo git add`.
+	let cmd = command.trim().replace(/^(?:rtk\s+)+/i, "");
 	if (cmd.length === 0) return false;
 
 	// Strip harmless fd-duplication redirects (2>&1, >&2, 1>&2).
