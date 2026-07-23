@@ -1,6 +1,46 @@
 import type { Mode, WorkflowState } from "./types.js";
 import { promptForMode } from "./prompts.js";
 
+// ── Work handoff ─────────────────────────────────────────────────────────────
+
+/**
+ * Custom message type marking the Plan → Work isolation boundary.
+ *
+ * Persisted to the session as a hidden custom message via `pi.sendMessage` at
+ * plan approval time. The `details.workRunId` field identifies which work run
+ * the marker opens, so the context handler can slice provider context to keep
+ * only messages after the current run's marker.
+ */
+export const WORK_HANDOFF_CUSTOM_TYPE = "workflow-work-handoff";
+
+/**
+ * Execution priority for Approved-Plan Work. Embedded into the handoff body
+ * and the Work prompt so the model treats the final plan as the contract.
+ */
+export const APPROVED_PLAN_PRIORITY =
+	"执行优先级（高 → 低）：最新用户指令 → 项目规则（AGENTS.md 等） → Final Plan（含 Decision Context） → workflow_todo → 其他历史。";
+
+/**
+ * Build the Approved-Plan Work handoff body: final plan, todo snapshot, run
+ * identifiers, and the execution-priority rule. Re-injected per provider
+ * request via the context handler so todo/state changes propagate promptly.
+ */
+export function buildWorkHandoffBody(
+	state: WorkflowState,
+	planMarkdown: string,
+): string {
+	const header = [
+		"# Approved-Plan Work Handoff",
+		`planPath: ${state.planPath ?? "none"}`,
+		`workRunId: ${state.workRunId ?? "none"}`,
+		APPROVED_PLAN_PRIORITY,
+	]
+		.filter(Boolean)
+		.join("\n");
+
+	return [header, "", "# Final Plan", planMarkdown.trim() || "(空)", "", "# Todos", todoText(state)].join("\n");
+}
+
 /**
  * Exhaustiveness check for closed unions (typically `Mode`).
  * Place at the `default` branch of a switch over a closed union so the

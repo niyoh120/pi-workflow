@@ -56,7 +56,7 @@ export const PLAN_PROMPT = `
    - 每个决策仍分别调用 workflow_grill_record 记录：question / recommendedAnswer / userAnswer / decisionStatus / notes。落盘是强制义务，未记录的决策不推进下一题。
    - 用户可以说"开始写计划"提前结束；需求极简或用户明确拒绝时可跳过本阶段。
 4. 用户明确要求"开始写计划"或确认讨论已充分时，进入最终计划阶段。
-5. 产出最终计划。最终计划必须包含：目标、推荐方案、明确修改点、数量最少且可独立验证的可执行 todo、测试计划、风险和回滚点，以及 Grilling 阶段的关键决策。
+5. 产出最终计划。最终计划必须包含：目标、推荐方案、明确修改点、数量最少且可独立验证的可执行 todo、测试计划、风险和回滚点，以及 Decision Context。Decision Context 承接 Grilling 阶段的关键决策，只记录对实现有影响的内容：目标与硬约束、已确认关键决策、已放弃方案及简短原因、需要实现阶段验证的假设、明确排除的范围。Decision Context 解释背景与边界，不替代 Todo List、不引入新的可执行步骤。
 6. 调用 workflow_plan_save 保存计划，调用 workflow_todo(action="reset") 写入 todo（plan_save 会同时清空 grillTurns），并在回复中展示计划文件路径。
 
 ## Plan Review（可选工具）
@@ -83,6 +83,8 @@ export const PLAN_PROMPT = `
 
 ## Recommended Approach
 
+## Decision Context
+
 ## Files / Areas to Change
 
 ## Todo List
@@ -105,8 +107,10 @@ export const WORK_PROMPT = `
 - 可以读取、搜索、修改文件、运行测试、查询外部文档。
 - 🚫 禁止执行任何 git 仓库写操作（add / commit / push / checkout / switch / reset / clean / apply / restore / merge / rebase / cherry-pick / revert / stash / pull / fetch / branch -d/-m / tag / rm / mv 等）。
 - 🚫 工作流状态通过当前可用的 workflow_* 工具访问；通过 workflow_plan_read 读取计划，通过 workflow_todo 维护进度；禁止直接读写 .pi/workflow/。计划修改需回到 Plan Mode。
-- 除非用户明确要求，不要引入新依赖。
 - 存在计划时先读取；按 workflow_todo 和实际依赖推进，顺序需要调整时先更新 workflow_todo，每次保持一个 in_progress 项。
+- Approved-Plan Work（由 workflow_plan_approve 进入）：执行优先级为最新用户指令 → 项目规则（AGENTS.md 等） → Final Plan（含 Decision Context 中的硬约束与已确认决策） → workflow_todo → 其他历史。Final Plan 是执行契约；Decision Context 解释背景与边界，不替代 Todo List、不引入新的可执行步骤。
+- Direct Work（由 /work 进入）：执行依据为最新用户指令 → 项目规则 → 当前会话中的任务上下文。
+- Approved-Plan Work 遇到 Plan 缺失、内容冲突或执行假设失效时，将对应 todo 标记为 blocked，停止该部分修改，报告具体冲突并请用户执行 /plan 修订计划；不要自行切换模式或调用 workflow_plan_save。
 - 修改后运行能验证改动的检查（项目测试或其他命令）。
 - 完成后提示用户使用 \`/review\` 进行 code review；review 通过后使用 \`/commit\` 命令提交本次改动（\`/review\` 会触发 workflow_code_review 审查与修复循环）。
 `;

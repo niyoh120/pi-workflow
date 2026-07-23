@@ -934,12 +934,13 @@ console.log("\n=== Check 7: Code review tooling ===");
 	);
 	assert(
 		/await\s+transitionWorkflowMode\s*\(/.test(approveBlock),
-		"tools.ts: approve switches runtime before followUp kickoff",
+		"tools.ts: approve switches runtime before handoff kickoff",
 	);
 	assert(
-		approveBlock.indexOf("transitionWorkflowMode") <
-			approveBlock.indexOf("pi.sendUserMessage"),
-		"tools.ts: approve switches runtime before sending followUp",
+		/await\s+transitionWorkflowMode[\s\S]*?if\s*\(\s*!result\.ok[\s\S]*?pi\.sendMessage/.test(
+			approveBlock,
+		),
+		"tools.ts: approve switches runtime and checks result.ok before sending handoff message",
 	);
 	assert(
 		/if\s*\(\s*!result\.ok\s*\)[\s\S]*?throw\s+new\s+Error\(result\.reason\)/.test(
@@ -948,13 +949,19 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"tools.ts: approve throws when runtime transition fails",
 	);
 	assert(
-		approveBlock.includes('workflow_plan_read 读取计划和当前 workflow_todo 列表') &&
-			!approveBlock.includes('WORK_HANDOFF_RUNTIME_NOTICE'),
-		"tools.ts: approve followUp uses short kickoff without runtime notice",
+		approveBlock.includes('customType: WORK_HANDOFF_CUSTOM_TYPE') &&
+			approveBlock.includes('display: false') &&
+			approveBlock.includes('details: { workRunId:') &&
+			approveBlock.includes('buildWorkHandoffBody') &&
+			!approveBlock.includes('WORK_HANDOFF_RUNTIME_NOTICE') &&
+			!approveBlock.includes('pi.sendUserMessage'),
+		"tools.ts: approve sends hidden custom handoff (not plain user followUp)",
 	);
 	assert(
-		approveBlock.includes('deliverAs: "followUp"'),
-		"tools.ts: approve sends followUp kickoff message",
+		/try\s*\{[\s\S]*?readPlan[\s\S]*?pi\.sendMessage[\s\S]*?\}\s*catch\s*\(\s*handoffErr[\s\S]*?await\s+rollbackApproval\s*\(\s*\)[\s\S]*?throw\s+handoffErr/.test(
+			approveBlock,
+		),
+		"tools.ts: handoff failure rolls back approval then rethrows",
 	);
 	assert(
 		approveBlock.includes("terminate: true"),

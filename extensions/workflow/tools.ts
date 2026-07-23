@@ -24,6 +24,10 @@ import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { executePlanReviewSidecall } from "./sidecall.js";
 import { transitionWorkflowMode } from "./mode.js";
+import {
+	WORK_HANDOFF_CUSTOM_TYPE,
+	buildWorkHandoffBody,
+} from "./helpers.js";
 import { isAllowedInitTargetPath } from "./guards.js";
 import * as path from "node:path";
 import * as fs from "node:fs";
@@ -475,14 +479,29 @@ export function registerPlanApproveTool(
 				throw new Error(result.reason);
 			}
 
-			const handoffMessage =
-				`已批准的计划在 ${result.state.planPath}. ` +
-				`请用 workflow_plan_read 读取计划和当前 workflow_todo 列表，按 todo 顺序开始实现。`;
+			// Approved-Plan Work handoff: isolation marker + execution packet.
+			// Must succeed after transition, or roll back — otherwise Work mode
+			// is persisted without a marker and Plan-history isolation is dead.
+			try {
+				const planMarkdown = readPlan(ctx.cwd, result.state.planPath!);
+				const handoffBody = buildWorkHandoffBody(result.state, planMarkdown);
 
-			// Set session name for easier identification in /resume
-			pi.setSessionName(`work: ${result.state.planTitle ?? "Active Plan"}`);
+				// Set session name for easier identification in /resume
+				pi.setSessionName(`work: ${result.state.planTitle ?? "Active Plan"}`);
 
-			pi.sendUserMessage(handoffMessage, { deliverAs: "followUp" });
+				pi.sendMessage(
+					{
+						customType: WORK_HANDOFF_CUSTOM_TYPE,
+						content: handoffBody,
+						display: false,
+						details: { workRunId: result.state.workRunId },
+					},
+					{ triggerTurn: true, deliverAs: "followUp" },
+				);
+			} catch (handoffErr) {
+				await rollbackApproval();
+				throw handoffErr;
+			}
 
 			return {
 				content: [
@@ -491,7 +510,7 @@ export function registerPlanApproveTool(
 						text:
 							`Plan approved. Work Mode runtime activated. ` +
 							`Work run: ${result.state.workRunId!.slice(-8)}.\n\n` +
-							handoffMessage +
+							`已建立隔离边界（workRunId: ${result.state.workRunId!.slice(-8)}），下一 turn 将注入 Approved-Plan Work handoff。` +
 							"\n\nDo not call any more tools in this turn.",
 					},
 				],

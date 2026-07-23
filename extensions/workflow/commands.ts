@@ -12,9 +12,12 @@ import {
 } from "./guards.js";
 import {
 	buildModeMessageBody,
+	buildWorkHandoffBody,
 	currentStatusText,
+	WORK_HANDOFF_CUSTOM_TYPE,
 	worktreeRuntimeNotice,
 } from "./helpers.js";
+import { readPlan } from "./state.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
@@ -41,6 +44,172 @@ import {
 	removeWorktree,
 	validateWorktreeState,
 } from "./worktree.js";
+
+// ── Work context isolation helpers ──────────────────────────────────────────
+
+/**
+ * Minimal shape of AgentMessage we inspect for Work context isolation. We only
+ * need to identify custom handoff messages, compaction/branch summaries, and
+ * toolCall/toolResult pairing; other roles pass through untouched.
+ */
+type WorkflowContextMessage = {
+	role?: string;
+	customType?: string;
+	details?: unknown;
+	timestamp?: number;
+	toolCallId?: string;
+};
+
+/** Session branch entry shape returned by sessionManager.getBranch(). */
+type SessionBranchEntry = {
+	type: string;
+	customType?: string;
+	details?: unknown;
+	timestamp?: string;
+};
+
+/**
+ * Read the session branch once per provider request. Returns undefined when
+ * the session manager shape drifts or getBranch is unavailable — callers fall
+ * back to keeping full history (fail-open).
+ */
+function getSessionBranch(ctx: unknown): SessionBranchEntry[] | undefined {
+	try {
+		return (
+			(ctx as {
+				sessionManager?: {
+					getBranch?: () => SessionBranchEntry[];
+				};
+			}).sessionManager?.getBranch?.()
+		);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Return the timestamp of the most recent workflow-work-handoff custom message
+ * whose details.workRunId matches the current work run, or undefined when the
+ * branch has no matching marker (Direct Work, legacy sessions, pre-approval).
+ */
+function findCurrentHandoffTimestamp(
+	entries: SessionBranchEntry[],
+	workRunId: string | undefined,
+): string | undefined {
+	if (!workRunId) return undefined;
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (entry.type !== "custom_message") continue;
+		if (entry.customType !== WORK_HANDOFF_CUSTOM_TYPE) continue;
+		const details = entry.details as { workRunId?: unknown } | undefined;
+		if (details?.workRunId === workRunId) return entry.timestamp;
+	}
+	return undefined;
+}
+
+/**
+ * Check whether the current work run has a handoff marker anywhere on the
+ * session branch. Used to distinguish "marker compacted away" (isolation still
+ * in effect) from "Direct Work / legacy session" (no marker, keep history).
+ */
+function branchHasCurrentHandoff(
+	entries: SessionBranchEntry[] | undefined,
+	workRunId: string | undefined,
+): boolean {
+	if (!entries || !workRunId) return false;
+	return findCurrentHandoffTimestamp(entries, workRunId) !== undefined;
+}
+
+/**
+ * Drop leading orphan toolResult messages after a mid-pair slice so the
+ * remaining sequence has valid toolCall/toolResult pairing and providers
+ * do not reject the request. Only strips a contiguous run of leading
+ * toolResult messages; stops at the first non-toolResult (user/assistant/
+ * custom/etc.), which is always a safe anchor for a provider request.
+ */
+function dropOrphanToolMessages<T extends WorkflowContextMessage>(
+	messages: T[],
+): T[] {
+	let firstSafe = 0;
+	while (firstSafe < messages.length && messages[firstSafe]?.role === "toolResult") {
+		firstSafe++;
+	}
+	return messages.slice(firstSafe);
+}
+
+/**
+ * Apply Approved-Plan Work context isolation to provider-visible messages.
+ *
+ * Slicing rules:
+ * - No matching marker on the branch → Direct Work or legacy session: keep all
+ *   messages unchanged.
+ * - Marker present in `messages` → keep only messages after the marker, then
+ *   repair tool pairing in case the cut landed mid-pair.
+ * - Marker on branch but not in `messages` (compacted away) → drop all
+ *   leading compactionSummary/branchSummary messages; keep the first
+ *   non-summary and everything after it. If no leading summary exists,
+ *   fail-open and return messages unchanged (no reliable cut point).
+ *   Residual Plan-era non-summary turns after a leading summary may still
+ *   leak — known limit of this fallback; needs state-backed isolation to close.
+ */
+function applyWorkContextIsolation<T extends WorkflowContextMessage>(
+	messages: T[],
+	entries: SessionBranchEntry[],
+	workRunId: string | undefined,
+): T[] {
+	if (!workRunId) return messages;
+	const markerTs = findCurrentHandoffTimestamp(entries, workRunId);
+	if (markerTs === undefined) return messages;
+
+	// Look for the marker in the provider-visible messages first. It must be
+	// called BEFORE filtering handoffs out of the array.
+	let markerMsgIdx = -1;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (
+			msg.role === "custom" &&
+			msg.customType === WORK_HANDOFF_CUSTOM_TYPE &&
+			(msg.details as { workRunId?: unknown } | undefined)?.workRunId ===
+				workRunId
+		) {
+			markerMsgIdx = i;
+			break;
+		}
+	}
+
+	if (markerMsgIdx !== -1) {
+		// Marker still in provider context: keep only messages after it, then
+		// repair tool pairing in case the cut landed mid-pair.
+		return dropOrphanToolMessages(messages.slice(markerMsgIdx + 1));
+	}
+
+	// Marker compacted away: we cannot reliably align provider messages with
+	// branch entries after compaction, so drop ALL leading messages up to and
+	// including the last leading compaction/branch summary. That summary
+	// summarizes Plan-era content and must not reach the Work model. The first
+	// non-summary message after it is a best-effort Work-era anchor. If there
+	// is no leading summary, fail-open and keep everything (no reliable cut).
+	// Residual Plan-era non-summary turns may still leak — known limit.
+	const isolated: T[] = [];
+	let trimming = true;
+	let sawAnySummary = false;
+	for (const msg of messages) {
+		if (trimming) {
+			const isSummary =
+				msg.role === "compactionSummary" ||
+				msg.role === "branchSummary";
+			if (isSummary) {
+				sawAnySummary = true;
+				continue; // drop leading Plan/Work-boundary summary
+			}
+			trimming = false;
+		}
+		isolated.push(msg);
+	}
+	// Mirror the marker-present path: repair leading orphan toolResults that
+	// appear when the summarized prefix absorbed the matching toolCall.
+	return sawAnySummary ? dropOrphanToolMessages(isolated) : messages;
+}
 
 // ── /wf-init helpers ─────────────────────────────────────────────────────────
 
@@ -192,26 +361,102 @@ export function registerWorkflowContextInjection(
 				(state.workflowEnabled || config.workflow.autoEnter) &&
 				!state.workflowExplicitlyDisabled;
 
-			// Filter historical workflow-mode messages into a fresh array. Done after
-			// state/config loads so a thrown load leaves event.messages untouched.
-			const messages = event.messages.filter((message) => {
+			// Read the session branch once per request; shared by isolation and
+			// handoff re-injection. Failure degrades to undefined (fail-open).
+			const branch = getSessionBranch(ctx);
+
+			// Approved-Plan Work isolation runs BEFORE filtering stale injectables so
+			// applyWorkContextIsolation can still see the handoff marker in the
+			// provider-visible messages. Filtering first would strip the marker and
+			// make markerMsgIdx permanently -1, defeating Plan-history isolation.
+			let messages = event.messages;
+			if (workflowActive && state.mode === "work" && state.workRunId) {
+				try {
+					if (branch) {
+						if (
+							state.planPath &&
+							!branchHasCurrentHandoff(branch, state.workRunId)
+						) {
+							// Approved-Plan signal without marker: isolation + re-inject
+							// both degrade. Surface the known branch-compaction limit.
+							console.error(
+								"[workflow] work context isolation skipped: handoff marker not found on session branch (Plan history may leak)",
+							);
+						}
+						messages = applyWorkContextIsolation(
+							event.messages,
+							branch,
+							state.workRunId,
+						);
+					} else if (state.planPath) {
+						// Approved-Plan Work without branch access: cannot isolate, but
+						// surface it so the degradation is observable. Fail-open keeps
+						// full history so the Work model can still proceed.
+						console.error(
+							"[workflow] work context isolation skipped: sessionManager.getBranch unavailable",
+						);
+					}
+				} catch (isolationErr) {
+					// Branch inspection failed (e.g. session shape drift). Fail open:
+					// keep event.messages as-is so the mode prompt still injects.
+					console.error(
+						`[workflow] work context isolation skipped: ${isolationErr}`,
+					);
+				}
+			}
+
+			// Drop stale injectables (workflow-mode, workflow-work-handoff) from
+			// whatever isolation produced. Both are re-injected below from current
+			// state, so any persisted copies (including the marker we just used) are
+			// stale and must be removed to avoid duplicates.
+			const filteredMessages = messages.filter((message) => {
 				if (
 					message &&
 					typeof message === "object" &&
-					"customType" in message &&
-					(message as { customType?: unknown }).customType === "workflow-mode"
+					"customType" in message
 				) {
-					return false;
+					const ct = (message as { customType?: unknown }).customType;
+					if (ct === "workflow-mode" || ct === WORK_HANDOFF_CUSTOM_TYPE) {
+						return false;
+					}
 				}
 				return true;
 			});
 
-			if (!workflowActive) return { messages };
+			if (!workflowActive) return { messages: filteredMessages };
 
 			const content = buildModeMessageBody(state.mode, state);
-			if (!content) return { messages };
+			if (!content) return { messages: filteredMessages };
 
-			messages.push({
+			// For Approved-Plan Work, re-inject the handoff execution packet each
+			// provider request so todo/state changes propagate. Gated on
+			// branchHasCurrentHandoff so Direct Work (no marker) never receives an
+			// Approved-Plan packet.
+			if (
+				state.mode === "work" &&
+				state.workRunId &&
+				state.planPath &&
+				branchHasCurrentHandoff(branch, state.workRunId)
+			) {
+				try {
+					const planMarkdown = readPlan(ctx.cwd, state.planPath);
+					filteredMessages.push({
+						role: "custom",
+						customType: WORK_HANDOFF_CUSTOM_TYPE,
+						content: buildWorkHandoffBody(state, planMarkdown),
+						display: false,
+						details: { workRunId: state.workRunId },
+						timestamp: Date.now(),
+					});
+				} catch (planErr) {
+					// Plan read failed; skip handoff re-injection this turn.
+					console.error(
+						`[workflow] handoff re-inject skipped: ${planErr}`,
+					);
+				}
+			}
+
+			filteredMessages.push({
 				role: "custom",
 				customType: "workflow-mode",
 				content,
@@ -219,7 +464,7 @@ export function registerWorkflowContextInjection(
 				timestamp: Date.now(),
 			});
 
-			return { messages };
+			return { messages: filteredMessages };
 		} catch (err) {
 			// Surface injection failures so debugging is possible. Return the
 			// original event.messages unmodified so mode context is not silently

@@ -184,21 +184,132 @@ assert(
 	"registerWorkflowContextInjection subscribes to the context event",
 );
 assert(
-	/customType === "workflow-mode"/.test(commands),
-	"context handler filters historical workflow-mode messages",
+	/ct === "workflow-mode" \|\| ct === WORK_HANDOFF_CUSTOM_TYPE/.test(commands),
+	"context handler filter predicate covers both workflow-mode and workflow-work-handoff",
 );
 assert(
 	/customType: "workflow-mode"[\s\S]*?display: false/.test(commands),
 	"context handler appends one hidden workflow-mode custom message",
 );
 assert(
-	/messages\.push\({[\s\S]*?return \{ messages \}/.test(commands) &&
-		/event\.messages\.filter/.test(commands),
-	"context handler filters event.messages into a new array and returns it (does not mutate in place)",
+	/filteredMessages\.push\([\s\S]*?return \{ messages: filteredMessages \}/.test(commands),
+	"context handler returns the filtered array without mutating event.messages in place",
 );
 assert(
 	/context injection failed[\s\S]*?return \{ messages: event\.messages \}/.test(commands),
 	"context handler catch returns original event.messages so failures don't strip mode context",
+);
+
+// ── commands.ts: Work context isolation helpers ────────────────────────────
+// CRITICAL invariant: isolation MUST run before stale-injectable filtering,
+// otherwise the handoff marker is stripped and Plan-history slicing is dead.
+assert(
+	/applyWorkContextIsolation\([\s\S]*?event\.messages/.test(commands) &&
+		!/const filteredMessages = event\.messages\.filter[\s\S]*?applyWorkContextIsolation\(\s*filteredMessages/.test(
+			commands,
+		),
+	"isolation runs on event.messages before stale-injectable filtering (marker visible to slicer)",
+);
+assert(
+	/function getSessionBranch/.test(commands),
+	"commands.ts defines getSessionBranch helper (single branch read per request)",
+);
+assert(
+	commands.includes("WORK_HANDOFF_CUSTOM_TYPE"),
+	"commands.ts imports WORK_HANDOFF_CUSTOM_TYPE for handoff filtering",
+);
+assert(
+	/function applyWorkContextIsolation/.test(commands),
+	"commands.ts defines applyWorkContextIsolation helper",
+);
+assert(
+	/function branchHasCurrentHandoff/.test(commands),
+	"commands.ts defines branchHasCurrentHandoff helper",
+);
+assert(
+	/function dropOrphanToolMessages/.test(commands) &&
+		/while \(firstSafe < messages\.length && messages\[firstSafe\]\?\.role === "toolResult"\)/.test(
+			commands,
+		),
+	"dropOrphanToolMessages strips only a contiguous run of leading toolResult (no re-anchoring on assistant)",
+);
+assert(
+	/workflowActive && state\.mode === "work" && state\.workRunId[\s\S]*?applyWorkContextIsolation/.test(
+		commands,
+	),
+	"context handler isolates only for active Work mode with workRunId",
+);
+assert(
+	/applyWorkContextIsolation[\s\S]*?state\.workRunId/.test(commands),
+	"context handler invokes applyWorkContextIsolation with current workRunId",
+);
+assert(
+	/filteredMessages\.push\([\s\S]*?customType: WORK_HANDOFF_CUSTOM_TYPE[\s\S]*?workRunId: state\.workRunId/.test(
+		commands,
+	),
+	"context handler re-injects handoff execution packet with current workRunId",
+);
+assert(
+	/branchHasCurrentHandoff\(branch, state\.workRunId\)[\s\S]*?buildWorkHandoffBody/.test(
+		commands,
+	),
+	"handoff re-injection gated on branchHasCurrentHandoff (Direct Work skips packet)",
+);
+assert(
+	/work context isolation skipped/.test(commands),
+	"context handler logs and fail-opens when branch inspection throws",
+);
+assert(
+	/role === "compactionSummary"[\s\S]*?role === "branchSummary"/.test(commands),
+	"applyWorkContextIsolation inspects compactionSummary and branchSummary roles",
+);
+assert(
+	/sawAnySummary \? dropOrphanToolMessages\(isolated\) : messages/.test(commands),
+	"compaction fallback drops leading summaries fail-closed, returns original when no summary (fail-open for Direct Work)",
+);
+assert(
+	/findCurrentHandoffTimestamp[\s\S]*?=== undefined[\s\S]*?return messages/.test(commands),
+	"applyWorkContextIsolation keeps full history when no matching marker (Direct Work/legacy)",
+);
+assert(
+	/function getSessionBranch[\s\S]*?catch \{[\s\S]*?return undefined/.test(commands),
+	"getSessionBranch catch returns undefined (does not throw into the context handler)",
+);
+
+// ── prompts.ts: Decision Context + dual-path Work protocol ────────────────
+assert(
+	/PLAN_PROMPT[\s\S]*?Decision Context/.test(prompts),
+	"PLAN_PROMPT makes Decision Context a required final-plan section",
+);
+assert(
+	/WORK_PROMPT[\s\S]*?Approved-Plan Work/.test(prompts),
+	"WORK_PROMPT declares Approved-Plan Work execution basis",
+);
+assert(
+	/WORK_PROMPT[\s\S]*?Direct Work/.test(prompts),
+	"WORK_PROMPT declares Direct Work execution basis",
+);
+assert(
+	/WORK_PROMPT[\s\S]*?blocked[\s\S]*?\/plan/.test(prompts),
+	"WORK_PROMPT defines blocked + request /plan protocol for Approved-Plan conflicts",
+);
+assert(
+	/## Decision Context[\s\S]*?## Files \/ Areas to Change/.test(prompts),
+	"PLAN_PROMPT final-plan template includes Decision Context section",
+);
+
+// ── helpers.ts: Work handoff builder ────────────────────────────────────────
+assert(
+	helpers.includes("WORK_HANDOFF_CUSTOM_TYPE"),
+	"helpers.ts exports WORK_HANDOFF_CUSTOM_TYPE constant",
+);
+assert(
+	helpers.includes("buildWorkHandoffBody"),
+	"helpers.ts exports buildWorkHandoffBody builder",
+);
+assert(
+	helpers.includes("APPROVED_PLAN_PRIORITY"),
+	"helpers.ts exports APPROVED_PLAN_PRIORITY priority rule",
 );
 
 // ── mode.ts: tool ownership invariants ─────────────────────────────────────
@@ -217,14 +328,20 @@ assert(
 	"mode.ts short-circuits setActiveTools when the workflow tool set is unchanged",
 );
 
-// ── tools.ts: plan approval uses short kickoff, no handoff notice ──────────
+// ── tools.ts: plan approval sends hidden custom handoff ───────────────────
 assert(
 	!tools.includes("WORK_HANDOFF_RUNTIME_NOTICE"),
 	"plan approval no longer imports WORK_HANDOFF_RUNTIME_NOTICE",
 );
 assert(
-	tools.includes("workflow_plan_read 读取计划和当前 workflow_todo 列表"),
-	"plan approval followUp is a short kickoff pointing to plan/todo tools",
+	/customType:\s*WORK_HANDOFF_CUSTOM_TYPE[\s\S]*?display:\s*false[\s\S]*?details:\s*\{\s*workRunId:/.test(
+		tools,
+	),
+	"plan approval sends hidden workflow-work-handoff custom message with workRunId",
+);
+assert(
+	/triggerTurn:\s*true[\s\S]*?deliverAs:\s*"followUp"/.test(tools),
+	"plan approval handoff triggers next turn via followUp",
 );
 assert(
 	tools.includes("Do not call any more tools in this turn."),
