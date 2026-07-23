@@ -1,4 +1,6 @@
-export type Thinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+
+export type Thinking = ModelThinkingLevel;
 
 /** Workflow roles — only the ones we actively configure models for. */
 export type Role = "explore" | "plan" | "planReview" | "work" | "commit";

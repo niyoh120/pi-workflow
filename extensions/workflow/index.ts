@@ -16,8 +16,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadState, getSessionKey } from "./state.js";
 import { loadConfig, loadConfigIfTrusted } from "./config.js";
-import { setWorkflowStatus } from "./mode.js";
-import type { Mode } from "./types.js";
+import { applyModeRuntime, setWorkflowStatus, transitionWorkflowMode } from "./mode.js";
+import type { WorkflowState } from "./types.js";
 import { WorkflowTodoOverlay, setWorkflowOverlay } from "./todo-overlay.js";
 
 import { registerAllWorkflowTools } from "./tools.js";
@@ -28,6 +28,7 @@ import {
 	registerAllWorkflowCommands,
 	registerWfCommand,
 	registerBeforeAgentStart,
+	registerWorkflowContextInjection,
 	registerToolCallGuard,
 	registerAgentEnd,
 } from "./commands.js";
@@ -53,11 +54,16 @@ function ensureWorkflowRegistered(
 	_workflowRegistered.add(pi);
 }
 
-function statusModeForSessionStart(mode: Mode): Mode {
-	return mode === "idle" ? "explore" : mode;
-}
-
-function registerWorkflowSessionStartStatus(
+/**
+ * Single ordered session_start path for both auto-enter and delayed /wf paths.
+ *
+ * When workflow is active, register workflow commands/tools first, then apply
+ * the current mode runtime (promote idle → explore through the unified
+ * transition path, or restore the persisted mode). Registering before
+ * synchronizing guarantees tools exist before setActiveTools runs, so the
+ * first provider request builds its system prompt from the real tool set.
+ */
+function registerWorkflowSessionStart(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
@@ -68,23 +74,55 @@ function registerWorkflowSessionStartStatus(
 				getSessionFile: () =>
 					(ctx as any).sessionManager?.getSessionFile?.() ?? null,
 			});
-			const state = loadState((ctx as any).cwd, sessionKey);
-			// Use trust-aware config loading in session context
-			const config = loadConfigIfTrusted(
-				(ctx as any).cwd,
-				getAgentDir(),
-				ctx as any,
-			);
+			const cwd = (ctx as any).cwd;
+			const state: WorkflowState = loadState(cwd, sessionKey);
+			const config = loadConfigIfTrusted(cwd, getAgentDir(), ctx as any);
 			const workflowActive =
 				(state.workflowEnabled || config.workflow.autoEnter) &&
 				!state.workflowExplicitlyDisabled;
 
-			setWorkflowStatus(
-				ctx,
-				workflowActive ? statusModeForSessionStart(state.mode) : "idle",
-			);
-		} catch {
-			// Silently skip if session state/status cannot be read or applied.
+			if (!workflowActive) {
+				setWorkflowStatus(ctx, "idle");
+				return;
+			}
+
+			ensureWorkflowRegistered(pi, getAgentDir, cwd);
+
+			// Promote idle → explore via the unified transition path so persisted
+			// mode, status line, runtime, and guards stay aligned. Otherwise restore
+			// the persisted mode runtime.
+			if (state.mode === "idle") {
+				const result = await transitionWorkflowMode({
+					pi,
+					ctx,
+					sessionKey,
+					nextState: { ...state, mode: "explore" },
+					getAgentDir,
+				});
+				if (!result.ok) {
+					console.error(
+						`[workflow] session_start idle→explore transition failed: ${result.reason}`,
+					);
+				}
+			} else {
+				const runtimeOk = await applyModeRuntime(
+					pi,
+					ctx,
+					state.mode,
+					getAgentDir,
+				);
+				if (!runtimeOk) {
+					console.error(
+						`[workflow] session_start runtime apply failed for mode: ${state.mode}`,
+					);
+				}
+				// applyModeRuntime does not touch the status line; mirror it here.
+				setWorkflowStatus(ctx, state.mode);
+			}
+		} catch (err) {
+			// Surface initialization failures (e.g. 0.81.x API drift) instead of
+			// silently leaving workflow without tools or runtime.
+			console.error(`[workflow] session_start initialization failed: ${err}`);
 		}
 	});
 }
@@ -100,32 +138,18 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Workflow commands/tools: conditional ──────
 	if (config.workflow.autoEnter) {
-		// Auto-enter: register immediately and show Explore status on session start.
+		// Auto-enter: register immediately so tools are available before the
+		// first session_start fires.
 		ensureWorkflowRegistered(pi, getAgentDir, process.cwd());
-		registerWorkflowSessionStartStatus(pi, getAgentDir);
-	} else {
-		// Delayed registration: wait until /wf enables the session flag,
-		// then register on the next session_start after reload.
-		pi.on("session_start", async (_event, ctx) => {
-			try {
-				const sessionKey = getSessionKey({
-					getSessionId: () => (ctx as any).sessionManager?.getSessionId?.(),
-					getSessionFile: () =>
-						(ctx as any).sessionManager?.getSessionFile?.() ?? null,
-				});
-				const state = loadState((ctx as any).cwd, sessionKey);
-				if (state.workflowEnabled) {
-					ensureWorkflowRegistered(pi, getAgentDir, (ctx as any).cwd);
-				}
-			} catch {
-				// Silently skip if session state cannot be read.
-			}
-		});
-		registerWorkflowSessionStartStatus(pi, getAgentDir);
 	}
+	// Unified session_start path: register when /wf has enabled workflow,
+	// apply runtime (tools/model) before the first prompt is built, and set
+	// status. Runs for both auto-enter and delayed /wf reload/resume paths.
+	registerWorkflowSessionStart(pi, getAgentDir);
 
 	// ── Event handlers (always registered) ────────
 	registerBeforeAgentStart(pi, getAgentDir);
+	registerWorkflowContextInjection(pi, getAgentDir);
 	registerToolCallGuard(pi, getAgentDir);
 	registerAgentEnd(pi, getAgentDir);
 

@@ -31,14 +31,17 @@ const PLAN_WORKFLOW_TOOL_NAMES = [
 
 const WORK_WORKFLOW_TOOL_NAMES = ["workflow_todo", "workflow_plan_read"];
 
+const EXPLORE_WORKFLOW_TOOL_NAMES = ["workflow_plan_read"];
+
 const INIT_WORKFLOW_TOOL_NAMES = ["workflow_init_complete"];
 
 /**
- * Modes that may call gated workflow tools. `init` only permits
- * workflow_init_complete (resolved per-mode by computeWorkflowToolNames).
+ * Modes that may call gated workflow tools. Each mode's allowed set is
+ * resolved by computeWorkflowToolNames; explore exposes only the read-only
+ * workflow_plan_read so a preserved plan can be inspected.
  */
 export function isWorkflowToolMode(mode: Mode): boolean {
-	return mode === "plan" || mode === "work" || mode === "init";
+	return mode === "plan" || mode === "work" || mode === "init" || mode === "explore";
 }
 
 export function computeWorkflowToolNames(
@@ -56,10 +59,11 @@ export function computeWorkflowToolNames(
 			if (config.codeReview.enabled) names.push("workflow_code_review");
 			return names;
 		}
+		case "explore":
+			return [...EXPLORE_WORKFLOW_TOOL_NAMES];
 		case "init":
 			return [...INIT_WORKFLOW_TOOL_NAMES];
 		case "idle":
-		case "explore":
 		case "commit":
 			return [];
 		default:
@@ -125,7 +129,12 @@ export async function setRole(
 
 /**
  * Reconcile workflow tools for the current mode.
- * Explore/idle/commit hide workflow tools; plan/work enable the mode-allowed set.
+ *
+ * pi-workflow manages only its own workflow_* tools. Built-in and other
+ * extension tools preserve their current active/inactive state; mode
+ * permissions are enforced by prompts and the path guards. External
+ * auto-activation (such as ask_user_question) is left to the owning
+ * extension or the user.
  */
 export function activateWorkflowToolsIfAllowed(
 	pi: ExtensionAPI,
@@ -139,11 +148,6 @@ export function activateWorkflowToolsIfAllowed(
 			return tool.name;
 		});
 
-		const next = new Set(active);
-		for (const toolName of WORKFLOW_TOOL_CLEANUP_NAMES) {
-			next.delete(toolName);
-		}
-
 		let workflowToolNames: string[] = [];
 		try {
 			const cfg = loadConfig(cwd, getAgentDir());
@@ -152,23 +156,32 @@ export function activateWorkflowToolsIfAllowed(
 			// Preserve core workflow tools if config cannot be read.
 			workflowToolNames = computeFallbackWorkflowToolNames(mode);
 		}
+
+		// Short-circuit when active and allowed workflow sets already match.
+		const workflowCleanup = new Set<string>(WORKFLOW_TOOL_CLEANUP_NAMES);
+		const activeWorkflow = new Set(
+			active.filter((name) => workflowCleanup.has(name)),
+		);
+		const expectedWorkflow = new Set(workflowToolNames);
+		const sameSize = activeWorkflow.size === expectedWorkflow.size;
+		const sameMembers =
+			sameSize &&
+			[...expectedWorkflow].every((name) => activeWorkflow.has(name));
+		if (sameMembers) return;
+
+		const next = new Set(active);
+		for (const toolName of WORKFLOW_TOOL_CLEANUP_NAMES) {
+			next.delete(toolName);
+		}
 		for (const toolName of workflowToolNames) {
 			next.add(toolName);
 		}
 
-		// Auto-activate ask_user_question if the tool is installed (tool-name existence check only).
-		try {
-			const allTools = pi.getAllTools();
-			if (allTools.some((t: any) => t.name === "ask_user_question")) {
-				next.add("ask_user_question");
-			}
-		} catch {
-			// If getAllTools fails, skip silently.
-		}
-
 		pi.setActiveTools([...next]);
-	} catch {
-		// If any part of tool activation fails, skip silently.
+	} catch (err) {
+		// Reconciliation is a safety net; surface failures so they are traceable
+		// without disrupting the agent loop.
+		console.error(`[workflow] activateWorkflowToolsIfAllowed failed: ${err}`);
 	}
 }
 
@@ -197,7 +210,7 @@ export async function applyModeRuntime(
  * Mode → model role. `init` reuses the explore model. `idle` has no prompt but
  * also routes through explore to keep a stable default model.
  */
-function modeRole(mode: Mode): string {
+export function modeRole(mode: Mode): string {
 	switch (mode) {
 		case "idle":
 		case "explore":
@@ -219,12 +232,13 @@ function computeFallbackWorkflowToolNames(mode: Mode): string[] {
 	switch (mode) {
 		case "plan":
 			return [...PLAN_WORKFLOW_TOOL_NAMES];
+		case "explore":
+			return [...EXPLORE_WORKFLOW_TOOL_NAMES];
 		case "work":
 			return [...WORK_WORKFLOW_TOOL_NAMES];
 		case "init":
 			return [...INIT_WORKFLOW_TOOL_NAMES];
 		case "idle":
-		case "explore":
 		case "commit":
 			return [];
 		default:

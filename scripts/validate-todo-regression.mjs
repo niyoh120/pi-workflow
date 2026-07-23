@@ -48,7 +48,7 @@ function inlineLoadState(wfDir, sessionKey) {
 }
 
 function inlineIsWorkflowToolMode(mode) {
-	return mode === "plan" || mode === "work" || mode === "init";
+	return mode === "plan" || mode === "work" || mode === "init" || mode === "explore";
 }
 
 function inlineComputeWorkflowToolNames(mode, config) {
@@ -69,6 +69,8 @@ function inlineComputeWorkflowToolNames(mode, config) {
 			if (config.codeReview.enabled) names.push("workflow_code_review");
 			return names;
 		}
+		case "explore":
+			return ["workflow_plan_read"];
 		case "init":
 			return ["workflow_init_complete"];
 		default:
@@ -884,8 +886,13 @@ console.log("\n=== Check 7: Code review tooling ===");
 	);
 	assert(
 		sidecallTs.includes("apiKey: auth.apiKey") &&
-			sidecallTs.includes("headers: auth.headers"),
-		"sidecall.ts: forwards apiKey and headers to completeSimple",
+			sidecallTs.includes("headers: auth.headers") &&
+			sidecallTs.includes("env: auth.env"),
+		"sidecall.ts: forwards apiKey, headers, and env to provider streamSimple",
+	);
+	assert(
+		/await\s+provider\.streamSimple\([\s\S]*?\)\.result\(\)/.test(sidecallTs),
+		"sidecall.ts: chains provider.streamSimple(...).result() at a real call site",
 	);
 	// Error surfacing: detect stopReason === "error" or errorMessage and throw.
 	assert(
@@ -941,9 +948,9 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"tools.ts: approve throws when runtime transition fails",
 	);
 	assert(
-		approveBlock.includes("WORK_HANDOFF_RUNTIME_NOTICE") &&
-			approveBlock.includes('buildModeMessageBody("work", result.state)'),
-		"tools.ts: approve followUp includes runtime notice and shared Work mode body",
+		approveBlock.includes('workflow_plan_read 读取计划和当前 workflow_todo 列表') &&
+			!approveBlock.includes('WORK_HANDOFF_RUNTIME_NOTICE'),
+		"tools.ts: approve followUp uses short kickoff without runtime notice",
 	);
 	assert(
 		approveBlock.includes('deliverAs: "followUp"'),
@@ -1218,9 +1225,10 @@ console.log("\n=== Check 14: Explore mode ===");
 		codeReview: { enabled: false },
 	};
 	assert(
-		inlineComputeWorkflowToolNames("explore", cfgAllReviewTools).length === 0 &&
+		inlineComputeWorkflowToolNames("explore", cfgAllReviewTools).join(",") ===
+			"workflow_plan_read" &&
 			inlineComputeWorkflowToolNames("idle", cfgAllReviewTools).length === 0,
-		"inline runtime: explore/idle compute no workflow tools",
+		"inline runtime: explore exposes workflow_plan_read; idle exposes none",
 	);
 	assert(
 		inlineComputeWorkflowToolNames("plan", cfgAllReviewTools).join(",") ===
@@ -1230,16 +1238,16 @@ console.log("\n=== Check 14: Explore mode ===");
 			inlineComputeWorkflowToolNames("work", cfgNoReviewTools).join(",") ===
 				"workflow_todo,workflow_plan_read" &&
 			inlineComputeWorkflowToolNames("commit", cfgAllReviewTools).length === 0,
-		"inline runtime: plan/work expose workflow tools; explore/idle/commit expose none",
+		"inline runtime: plan/work expose workflow tools; commit exposes none",
 	);
 	assert(
-		/export function isWorkflowToolMode\([\s\S]*?mode === "plan"[\s\S]*?mode === "work"/.test(
+		/export function isWorkflowToolMode\([\s\S]*?mode === "plan"[\s\S]*?mode === "work"[\s\S]*?mode === "explore"/.test(
 			modeTs14,
 		) &&
 			!/export function isWorkflowToolMode\([\s\S]*?mode === "commit"/.test(
 				modeTs14,
 			),
-		"mode.ts: isWorkflowToolMode allow-list is plan/work",
+		"mode.ts: isWorkflowToolMode allow-list is plan/work/explore",
 	);
 	assert(
 		/const PLAN_WORKFLOW_TOOL_NAMES[\s\S]*?workflow_plan_save[\s\S]*?const WORK_WORKFLOW_TOOL_NAMES[\s\S]*?workflow_plan_read[\s\S]*?export function computeWorkflowToolNames[\s\S]*?config\.planReview\.enabled[\s\S]*?config\.codeReview\.enabled[\s\S]*?return \[\]/.test(
@@ -1286,11 +1294,11 @@ console.log("\n=== Check 14: Explore mode ===");
 		"guards.ts: isReadonlyMode true for explore + plan",
 	);
 
-	// guards.ts: isLocalFileMutatingShell strips /dev/null and fd-dups
+	// guards.ts: isLocalFileMutatingShell has been removed; the remaining
+	// read-only protections live in path guards and mode prompts.
 	assert(
-		guardsTs.includes("null|stdout|stderr") &&
-			guardsTs.includes("let stripped = cmd"),
-		"guards.ts: isLocalFileMutatingShell strips safe redirects",
+		!/export function isLocalFileMutatingShell/.test(guardsTs),
+		"guards.ts: isLocalFileMutatingShell removed in favor of mode prompts",
 	);
 
 	// commands.ts: before_agent_start promotes idle→explore
@@ -1345,156 +1353,51 @@ console.log("\n=== Check 14: Explore mode ===");
 	);
 }
 
-// ═══ Check 15: isLocalFileMutatingShell redirect behavioral tests ═══
+// ═══ Check 15: Bash mutation scanner removed; path guards retained ═══
 
-console.log("\n=== Check 15: isLocalFileMutatingShell redirect guard ===");
+console.log("\n=== Check 15: mutation scanner removed, path guards retained ===");
 
 {
-	// Extract the function body from guards.ts for behavioral testing via eval.
 	const guardsTs = fs.readFileSync(
 		path.join(CWD, "extensions/workflow/guards.ts"),
 		"utf8",
 	);
-
-	const fnStart = guardsTs.indexOf("export function isLocalFileMutatingShell");
-	const bodyStart = guardsTs.indexOf("{", fnStart);
-	let depth = 0,
-		fnEnd = bodyStart;
-	for (let i = bodyStart; i < guardsTs.length; i++) {
-		if (guardsTs[i] === "{") depth++;
-		else if (guardsTs[i] === "}" && --depth === 0) {
-			fnEnd = i;
-			break;
-		}
-	}
-
-	let body = guardsTs.slice(bodyStart + 1, fnEnd);
-	// Strip inline type annotations so eval() can handle the plain JS.
-	body = body
-		.replace(/strip\w+ed\s*:\s*string/g, "")
-		.replace(/\bstripped\b/g, "s");
-	body = body.replace(/let stripped = cmd;/g, "let s = cmd;");
-	body = body.replace(/stripped/g, "s");
-	body = body.replace(/cmd\.length/g, "cmd.length");
-	body = body.replace(
-		/const cmd = command\.trim\(\);/g,
-		"const cmd = command.trim();",
+	const commandsTs2 = fs.readFileSync(
+		path.join(CWD, "extensions/workflow/commands.ts"),
+		"utf8",
 	);
 
-	const fnStr = "function isLocalFileMutatingShell(command) {" + body + "\n}";
-
-	let isLocalFileMutatingShell;
-	try {
-		isLocalFileMutatingShell = eval("(function() { return " + fnStr + "; })()");
-	} catch (e) {
-		assert(
-			false,
-			"isLocalFileMutatingShell eval failed: " +
-				(e.message ?? String(e)).slice(0, 200),
-		);
-		isLocalFileMutatingShell = () => {
-			throw new Error("eval failed");
-		};
-	}
-
-	// Safe redirects — must NOT be flagged as file-mutating.
 	assert(
-		isLocalFileMutatingShell("grep x y 2>/dev/null") === false,
-		"2>/dev/null NOT mutating",
+		!/export function isLocalFileMutatingShell/.test(guardsTs),
+		"guards.ts: isLocalFileMutatingShell removed",
 	);
 	assert(
-		isLocalFileMutatingShell("grep -rn pattern . 2>/dev/null") === false,
-		"...2>/dev/null NOT mutating (full cmd)",
-	);
-	assert(
-		isLocalFileMutatingShell("cmd >/dev/null 2>&1") === false,
-		">/dev/null 2>&1 NOT mutating",
-	);
-	assert(
-		isLocalFileMutatingShell("echo $$ >/dev/null 2>&1") === false,
-		">/dev/null with 2>&1 NOT mutating",
-	);
-	assert(
-		isLocalFileMutatingShell("stderr_cmd 2>/dev/stderr") === false,
-		"2>/dev/stderr NOT mutating",
-	);
-	assert(
-		isLocalFileMutatingShell("cmd 1>&2") === false,
-		"fd dup 1>&2 NOT mutating",
-	);
-	assert(
-		isLocalFileMutatingShell("cmd 1>>/dev/null") === false,
-		">>/dev/null NOT mutating",
-	);
-	assert(
-		isLocalFileMutatingShell("cmd &>/dev/null") === false,
-		"&>/dev/null NOT mutating",
+		!/\bisLocalFileMutatingShell\s*\(/.test(
+			commandsTs2.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, ""),
+		),
+		"commands.ts: Bash mutation scanner removed from tool_call guard",
 	);
 
-	// &>word creates a FILE in bash — &>1 must be flagged.
+	// Stable path guards retained.
 	assert(
-		isLocalFileMutatingShell("cmd &>1") === true,
-		"&>1 IS mutating (creates file named 1)",
-	);
-
-	// Unsafe — MUST be flagged.
-	assert(
-		isLocalFileMutatingShell("echo x > f.txt") === true,
-		"> f.txt IS mutating",
+		guardsTs.includes("export function isWorkflowDataPath"),
+		"guards.ts: isWorkflowDataPath retained",
 	);
 	assert(
-		isLocalFileMutatingShell("echo x >> f.txt") === true,
-		">> f.txt IS mutating",
-	);
-	assert(isLocalFileMutatingShell("rm foo") === true, "rm IS mutating");
-	assert(isLocalFileMutatingShell("touch bar") === true, "touch IS mutating");
-	assert(
-		isLocalFileMutatingShell("git add foo") === true,
-		"git add IS mutating",
+		guardsTs.includes("export function isAllowedPlanScratchPath"),
+		"guards.ts: isAllowedPlanScratchPath retained",
 	);
 	assert(
-		isLocalFileMutatingShell("rtk git add foo") === true,
-		"rtk git add IS mutating",
+		guardsTs.includes("export function isAllowedInitTargetPath"),
+		"guards.ts: isAllowedInitTargetPath retained",
 	);
 	assert(
-		isLocalFileMutatingShell("RTK git add foo") === true,
-		"RTK (case-insensitive) git add IS mutating",
+		guardsTs.includes("export function isInsideWorktree"),
+		"guards.ts: isInsideWorktree retained",
 	);
 	assert(
-		isLocalFileMutatingShell("rtk rtk git commit -m x") === true,
-		"double rtk git commit IS mutating",
-	);
-	assert(
-		isLocalFileMutatingShell("rtk git status") === false,
-		"rtk git status NOT mutating",
-	);
-	assert(
-		isLocalFileMutatingShell("rtk echo x > f.txt") === true,
-		"rtk + file redirect IS mutating",
-	);
-	// Residual: env/compound prefixes are outside leading-rtk normalization.
-	assert(
-		isLocalFileMutatingShell(
-			"export RTK_DB_PATH=/tmp/x; rtk git add foo",
-		) === false,
-		"env-prefixed rtk git add remains undetected (leading-strip only)",
-	);
-
-	// Pure reads — must NOT be flagged.
-	assert(isLocalFileMutatingShell("cat foo") === false, "cat NOT mutating");
-	assert(isLocalFileMutatingShell("ls -la") === false, "ls NOT mutating");
-	assert(
-		isLocalFileMutatingShell("grep -r hello .") === false,
-		"grep without redirect NOT mutating",
-	);
-
-	// Path traversal — must NOT be stripped (must still be flagged).
-	const traversalResult = isLocalFileMutatingShell(
-		"cmd >/dev/null/../../etc/passwd",
-	);
-	assert(
-		traversalResult === true,
-		">/dev/null/../../etc/passwd IS mutating (path traversal not stripped)",
+		guardsTs.includes("export function isReadonlyMode"),
+		"guards.ts: isReadonlyMode retained",
 	);
 }
 
@@ -1652,7 +1555,8 @@ function validateInitModeStatic() {
 	const initTools = inlineComputeWorkflowToolNames("init", { planReview: { enabled: true }, codeReview: { enabled: true } });
 	assert(JSON.stringify(initTools) === JSON.stringify(["workflow_init_complete"]), "inline runtime: init exposes only workflow_init_complete");
 	assert(inlineIsWorkflowToolMode("init") === true, "inline runtime: init is a workflow-tool mode");
-	assert(inlineIsWorkflowToolMode("idle") === false && inlineIsWorkflowToolMode("explore") === false, "inline runtime: idle/explore are not workflow-tool modes");
+	assert(inlineIsWorkflowToolMode("explore") === true, "inline runtime: explore is a workflow-tool mode");
+	assert(inlineIsWorkflowToolMode("idle") === false, "inline runtime: idle is not a workflow-tool mode");
 }
 validateInitModeStatic();
 

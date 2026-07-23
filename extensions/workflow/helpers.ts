@@ -115,18 +115,3 @@ export function buildModeMessageBody(
 		.filter(Boolean)
 		.join("\n\n");
 }
-
-/** Build the hidden workflow mode custom message injected before model calls. */
-export function buildWorkflowModeMessage(
-	mode: Mode,
-	state: WorkflowState,
-): { customType: string; content: string; display: boolean } | undefined {
-	const content = buildModeMessageBody(mode, state);
-	if (!content) return undefined;
-
-	return {
-		customType: "workflow-mode",
-		content,
-		display: false,
-	};
-}

@@ -2,7 +2,7 @@
 
 Lightweight software development workflow extension for pi-coding-agent: plan, built-in plan review (sidecall), implementation, code review via alibaba/open-code-review CLI, and commit orchestration.
 
-**Zero external Pi extension dependencies.** Plan review uses `completeSimple()` — a same-turn LLM sidecall with no subprocess. Code review runs via the standalone `ocr review` CLI. No `@tintinweb/pi-subagents` required.
+**Zero external Pi extension dependencies.** Plan review uses `provider.streamSimple(...).result()` — a same-turn LLM sidecall with no subprocess. Code review runs via the standalone `ocr review` CLI. No `@tintinweb/pi-subagents` required.
 
 ## Installation
 
@@ -29,8 +29,11 @@ pi install .
 idle → explore → plan → work → /review loop → commit → idle
 ```
 
-- **Explore Mode**: Default landing after `/wf`. Read-only codebase exploration and Q&A (same permissions as Plan Mode). Use `/plan` when ready to design.
-- **Plan Review**: Optional, model-initiated `workflow_plan_review` tool call — the plan agent may invoke it after saving a plan. Same-turn `completeSimple()` sidecall with curated context (plan text + auto-extracted key file snippets + tool inventory). Not a separate mode; runs within Plan Mode.
+- **Tool ownership**: pi-workflow manages only its own `workflow_*` tools. Built-in tools and other extension tools preserve their active/inactive state across mode changes; mode permissions apply to every active tool through prompts and stable path guards. There is no special auto-activation of `ask_user_question`.
+- **Mode runtime**: model role and workflow tools are synchronized in one ordered `session_start` handler (registration before runtime), and re-applied on each mode transition. `before_agent_start` only recalibrates the model role and appends stable `COMMON_PROMPT` to the system prompt.
+- **Mode context**: the current mode prompt, worktree notice, and workflow state are injected as one ephemeral hidden custom message before every provider request through Pi’s `context` event, so Plan→Work transitions within the same agent run always see the latest mode.
+- **Explore Mode**: Default landing after `/wf`. Read-only codebase exploration and Q&A (same permissions as Plan Mode) plus read-only `workflow_plan_read` to inspect a preserved plan. Use `/plan` when ready to design.
+- **Plan Review**: Optional, model-initiated `workflow_plan_review` tool call — the plan agent may invoke it after saving a plan. Same-turn `provider.streamSimple(...).result()` sidecall with curated context (plan text + auto-extracted key file snippets + tool inventory). Not a separate mode; runs within Plan Mode.
 - **Code Review**: `/review` selects scope, prompts the model to invoke `workflow_code_review`, and runs the review/fix/re-review loop. Work Mode points users to `/review` after implementation.
 
 ## Modes
@@ -120,7 +123,7 @@ See `config.json.example` for the canonical config template.
 
 Plan review is an **optional** feature — when `planReview.enabled` is `true`, the `workflow_plan_review` tool becomes available. The plan agent decides whether to call it based on plan complexity and risk.
 
-The reviewer uses `completeSimple()` — a single LLM API call with no tools and no subprocess — receiving:
+The reviewer uses `provider.streamSimple(...).result()` — a single LLM API call with no tools and no subprocess — receiving:
 
 - The full plan text
 - Auto-extracted file snippets from paths referenced in the plan
@@ -166,7 +169,7 @@ Flow:
 1. Pick a scope: **Session**, **Project**, **Global**, **Reset Session**, or **Reset Project** (or **Done** to close).
 2. Edit options in a searchable list:
    - `models.<role>.provider` / `models.<role>.model` — free-text input (clear the field to inherit).
-   - `models.<role>.thinking` — cycle through `inherit / off / minimal / low / medium / high / xhigh`.
+   - `models.<role>.thinking` — cycle through `inherit / off / minimal / low / medium / high / xhigh / max`.
    - `workflow.autoEnter`, `planReview.enabled`, `codeReview.enabled` — toggle through `inherit / true / false` (**Project / Global scopes only**, see below).
 3. Press Esc to return to the scope picker; pick **Done** to finish.
 
@@ -247,7 +250,7 @@ This prevents wasting tokens when the user still wants to refine the design.
 
 ## Plan Review (Sidecall)
 
-Plan review runs as an **optional, model-initiated** `completeSimple()` sidecall — no subprocess, no agent containers, no RPC. The plan agent calls `workflow_plan_review` when the plan is complex or the user requests it.
+Plan review runs as an **optional, model-initiated** `provider.streamSimple(...).result()` sidecall — no subprocess, no agent containers, no RPC. The plan agent calls `workflow_plan_review` when the plan is complex or the user requests it.
 
 - **Curated context** — the reviewer sees the plan text, auto-extracted file snippets, and executor tool inventory.
 - **Fast & reliable** — single LLM API call, no subprocess communication risk.
@@ -295,12 +298,12 @@ Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) ar
 | `workflow_plan_save` | Save or revise the active plan |
 | `workflow_plan_approve` | Approve the active plan and hand off to Work Mode |
 | `workflow_plan_clear` | Clear workflow state and return to idle mode |
-| `workflow_plan_review` | Run an optional plan review sidecall via completeSimple |
+| `workflow_plan_review` | Run an optional plan review sidecall via provider stream |
 | `workflow_code_review` | Run OCR code review on workspace or git ref range |
 
 ### workflow_plan_review
 
-Run a same-turn plan review via `completeSimple()` sidecall (only available when `planReview.enabled: true`). The reviewer receives curated context (plan + file snippets + tool inventory) and returns structured feedback.
+Run a same-turn plan review via `provider.streamSimple(...).result()` sidecall (only available when `planReview.enabled: true`). The reviewer receives curated context (plan + file snippets + tool inventory) and returns structured feedback.
 
 **Parameters:**
 - `task` (required): the plan content or a brief task description

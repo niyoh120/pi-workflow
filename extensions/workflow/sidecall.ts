@@ -1,10 +1,10 @@
 /**
- * sidecall — lightweight plan-review via completeSimple (no subprocess).
+ * sidecall — lightweight plan-review via provider streamSimple (no subprocess).
  *
  * Replaces the pi-subagents spawnAndWait path for planReview.
  * Builds a curated system prompt (review focus + conversation summary +
- * key file snippets + tool inventory), calls completeSimple once with
- * no tools, and returns a structured tool result.
+ * key file snippets + tool inventory), calls provider.streamSimple(...).result()
+ * once with no tools, and returns a structured tool result.
  */
 
 import type {
@@ -13,7 +13,6 @@ import type {
 	ThinkingLevel,
 	Context,
 } from "@earendil-works/pi-ai";
-import { completeSimple } from "@earendil-works/pi-ai";
 import type {
 	AgentToolResult,
 	ExtensionAPI,
@@ -216,7 +215,7 @@ export function buildToolInventory(pi: ExtensionAPI): string {
 // ── Main sidecall ─────────────────────────────────────────────────
 
 /**
- * Execute a plan review via completeSimple — single LLM call with
+ * Execute a plan review via provider.streamSimple(...).result() — single LLM call with
  * curated context, no tools, no subprocess.
  */
 export async function executePlanReviewSidecall(
@@ -266,7 +265,7 @@ export async function executePlanReviewSidecall(
 		messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
 	};
 
-	// Find the model from the registry (needed for completeSimple's Model<TApi> parameter).
+	// Find the model from the registry (needed for streamSimple's Model<TApi> parameter).
 	const model = (ctx as any).modelRegistry?.find(
 		opts.modelSpec.provider,
 		opts.modelSpec.model,
@@ -277,15 +276,21 @@ export async function executePlanReviewSidecall(
 		throw new Error(`Plan review model not found: ${advisorLabel}`);
 	}
 
-	// Resolve request auth for the reviewer model. completeSimple only falls back
-	// to env API keys; provider auth configured via models.json / OAuth must be
-	// resolved here and forwarded explicitly, or the call fails with
-	// "No API key for provider: ...".
+	// Resolve request auth for the reviewer model. The provider stream only
+	// falls back to env API keys; provider auth configured via models.json /
+	// OAuth must be resolved here and forwarded explicitly, or the call fails
+	// with "No API key for provider: ...".
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 	if (!auth.ok) {
 		throw new Error(
 			`Plan review auth failed for ${advisorLabel}: ${auth.error}`,
 		);
+	}
+
+	// Resolve the owning provider for streamSimple.
+	const provider = ctx.modelRegistry.getProvider(model.provider);
+	if (!provider) {
+		throw new Error(`Plan review provider not found: ${model.provider}`);
 	}
 
 	// Convert Thinking to ThinkingLevel: "off" means no reasoning.
@@ -295,15 +300,16 @@ export async function executePlanReviewSidecall(
 			: undefined;
 
 	try {
-		// completeSimple(model, context, options) — not an options bag.
-		const response = await completeSimple(model, context, {
+		// provider.streamSimple(...).result() — single LLM call, no tools.
+		const response = await provider.streamSimple(model, context, {
 			apiKey: auth.apiKey,
 			headers: auth.headers,
+			env: auth.env,
 			reasoning: thinkingLevel,
 			signal: opts.signal,
-		});
+		}).result();
 
-		// completeSimple resolves (does not reject) on provider stream errors:
+		// streamSimple().result() resolves (does not reject) on provider stream errors:
 		// the AssistantMessage carries stopReason "error" + errorMessage instead.
 		// Surface these as real tool errors so the model does not see empty output.
 		if (response.stopReason === "aborted" || opts.signal?.aborted) {

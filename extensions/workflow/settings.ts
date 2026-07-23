@@ -94,6 +94,7 @@ const THINKING_VALUES = [
 	"medium",
 	"high",
 	"xhigh",
+	"max",
 ] as const;
 
 /** Paths whose change requires /reload (or restart) to fully take effect. */
@@ -447,7 +448,6 @@ function modelPickerItems(
 		searchText: `${label} ${effectiveProvider} ${effectiveModel}`,
 	});
 	try {
-		modelRegistry.refresh();
 		const loadError = modelRegistry.getError();
 		const models = [...modelRegistry.getAvailable()].sort((a, b) => {
 			const aRef = `${a.provider}/${a.id}`;
@@ -740,6 +740,13 @@ export function registerWfSettingsCommand(
 					"info",
 				);
 				return;
+			}
+
+			// Refresh model catalog once so pickers can read synchronously.
+			try {
+				await ctx.modelRegistry.refresh();
+			} catch {
+				// Non-fatal: pickers fall back to the cached/stale catalog.
 			}
 
 			const changedScopes = new Set<Scope>();

@@ -4,7 +4,7 @@
 
 - 本仓库是 `pi-coding-agent` 的 TypeScript 扩展包；扩展入口由 `package.json#pi.extensions` 注册为 `extensions/workflow/index.ts`。
 - 使用 ESM、Node16 模块解析、TypeScript strict/noEmit；源码导入本地模块时保留 `.js` 后缀，Node 内置模块使用 `node:` 前缀。
-- 当前 `@earendil-works/pi-*` 0.79.1 依赖要求 Node.js `>=22.19.0`。
+- 当前 `@earendil-works/pi-*` 0.81.1 依赖要求 Node.js `>=22.19.0`。
 - 不依赖其他 Pi 扩展。结构化问答包 `@juicesharp/rpiv-ask-user-question` 属于可选安装；代码审查依赖 PATH 中独立安装的 `ocr` CLI。
 
 ## 验证与本地安装
@@ -33,7 +33,7 @@ pi install .
 - `mode.ts` / `prompts.ts` / `helpers.ts`：模式工具可见性、模式提示词、运行时消息。
 - `state.ts` / `paths.ts` / `config.ts` / `defaults.ts` / `types.ts`：状态、路径、配置合并、默认值和共享类型。
 - `settings.ts`：`/wf-settings` 的 session/project/global 三层配置 TUI。
-- `sidecall.ts`：Plan Review 的 `completeSimple()` 同 turn 侧调用。
+- `sidecall.ts`：Plan Review 的 `provider.streamSimple(...).result()` 同 turn 侧调用。
 - `ocr-helpers.ts` / `review-tui.ts`：OCR 参数与执行、`/review` 范围选择 UI。
 - `worktree.ts` / `guards.ts`：worktree 生命周期和文件/命令权限边界。
 - `todo-overlay.ts`：todo widget 生命周期与隐藏 bookkeeping。

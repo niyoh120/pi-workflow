@@ -236,9 +236,10 @@ export function isInsideWorktree(
 
 /**
  * Returns true if the given mode is read-only for local file mutations via
- * bash and the generic write/edit path. `init` is treated as read-only so it
- * inherits the bash mutating-command guard; its single-file AGENTS.md write
- * exception is handled by a dedicated init branch before this generic path.
+ * the generic write/edit path. `init` is treated as read-only; its
+ * single-file AGENTS.md write exception is handled by a dedicated init
+ * branch before this generic path. Bash mutation behavior relies on mode
+ * prompts; this function only governs the write/edit tool path.
  */
 export function isReadonlyMode(mode: Mode): boolean {
 	return mode === "explore" || mode === "plan" || mode === "init";
@@ -344,76 +345,4 @@ export function isAllowedInitTargetPath(
 	}
 
 	return null;
-}
-
-/** Check whether a shell command would modify local files. */
-export function isLocalFileMutatingShell(command: string): boolean {
-	// RTK rewrite may prefix commands (`rtk git add foo`); strip those so
-	// existing ^git / ^npm mutation patterns still match.
-	// Leading tokens only — compound/env forms (`ENV=x rtk git add`,
-	// `export …; rtk git add`) still miss ^-anchored patterns, same as `sudo git add`.
-	let cmd = command.trim().replace(/^(?:rtk\s+)+/i, "");
-	if (cmd.length === 0) return false;
-
-	// Strip harmless fd-duplication redirects (2>&1, >&2, 1>&2).
-	// Note: &>word creates a file in bash — we only strip &>/dev/…, not &>1 / &>2.
-	let stripped = cmd;
-	stripped = stripped.replace(/\d*>\s*&[12]\b/g, "");
-
-	// Strip redirects to /dev/{null,stdout,stderr} — these are read-only
-	// virtual devices. The (?!…) guard rejects path-traversal variants
-	// such as >/dev/null/../../foo or >/dev/nulls.
-	stripped = stripped.replace(
-		/\d*>\s*\/dev\/(null|stdout|stderr)(?![\w/.])/g,
-		"",
-	);
-	stripped = stripped.replace(
-		/\d*>>\s*\/dev\/(null|stdout|stderr)(?![\w/.])/g,
-		"",
-	);
-	// &>/dev/null is harmless (both stdout+stderr → null device).
-	stripped = stripped.replace(
-		/&>\s*\/dev\/(null|stdout|stderr)(?![\w/.])/g,
-		"",
-	);
-
-	// Shell redirection / tee / patch usually writes files.
-	if (/(^|[^<])>\s*[^&]/.test(stripped)) return true;
-	if (/>>\s*/.test(stripped)) return true;
-	if (/\|\s*tee\b/.test(stripped)) return true;
-	if (/\bapply_patch\b/.test(stripped)) return true;
-
-	const mutatingPatterns = [
-		/^rm\b/,
-		/^mv\b/,
-		/^cp\b/,
-		/^touch\b/,
-		/^mkdir\b/,
-		/^rmdir\b/,
-		/^chmod\b/,
-		/^chown\b/,
-		/^ln\b/,
-		/^truncate\b/,
-
-		/\bprettier\b.*\s--write\b/,
-		/\beslint\b.*\s--fix\b/,
-		/\bruff\b.*\s--fix\b/,
-		/\bblack\b/,
-		/\bgofmt\b.*\s-w\b/,
-		/\brustfmt\b/,
-		/^npm\s+(install|i|add|update|dedupe|link|uninstall|remove|rm)\b/,
-		/^pnpm\s+(install|add|update|link|remove|rm)\b/,
-		/^yarn\s+(install|add|upgrade|link|remove)\b/,
-		/^bun\s+(install|add|update|remove|rm)\b/,
-		/^pip\s+install\b/,
-		/^uv\s+add\b/,
-		/^poetry\s+add\b/,
-		/^cargo\s+add\b/,
-		/^go\s+get\b/,
-
-		/^git\s+(add|commit|checkout|switch|reset|clean|apply|restore|merge|rebase|cherry-pick|stash|tag|push)\b/,
-		/^git\s+branch\s+(-d|-D|-m)\b/,
-	];
-
-	return mutatingPatterns.some((re) => re.test(cmd));
 }

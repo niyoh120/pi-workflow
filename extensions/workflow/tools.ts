@@ -12,8 +12,7 @@ import {
 	readPlan,
 } from "./state.js";
 import { loadConfig } from "./config.js";
-import { WORK_HANDOFF_RUNTIME_NOTICE } from "./prompts.js";
-import { buildModeMessageBody, todoText } from "./helpers.js";
+import { todoText } from "./helpers.js";
 import {
 	createWorktree,
 	deleteWorktreeBranch,
@@ -476,16 +475,7 @@ export function registerPlanApproveTool(
 				throw new Error(result.reason);
 			}
 
-			const workModeBody = buildModeMessageBody("work", result.state);
-			if (!workModeBody) {
-				throw new Error("Work Mode prompt is unavailable.");
-			}
-
 			const handoffMessage =
-				WORK_HANDOFF_RUNTIME_NOTICE +
-				"\n\n" +
-				workModeBody +
-				"\n\n" +
 				`已批准的计划在 ${result.state.planPath}. ` +
 				`请用 workflow_plan_read 读取计划和当前 workflow_todo 列表，按 todo 顺序开始实现。`;
 
@@ -499,7 +489,7 @@ export function registerPlanApproveTool(
 					{
 						type: "text",
 						text:
-							`Plan approved. Work Mode runtime activated.\n` +
+							`Plan approved. Work Mode runtime activated. ` +
 							`Work run: ${result.state.workRunId!.slice(-8)}.\n\n` +
 							handoffMessage +
 							"\n\nDo not call any more tools in this turn.",

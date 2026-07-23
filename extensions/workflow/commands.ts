@@ -6,13 +6,12 @@ import { COMMON_PROMPT } from "./prompts.js";
 import {
 	isWorkflowDataPath,
 	isReadonlyMode,
-	isLocalFileMutatingShell,
 	isAllowedPlanScratchPath,
 	isAllowedInitTargetPath,
 	isInsideWorktree,
 } from "./guards.js";
 import {
-	buildWorkflowModeMessage,
+	buildModeMessageBody,
 	currentStatusText,
 	worktreeRuntimeNotice,
 } from "./helpers.js";
@@ -22,7 +21,9 @@ import { DEFAULT_STATE } from "./defaults.js";
 import { planDir } from "./paths.js";
 import { loadConfig } from "./config.js";
 import {
-	applyModeRuntime,
+	setRole,
+	modeRole,
+	activateWorkflowToolsIfAllowed,
 	setCurrentTurnGuardMode,
 	getCurrentTurnGuardMode,
 	clearCurrentTurnGuardMode,
@@ -123,7 +124,7 @@ export function registerBeforeAgentStart(
 ): void {
 	pi.on("before_agent_start", async (event, ctx) => {
 		const sessionKey = ctxSessionKey(ctx);
-		let state = loadState(ctx.cwd, sessionKey);
+		const state = loadState(ctx.cwd, sessionKey);
 		const config = loadConfig(ctx.cwd, getAgentDir());
 		const workflowActive =
 			(state.workflowEnabled || config.workflow.autoEnter) &&
@@ -135,53 +136,97 @@ export function registerBeforeAgentStart(
 			overlay.hideDoneFromLastTurn();
 		}
 
-		// When workflow is not active, stay idle — no mode prompts, no guards.
 		if (!workflowActive) {
 			if (overlay) overlay.dispose();
 			return;
 		}
 
-		let runtimeAppliedViaTransition = false;
-		// Promote idle → explore through the unified transition path so
-		// persisted mode, status line, runtime, and guards stay aligned.
-		if (state.mode === "idle") {
-			const result = await transitionWorkflowMode({
-				pi,
-				ctx,
-				sessionKey,
-				nextState: { ...state, mode: "explore" },
-				getAgentDir,
-			});
-			runtimeAppliedViaTransition = true;
-			state = result.state;
-			if (!result.ok) {
-				ctx.ui.notify(result.reason, "error");
-			}
-		} else {
-			// Set per-turn guard mode from persisted state
-			setCurrentTurnGuardMode(sessionKey, state.mode);
-		}
+		// Set per-turn guard mode from persisted state so tool_call guards see
+		// the active mode even before any transition happens this turn.
+		setCurrentTurnGuardMode(sessionKey, state.mode);
 
 		if (overlay) {
 			overlay.update(state.todos);
 		}
 
-		// Apply mode runtime (model/tools) for non-idle modes.
-		if (!runtimeAppliedViaTransition) {
-			await applyModeRuntime(pi, ctx, state.mode, getAgentDir);
+		// Reapply the configured model/thinking role for the current mode, and
+		// reconcile workflow tools as a safety net in case session_start failed
+		// or a transition was skipped. Reconciliation short-circuits when the
+		// active set already matches, so this is cheap on the steady-state path.
+		if (state.mode === "idle") {
+			// session_start normally promotes idle→explore; reaching here in idle
+		// means the transition failed. Log so the degradation is observable —
+		// buildModeMessageBody returns undefined for idle, so the context handler
+		// will inject no mode prompt this turn.
+			console.warn(
+				"[workflow] before_agent_start: mode is idle despite workflow being active; session_start transition may have failed",
+			);
 		}
+		await setRole(pi, ctx, modeRole(state.mode), getAgentDir);
+		activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir, state.mode);
 
-		// Keep stable workflow rules in the system prompt; inject mutable mode
-		// context as a custom message so plan→work follow-ups do not leave a
-		// stale Plan Mode system prompt in the same agent loop.
-		const message = buildWorkflowModeMessage(state.mode, state);
-		const systemPrompt = event.systemPrompt + "\n\n" + COMMON_PROMPT;
-		if (!message) return { systemPrompt };
-
+		// Keep stable workflow rules in the system prompt. The mutable mode
+		// prompt and current state are injected per-request by the context handler.
 		return {
-			systemPrompt,
-			message,
+			systemPrompt: event.systemPrompt + "\n\n" + COMMON_PROMPT,
 		};
+	});
+}
+
+/**
+ * Inject the latest mode prompt and workflow state as an ephemeral hidden
+ * custom message before every provider request. Filters out historical
+ * workflow-mode messages (including persisted ones from older versions) and
+ * appends one current message when workflow is active.
+ */
+export function registerWorkflowContextInjection(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.on("context", async (event, ctx) => {
+		try {
+			const sessionKey = ctxSessionKey(ctx);
+			const state = loadState(ctx.cwd, sessionKey);
+			const config = loadConfig(ctx.cwd, getAgentDir());
+			const workflowActive =
+				(state.workflowEnabled || config.workflow.autoEnter) &&
+				!state.workflowExplicitlyDisabled;
+
+			// Filter historical workflow-mode messages into a fresh array. Done after
+			// state/config loads so a thrown load leaves event.messages untouched.
+			const messages = event.messages.filter((message) => {
+				if (
+					message &&
+					typeof message === "object" &&
+					"customType" in message &&
+					(message as { customType?: unknown }).customType === "workflow-mode"
+				) {
+					return false;
+				}
+				return true;
+			});
+
+			if (!workflowActive) return { messages };
+
+			const content = buildModeMessageBody(state.mode, state);
+			if (!content) return { messages };
+
+			messages.push({
+				role: "custom",
+				customType: "workflow-mode",
+				content,
+				display: false,
+				timestamp: Date.now(),
+			});
+
+			return { messages };
+		} catch (err) {
+			// Surface injection failures so debugging is possible. Return the
+			// original event.messages unmodified so mode context is not silently
+			// stripped when state/config loading fails.
+			console.error(`[workflow] context injection failed: ${err}`);
+			return { messages: event.messages };
+		}
 	});
 }
 
@@ -189,6 +234,16 @@ export function registerToolCallGuard(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
+	// Design note: this guard keeps only the stable, low-false-positive path
+	// invariants (workflow-data files, plan files, Explore/Plan scratch,
+	// Init single-file target, worktree containment, Commit write/edit block).
+	// Bash/Git mutation in read-only modes is governed by mode prompts rather
+	// than a subcommand scanner: the previous isLocalFileMutatingShell()
+	// approach produced too many false positives (e.g. matching `rg` args that
+	// happened to contain `black`/`rustfmt`) and could not reliably classify
+	// aliases, wrappers, or `git -C`. Prompt-based enforcement accepts that a
+	// model can ignore instructions in exchange for not breaking legitimate
+	// read-only workflows.
 	pi.on("tool_call", async (event, ctx) => {
 		const sessionKey = ctxSessionKey(ctx);
 		const state = loadState(ctx.cwd, sessionKey);
@@ -299,8 +354,8 @@ export function registerToolCallGuard(
 		}
 
 		// Init Mode: only the recorded AGENTS.md target may be written/edited.
-		// Must run before the generic readonly branch (init is in isReadonlyMode
-		// to inherit the bash mutating-command guard).
+		// Must run before the generic readonly branch (init is in isReadonlyMode)
+		// so that the init-specific file exception takes priority.
 		if (effectiveMode === "init" &&
 			(event.toolName === "write" || event.toolName === "edit")) {
 			const targetPath: string | undefined =
@@ -357,17 +412,6 @@ export function registerToolCallGuard(
 					block: true,
 					reason: `当前是 ${effectiveMode}，禁止修改本地文件。联网搜索、读取、分析工具仍可使用。`,
 				};
-			}
-
-			if (event.toolName === "bash") {
-				const command = String(event.input?.command ?? "");
-
-				if (isLocalFileMutatingShell(command)) {
-					return {
-						block: true,
-						reason: `当前是 ${effectiveMode}，禁止执行会修改本地文件的 shell 命令：${command}`,
-					};
-				}
 			}
 
 			return;
