@@ -25,8 +25,9 @@ import type { WorkflowState } from "./types.js";
 import { executePlanReviewSidecall } from "./sidecall.js";
 import { transitionWorkflowMode } from "./mode.js";
 import {
-	WORK_HANDOFF_CUSTOM_TYPE,
+	WORK_APPROVAL_CUSTOM_TYPE,
 	buildWorkHandoffBody,
+	type WorkApprovalData,
 } from "./helpers.js";
 import { isAllowedInitTargetPath } from "./guards.js";
 import * as path from "node:path";
@@ -138,13 +139,7 @@ export function registerTodoTool(
 		name: "workflow_todo",
 		label: "Workflow Todo",
 		description:
-			"Maintain the lightweight workflow todo list for plan/work alignment.",
-		promptSnippet:
-			"workflow_todo: maintain the workflow todo list so implementation stays aligned with the plan.",
-		promptGuidelines: [
-			"Use workflow_todo to create and update the task list before and during implementation.",
-			"Use workflow_todo status updates to keep implementation aligned with the approved plan.",
-		],
+			"Maintain the workflow todo list. Available in Plan and Work modes. Use to create, update, and track task progress aligned with the approved plan.",
 		parameters: Type.Object({
 			action: StringEnum(["reset", "add", "set", "list"] as const),
 			items: Type.Optional(
@@ -242,9 +237,7 @@ export function registerPlanReadTool(
 	pi.registerTool({
 		name: "workflow_plan_read",
 		label: "Read Workflow Plan",
-		description: "Read the active workflow plan.",
-		promptSnippet: "workflow_plan_read: read the active workflow plan.",
-		promptGuidelines: ["Use workflow_plan_read to view the current plan."],
+		description: "Read the active workflow plan. In Approved Work the handoff already contains the plan; use this only when the user explicitly asks to re-read, the handoff is missing, or recovery diagnostics require it.",
 		parameters: Type.Object({}),
 		renderResult: renderPlanToolResult,
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
@@ -283,12 +276,7 @@ export function registerPlanSaveTool(
 	pi.registerTool({
 		name: "workflow_plan_save",
 		label: "Save Workflow Plan",
-		description: "Save or revise the active workflow plan.",
-		promptSnippet: "workflow_plan_save: save the final implementation plan.",
-		promptGuidelines: [
-			"Use workflow_plan_save after producing a final implementation plan.",
-			"Pass the complete plan text as markdown when revising a plan.",
-		],
+		description: "Save or revise the active workflow plan. Plan Mode only. Pass the complete plan text as markdown when revising.",
 		parameters: Type.Object({
 			title: Type.Optional(Type.String()),
 			markdown: Type.String(),
@@ -362,12 +350,7 @@ export function registerPlanApproveTool(
 	pi.registerTool({
 		name: "workflow_plan_approve",
 		label: "Approve Workflow Plan",
-		description: "Approve the active workflow plan for implementation.",
-		promptSnippet:
-			"workflow_plan_approve: approve the active plan for implementation.",
-		promptGuidelines: [
-			"Use workflow_plan_approve only after the user explicitly confirms the final plan.",
-		],
+		description: "Approve the active plan for implementation. Plan Mode only. Call only after the user explicitly confirms the final plan. Must be called alone in its tool batch.",
 		parameters: Type.Object({
 			branchName: Type.Optional(
 				Type.String({
@@ -441,7 +424,30 @@ export function registerPlanApproveTool(
 				worktreePath,
 				worktreeBranch,
 				worktreeBaseBranch,
+				pendingWorkKickoff: workRunId,
 			};
+
+			// Build the immutable handoff snapshot BEFORE transition so the
+			// approval journal captures the exact plan content at approval time.
+			const planMarkdown = readPlan(ctx.cwd, state.planPath);
+			const handoffBody = buildWorkHandoffBody(nextState, planMarkdown);
+
+			if (Buffer.byteLength(handoffBody, "utf8") > 65536) {
+				console.warn(
+					`[workflow] handoffBody is ${Buffer.byteLength(handoffBody, "utf8")} bytes (>64KB); approval will proceed but context size may be large`,
+				);
+			}
+
+			// Persist the approval journal (non-LLM custom entry) as the durable
+			// snapshot and boundary. Must succeed before state transition.
+			try {
+				const journalData: WorkApprovalData = { workRunId, handoffBody };
+				pi.appendEntry(WORK_APPROVAL_CUSTOM_TYPE, journalData);
+			} catch (journalErr) {
+				// Journal write failed — cleanup worktree and abort.
+				if (worktreePath && worktreeBranch) cleanupCreatedWorktree(ctx.cwd, worktreePath, worktreeBranch);
+				throw journalErr;
+			}
 
 			const rollbackApproval = async () => {
 				let rollbackSucceeded = false;
@@ -479,29 +485,11 @@ export function registerPlanApproveTool(
 				throw new Error(result.reason);
 			}
 
-			// Approved-Plan Work handoff: isolation marker + execution packet.
-			// Must succeed after transition, or roll back — otherwise Work mode
-			// is persisted without a marker and Plan-history isolation is dead.
-			try {
-				const planMarkdown = readPlan(ctx.cwd, result.state.planPath!);
-				const handoffBody = buildWorkHandoffBody(result.state, planMarkdown);
+			// Set session name for easier identification in /resume
+			pi.setSessionName(`work: ${result.state.planTitle ?? "Active Plan"}`);
 
-				// Set session name for easier identification in /resume
-				pi.setSessionName(`work: ${result.state.planTitle ?? "Active Plan"}`);
-
-				pi.sendMessage(
-					{
-						customType: WORK_HANDOFF_CUSTOM_TYPE,
-						content: handoffBody,
-						display: false,
-						details: { workRunId: result.state.workRunId },
-					},
-					{ triggerTurn: true, deliverAs: "followUp" },
-				);
-			} catch (handoffErr) {
-				await rollbackApproval();
-				throw handoffErr;
-			}
+			// The agent_settled dispatcher will write the canonical marker and
+			// start the new Work run. No same-loop followUp or immediate marker.
 
 			return {
 				content: [
@@ -510,7 +498,7 @@ export function registerPlanApproveTool(
 						text:
 							`Plan approved. Work Mode runtime activated. ` +
 							`Work run: ${result.state.workRunId!.slice(-8)}.\n\n` +
-							`已建立隔离边界（workRunId: ${result.state.workRunId!.slice(-8)}），下一 turn 将注入 Approved-Plan Work handoff。` +
+							`Approval journal已持久化。Plan run结束后将自动启动新 Work run。` +
 							"\n\nDo not call any more tools in this turn.",
 					},
 				],
@@ -528,9 +516,7 @@ export function registerPlanClearTool(
 	pi.registerTool({
 		name: "workflow_plan_clear",
 		label: "Clear Workflow Plan",
-		description: "Clear workflow state and return to idle mode.",
-		promptSnippet: "workflow_plan_clear: clear workflow state.",
-		promptGuidelines: ["Use workflow_plan_clear to reset workflow state."],
+		description: "Clear workflow state and return to idle mode. Plan Mode only.",
 		parameters: Type.Object({}),
 		renderResult: renderPlanToolResult,
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
@@ -570,6 +556,7 @@ export function registerPlanClearTool(
 			return {
 				content: [{ type: "text", text: "Workflow state cleared." }],
 				details: { state: result.state },
+				terminate: true,
 			};
 		},
 	});
@@ -591,14 +578,7 @@ export function registerGrillRecordTool(
 		name: "workflow_grill_record",
 		label: "Grill Record Turn",
 		description:
-			"Record one grilling decision during Plan Mode: a single question, its recommended answer, the user answer, and decision status.",
-		promptSnippet:
-			"workflow_grill_record: record a single grilling decision (one question at a time).",
-		promptGuidelines: [
-			"Use workflow_grill_record after each grilling question is resolved or answered.",
-			"Do NOT record more than one question per call.",
-			"When a question can be answered by exploring the codebase, explore it instead of asking the user.",
-		],
+			"Record one grilling decision during Plan Mode: a single question, its recommended answer, the user answer, and decision status. Call once per resolved question. Plan Mode only.",
 		parameters: Type.Object({
 			question: Type.String({
 				description: "The exact question asked, one question only.",
@@ -671,15 +651,7 @@ export function registerPlanReviewTool(
 		name: "workflow_plan_review",
 		label: "Workflow Plan Review",
 		description:
-			"Request an independent plan review from a separately-configured reviewer model via a single LLM side-call. The reviewer receives the full plan text plus auto-extracted key file snippets, conversation summary, and tool inventory. Returns structured feedback with Critical/Important/Minor severity ratings.",
-		promptSnippet:
-			"workflow_plan_review: get an objective plan review from a reviewer model.",
-		promptGuidelines: [
-			"Use workflow_plan_review to get an objective plan review after saving a plan.",
-			"Provide the plan content or a brief task description.",
-			"Use context for extra background (user constraints, discussion points).",
-			"Use instructions for review preferences (depth, focus areas).",
-		],
+			"Request an independent plan review from a separately-configured reviewer model via a single LLM side-call. Plan Mode only. The reviewer receives the full plan text plus auto-extracted key file snippets, conversation summary, and tool inventory. Returns structured feedback with Critical/Important/Minor severity ratings.",
 		parameters: Type.Object({
 			task: Type.String({
 				description:
@@ -749,14 +721,7 @@ export function registerCodeReviewTool(
 		name: "workflow_code_review",
 		label: "Workflow Code Review",
 		description:
-			"Run OCR code review on the current workspace or a Git ref range/commit. The model must provide a background string describing the task context, changes, constraints, and risk areas. Default review scope is workspace (staged + unstaged + untracked changes).",
-		promptSnippet:
-			"workflow_code_review: run ocr review with model-supplied context.",
-		promptGuidelines: [
-			"Use workflow_code_review when the /review command prompts a code review loop.",
-			"Default scope to workspace unless the user explicitly requested range or commit.",
-			"Provide a thoughtful background: user goal, actual changes, key constraints, tests run, and risk areas to check.",
-		],
+			"Run OCR code review on the current workspace or a Git ref range/commit. Work Mode only, triggered by /review. Provide a background string describing the task context, changes, constraints, and risk areas. Default scope is workspace (staged + unstaged + untracked changes).",
 		parameters: Type.Object({
 			scope: Type.Optional(ReviewScopeKindSchema),
 			background: Type.String({
@@ -888,13 +853,7 @@ export function registerInitCompleteTool(
 		name: "workflow_init_complete",
 		label: "Init Complete",
 		description:
-			"Close Init Mode: restore the prior mode after generating, skipping, or cancelling AGENTS.md. Only allowed in Init Mode.",
-		promptSnippet:
-			"workflow_init_complete: finish Init Mode (completed/skipped/cancelled) and restore the prior mode.",
-		promptGuidelines: [
-			"Call workflow_init_complete once when Init Mode work is done, skipped, or cancelled.",
-			"Use completed after AGENTS.md was written, skipped when the user chose not to change anything, or cancelled on user abort.",
-		],
+			"Close Init Mode: restore the prior mode after generating, skipping, or cancelling AGENTS.md. Init Mode only. Call once with status completed/skipped/cancelled.",
 		parameters: Type.Object({
 			status: InitCompleteStatusSchema,
 		}),
@@ -977,6 +936,7 @@ export function registerInitCompleteTool(
 					},
 				],
 				details: { status, returnMode },
+				terminate: true,
 			};
 		},
 	});

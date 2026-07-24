@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import { getSessionKey, loadState, saveState } from "./state.js";
+import { getSessionKey, loadState, saveState, acquireDispatcherLock, releaseDispatcherLock } from "./state.js";
 import { COMMON_PROMPT } from "./prompts.js";
 import {
 	isWorkflowDataPath,
@@ -12,12 +12,10 @@ import {
 } from "./guards.js";
 import {
 	buildModeMessageBody,
-	buildWorkHandoffBody,
 	currentStatusText,
 	WORK_HANDOFF_CUSTOM_TYPE,
 	worktreeRuntimeNotice,
 } from "./helpers.js";
-import { readPlan } from "./state.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
@@ -45,170 +43,19 @@ import {
 	validateWorktreeState,
 } from "./worktree.js";
 
-// ── Work context isolation helpers ──────────────────────────────────────────
-
-/**
- * Minimal shape of AgentMessage we inspect for Work context isolation. We only
- * need to identify custom handoff messages, compaction/branch summaries, and
- * toolCall/toolResult pairing; other roles pass through untouched.
- */
-type WorkflowContextMessage = {
-	role?: string;
-	customType?: string;
-	details?: unknown;
-	timestamp?: number;
-	toolCallId?: string;
-};
-
-/** Session branch entry shape returned by sessionManager.getBranch(). */
-type SessionBranchEntry = {
-	type: string;
-	customType?: string;
-	details?: unknown;
-	timestamp?: string;
-};
-
-/**
- * Read the session branch once per provider request. Returns undefined when
- * the session manager shape drifts or getBranch is unavailable — callers fall
- * back to keeping full history (fail-open).
- */
-function getSessionBranch(ctx: unknown): SessionBranchEntry[] | undefined {
+/** Read the session branch. Returns undefined on failure (fail-open). */
+function getSessionBranch(ctx: unknown): any[] | undefined {
 	try {
 		return (
 			(ctx as {
 				sessionManager?: {
-					getBranch?: () => SessionBranchEntry[];
+					getBranch?: () => any[];
 				};
 			}).sessionManager?.getBranch?.()
 		);
 	} catch {
 		return undefined;
 	}
-}
-
-/**
- * Return the timestamp of the most recent workflow-work-handoff custom message
- * whose details.workRunId matches the current work run, or undefined when the
- * branch has no matching marker (Direct Work, legacy sessions, pre-approval).
- */
-function findCurrentHandoffTimestamp(
-	entries: SessionBranchEntry[],
-	workRunId: string | undefined,
-): string | undefined {
-	if (!workRunId) return undefined;
-	for (let i = entries.length - 1; i >= 0; i--) {
-		const entry = entries[i];
-		if (entry.type !== "custom_message") continue;
-		if (entry.customType !== WORK_HANDOFF_CUSTOM_TYPE) continue;
-		const details = entry.details as { workRunId?: unknown } | undefined;
-		if (details?.workRunId === workRunId) return entry.timestamp;
-	}
-	return undefined;
-}
-
-/**
- * Check whether the current work run has a handoff marker anywhere on the
- * session branch. Used to distinguish "marker compacted away" (isolation still
- * in effect) from "Direct Work / legacy session" (no marker, keep history).
- */
-function branchHasCurrentHandoff(
-	entries: SessionBranchEntry[] | undefined,
-	workRunId: string | undefined,
-): boolean {
-	if (!entries || !workRunId) return false;
-	return findCurrentHandoffTimestamp(entries, workRunId) !== undefined;
-}
-
-/**
- * Drop leading orphan toolResult messages after a mid-pair slice so the
- * remaining sequence has valid toolCall/toolResult pairing and providers
- * do not reject the request. Only strips a contiguous run of leading
- * toolResult messages; stops at the first non-toolResult (user/assistant/
- * custom/etc.), which is always a safe anchor for a provider request.
- */
-function dropOrphanToolMessages<T extends WorkflowContextMessage>(
-	messages: T[],
-): T[] {
-	let firstSafe = 0;
-	while (firstSafe < messages.length && messages[firstSafe]?.role === "toolResult") {
-		firstSafe++;
-	}
-	return messages.slice(firstSafe);
-}
-
-/**
- * Apply Approved-Plan Work context isolation to provider-visible messages.
- *
- * Slicing rules:
- * - No matching marker on the branch → Direct Work or legacy session: keep all
- *   messages unchanged.
- * - Marker present in `messages` → keep only messages after the marker, then
- *   repair tool pairing in case the cut landed mid-pair.
- * - Marker on branch but not in `messages` (compacted away) → drop all
- *   leading compactionSummary/branchSummary messages; keep the first
- *   non-summary and everything after it. If no leading summary exists,
- *   fail-open and return messages unchanged (no reliable cut point).
- *   Residual Plan-era non-summary turns after a leading summary may still
- *   leak — known limit of this fallback; needs state-backed isolation to close.
- */
-function applyWorkContextIsolation<T extends WorkflowContextMessage>(
-	messages: T[],
-	entries: SessionBranchEntry[],
-	workRunId: string | undefined,
-): T[] {
-	if (!workRunId) return messages;
-	const markerTs = findCurrentHandoffTimestamp(entries, workRunId);
-	if (markerTs === undefined) return messages;
-
-	// Look for the marker in the provider-visible messages first. It must be
-	// called BEFORE filtering handoffs out of the array.
-	let markerMsgIdx = -1;
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const msg = messages[i];
-		if (
-			msg.role === "custom" &&
-			msg.customType === WORK_HANDOFF_CUSTOM_TYPE &&
-			(msg.details as { workRunId?: unknown } | undefined)?.workRunId ===
-				workRunId
-		) {
-			markerMsgIdx = i;
-			break;
-		}
-	}
-
-	if (markerMsgIdx !== -1) {
-		// Marker still in provider context: keep only messages after it, then
-		// repair tool pairing in case the cut landed mid-pair.
-		return dropOrphanToolMessages(messages.slice(markerMsgIdx + 1));
-	}
-
-	// Marker compacted away: we cannot reliably align provider messages with
-	// branch entries after compaction, so drop ALL leading messages up to and
-	// including the last leading compaction/branch summary. That summary
-	// summarizes Plan-era content and must not reach the Work model. The first
-	// non-summary message after it is a best-effort Work-era anchor. If there
-	// is no leading summary, fail-open and keep everything (no reliable cut).
-	// Residual Plan-era non-summary turns may still leak — known limit.
-	const isolated: T[] = [];
-	let trimming = true;
-	let sawAnySummary = false;
-	for (const msg of messages) {
-		if (trimming) {
-			const isSummary =
-				msg.role === "compactionSummary" ||
-				msg.role === "branchSummary";
-			if (isSummary) {
-				sawAnySummary = true;
-				continue; // drop leading Plan/Work-boundary summary
-			}
-			trimming = false;
-		}
-		isolated.push(msg);
-	}
-	// Mirror the marker-present path: repair leading orphan toolResults that
-	// appear when the summarized prefix absorbed the matching toolCall.
-	return sawAnySummary ? dropOrphanToolMessages(isolated) : messages;
 }
 
 // ── /wf-init helpers ─────────────────────────────────────────────────────────
@@ -334,11 +181,14 @@ export function registerBeforeAgentStart(
 		await setRole(pi, ctx, modeRole(state.mode), getAgentDir);
 		activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir, state.mode);
 
-		// Keep stable workflow rules in the system prompt. The mutable mode
-		// prompt and current state are injected per-request by the context handler.
-		return {
-			systemPrompt: event.systemPrompt + "\n\n" + COMMON_PROMPT,
-		};
+		// Build stable system prompt: COMMON + Mode Prompt + worktree notice.
+		// No dynamic state (todos, run IDs) — those come from tool results.
+		const modeBody = buildModeMessageBody(state.mode, state);
+		const systemPrompt = modeBody
+			? event.systemPrompt + "\n\n" + COMMON_PROMPT + "\n\n" + modeBody
+			: event.systemPrompt + "\n\n" + COMMON_PROMPT;
+
+		return { systemPrompt };
 	});
 }
 
@@ -361,118 +211,240 @@ export function registerWorkflowContextInjection(
 				(state.workflowEnabled || config.workflow.autoEnter) &&
 				!state.workflowExplicitlyDisabled;
 
-			// Read the session branch once per request; shared by isolation and
-			// handoff re-injection. Failure degrades to undefined (fail-open).
-			const branch = getSessionBranch(ctx);
-
-			// Approved-Plan Work isolation runs BEFORE filtering stale injectables so
-			// applyWorkContextIsolation can still see the handoff marker in the
-			// provider-visible messages. Filtering first would strip the marker and
-			// make markerMsgIdx permanently -1, defeating Plan-history isolation.
-			let messages = event.messages;
-			if (workflowActive && state.mode === "work" && state.workRunId) {
-				try {
-					if (branch) {
-						if (
-							state.planPath &&
-							!branchHasCurrentHandoff(branch, state.workRunId)
-						) {
-							// Approved-Plan signal without marker: isolation + re-inject
-							// both degrade. Surface the known branch-compaction limit.
-							console.error(
-								"[workflow] work context isolation skipped: handoff marker not found on session branch (Plan history may leak)",
-							);
-						}
-						messages = applyWorkContextIsolation(
-							event.messages,
-							branch,
-							state.workRunId,
-						);
-					} else if (state.planPath) {
-						// Approved-Plan Work without branch access: cannot isolate, but
-						// surface it so the degradation is observable. Fail-open keeps
-						// full history so the Work model can still proceed.
-						console.error(
-							"[workflow] work context isolation skipped: sessionManager.getBranch unavailable",
-						);
-					}
-				} catch (isolationErr) {
-					// Branch inspection failed (e.g. session shape drift). Fail open:
-					// keep event.messages as-is so the mode prompt still injects.
-					console.error(
-						`[workflow] work context isolation skipped: ${isolationErr}`,
-					);
-				}
-			}
-
-			// Drop stale injectables (workflow-mode, workflow-work-handoff) from
-			// whatever isolation produced. Both are re-injected below from current
-			// state, so any persisted copies (including the marker we just used) are
-			// stale and must be removed to avoid duplicates.
-			const filteredMessages = messages.filter((message) => {
+			// Step 1: Clean legacy workflow-mode messages from all modes.
+			let messages = event.messages.filter((message) => {
 				if (
 					message &&
 					typeof message === "object" &&
-					"customType" in message
+					"customType" in message &&
+					(message as { customType?: unknown }).customType === "workflow-mode"
 				) {
-					const ct = (message as { customType?: unknown }).customType;
-					if (ct === "workflow-mode" || ct === WORK_HANDOFF_CUSTOM_TYPE) {
-						return false;
-					}
+					return false;
 				}
 				return true;
 			});
 
-			if (!workflowActive) return { messages: filteredMessages };
+			if (!workflowActive) return { messages };
 
-			const content = buildModeMessageBody(state.mode, state);
-			if (!content) return { messages: filteredMessages };
+			// Step 2: Approved Work isolation via marker fast path.
+			const isApprovedWork =
+				state.mode === "work" && !!state.workRunId && !!state.planPath;
 
-			// For Approved-Plan Work, re-inject the handoff execution packet each
-			// provider request so todo/state changes propagate. Gated on
-			// branchHasCurrentHandoff so Direct Work (no marker) never receives an
-			// Approved-Plan packet.
-			if (
-				state.mode === "work" &&
-				state.workRunId &&
-				state.planPath &&
-				branchHasCurrentHandoff(branch, state.workRunId)
-			) {
-				try {
-					const planMarkdown = readPlan(ctx.cwd, state.planPath);
-					filteredMessages.push({
-						role: "custom",
-						customType: WORK_HANDOFF_CUSTOM_TYPE,
-						content: buildWorkHandoffBody(state, planMarkdown),
-						display: false,
-						details: { workRunId: state.workRunId },
-						timestamp: Date.now(),
-					});
-				} catch (planErr) {
-					// Plan read failed; skip handoff re-injection this turn.
-					console.error(
-						`[workflow] handoff re-inject skipped: ${planErr}`,
-					);
+			if (isApprovedWork) {
+				const { isolateWorkContext } = await import("./work-context.js");
+				const isolated = isolateWorkContext(messages, state.workRunId!);
+				if (isolated) {
+					// Fast path succeeded — marker visible, pairing valid.
+					return { messages: isolated };
 				}
+
+				// Marker not visible or pairing broken — attempt branch recovery.
+				const branch = getSessionBranch(ctx);
+				if (branch) {
+					const { findApprovalJournalIndex, findCanonicalMarkerIndex } =
+						await import("./work-context.js");
+					const journalIdx = findApprovalJournalIndex(branch, state.workRunId!);
+					if (journalIdx !== -1) {
+						const markerIdx = findCanonicalMarkerIndex(branch, state.workRunId!, journalIdx);
+						if (markerIdx !== -1) {
+							// Marker exists in branch but not in provider messages
+							// (compacted away). Reconstruct handoff at head.
+							const markerEntry = branch[markerIdx];
+							const handoffContent = (markerEntry as any).message?.content ??
+								(markerEntry as any).content;
+							if (handoffContent) {
+								// Strip compaction/branch summaries and leading orphans,
+								// prepend handoff snapshot.
+								const cleaned = messages.filter((m) => {
+									const role = (m as any).role;
+									return role !== "compactionSummary" && role !== "branchSummary";
+								});
+								const { dropLeadingOrphanToolResults, validateToolPairing } =
+									await import("./work-context.js");
+								const stripped = dropLeadingOrphanToolResults(cleaned);
+								const candidate = [
+									{
+										role: "custom" as const,
+										customType: WORK_HANDOFF_CUSTOM_TYPE,
+										content: handoffContent,
+										display: false,
+										details: { workRunId: state.workRunId, boundary: true },
+										timestamp: Date.now(),
+									},
+									...stripped,
+								];
+								if (validateToolPairing(candidate)) {
+									return { messages: candidate };
+								}
+								// Pairing broken — fail-open below.
+							}
+						}
+						// Journal exists but no marker — pending dispatcher will
+						// handle. Use journal handoffBody as ephemeral head.
+						const journalEntry = branch[journalIdx];
+						const journalData = (journalEntry as any).details as
+							| { handoffBody?: string }
+							| undefined;
+						if (journalData?.handoffBody) {
+							const candidate = [
+								{
+									role: "custom" as const,
+									customType: WORK_HANDOFF_CUSTOM_TYPE,
+									content: journalData.handoffBody,
+									display: false,
+									details: { workRunId: state.workRunId, boundary: false },
+									timestamp: Date.now(),
+								},
+								...messages,
+							];
+							return { messages: candidate };
+						}
+					}
+				}
+
+				// Full fail-open: keep original messages, log degradation.
+				console.error(
+					"[workflow] work context isolation fail-open: marker/journal unavailable or pairing broken",
+				);
+				return { messages };
 			}
 
-			filteredMessages.push({
-				role: "custom",
-				customType: "workflow-mode",
-				content,
-				display: false,
-				timestamp: Date.now(),
+			// Step 3: Direct Work / other modes — clean old handoff messages.
+			messages = messages.filter((message) => {
+				if (
+					message &&
+					typeof message === "object" &&
+					"customType" in message &&
+					(message as { customType?: unknown }).customType === WORK_HANDOFF_CUSTOM_TYPE
+				) {
+					return false;
+				}
+				return true;
 			});
 
-			return { messages: filteredMessages };
+			return { messages };
 		} catch (err) {
-			// Surface injection failures so debugging is possible. Return the
-			// original event.messages unmodified so mode context is not silently
-			// stripped when state/config loading fails.
 			console.error(`[workflow] context injection failed: ${err}`);
 			return { messages: event.messages };
 		}
 	});
+}
+
+// ── Pending Work kickoff dispatcher ──────────────────────────────────────────
+
+/** In-process mutex: session keys currently executing the dispatcher. */
+const _dispatcherInFlight = new Set<string>();
+
+/**
+ * Register the agent_settled handler that starts the new Work run after
+ * Plan approval. Also exports a callable for the session_start resume path.
+ */
+export function registerPendingWorkDispatcher(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.on("agent_settled", async (_event, ctx) => {
+		await runPendingWorkDispatcher(pi, ctx, getAgentDir);
+	});
+}
+
+/**
+ * Core dispatcher logic, callable from both agent_settled and session_start
+ * resume. Implements the full locked-section protocol:
+ * claim lock → reload state → reload branch → recheck idle/pending →
+ * compute decision → side effect → release lock.
+ */
+export async function runPendingWorkDispatcher(
+	pi: ExtensionAPI,
+	ctx: any,
+	getAgentDir: () => string,
+): Promise<void> {
+	const sessionKey = ctxSessionKey(ctx);
+
+	// Fast pre-check before acquiring lock.
+	if (!ctx.isIdle?.() || ctx.hasPendingMessages?.()) return;
+
+	// In-process mutex.
+	if (_dispatcherInFlight.has(sessionKey)) return;
+	_dispatcherInFlight.add(sessionKey);
+
+	try {
+		// Cross-process advisory lock.
+		if (!acquireDispatcherLock(ctx.cwd, sessionKey)) return;
+
+		try {
+			// Locked section: reload everything and recheck.
+			const state = loadState(ctx.cwd, sessionKey);
+			const config = loadConfig(ctx.cwd, getAgentDir());
+			const workflowActive =
+				(state.workflowEnabled || config.workflow.autoEnter) &&
+				!state.workflowExplicitlyDisabled;
+			if (!workflowActive) return;
+
+			// Recheck idle/pending under lock.
+			if (!ctx.isIdle?.() || ctx.hasPendingMessages?.()) return;
+
+			const branch = getSessionBranch(ctx);
+
+			const { computeDispatcherDecision, executeDispatcherDecision } =
+				await import("./work-context.js");
+
+			const decision = computeDispatcherDecision(state, branch);
+			if (decision.action === "skip") return;
+
+			// Build ports bound to this session.
+			const ports = {
+				loadState: () => loadState(ctx.cwd, sessionKey),
+				getBranch: () => getSessionBranch(ctx),
+				isIdle: () => ctx.isIdle?.() ?? false,
+				hasPendingMessages: () => ctx.hasPendingMessages?.() ?? false,
+				writeMarker: (handoffBody: string, workRunId: string) => {
+					pi.sendMessage(
+						{
+							customType: WORK_HANDOFF_CUSTOM_TYPE,
+							content: handoffBody,
+							display: false,
+							details: { workRunId, boundary: true },
+						},
+						{},
+					);
+				},
+				sendKickoff: (workRunId: string) => {
+					pi.sendUserMessage(
+						`<!-- workflow-work-kickoff:${workRunId} -->\n\n` +
+							`Plan已批准，开始执行 Approved-Plan Work。按 workflow_todo 和 Final Plan 推进。`,
+					);
+				},
+				clearPending: () => {
+					const s = loadState(ctx.cwd, sessionKey);
+					saveState(ctx.cwd, sessionKey, { ...s, pendingWorkKickoff: undefined });
+				},
+				appendLateSnapshot: (handoffBody: string, workRunId: string) => {
+					pi.sendMessage(
+						{
+							customType: WORK_HANDOFF_CUSTOM_TYPE,
+							content: handoffBody,
+							display: false,
+							details: { workRunId, boundary: false, late: true },
+						},
+						{},
+					);
+				},
+			};
+
+			executeDispatcherDecision(decision, ports);
+
+			if (decision.action === "late_user_no_replay") {
+				console.warn(
+					`[workflow] pending work kickoff skipped: late user detected (workRunId: ${state.workRunId?.slice(-8)}). Context will fail-open.`,
+				);
+			}
+		} finally {
+			releaseDispatcherLock(ctx.cwd, sessionKey);
+		}
+	} finally {
+		_dispatcherInFlight.delete(sessionKey);
+	}
 }
 
 export function registerToolCallGuard(

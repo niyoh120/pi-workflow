@@ -108,6 +108,12 @@ export interface WorkflowState {
 	 */
 	initTargetPath?: string;
 	/**
+	 * Work run ID awaiting kickoff. Set atomically with mode/workRunId at
+	 * plan approval; cleared when durable post-marker user evidence confirms
+	 * the Work run has started. Used by the agent_settled dispatcher.
+	 */
+	pendingWorkKickoff?: string;
+	/**
 	 * Session-scoped config overrides — highest-priority config layer.
 	 * Merged on top of DEFAULT ← global ← project when resolving config for
 	 * this session. Edited via /wf-settings (Session scope).

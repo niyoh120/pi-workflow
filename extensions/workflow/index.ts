@@ -29,6 +29,8 @@ import {
 	registerWfCommand,
 	registerBeforeAgentStart,
 	registerWorkflowContextInjection,
+	registerPendingWorkDispatcher,
+	runPendingWorkDispatcher,
 	registerToolCallGuard,
 	registerAgentEnd,
 } from "./commands.js";
@@ -118,6 +120,9 @@ function registerWorkflowSessionStart(
 				}
 				// applyModeRuntime does not touch the status line; mirror it here.
 				setWorkflowStatus(ctx, state.mode);
+
+				// Resume pending work kickoff after successful runtime restore.
+				await runPendingWorkDispatcher(pi, ctx, getAgentDir);
 			}
 		} catch (err) {
 			// Surface initialization failures (e.g. 0.81.x API drift) instead of
@@ -150,6 +155,7 @@ export default function (pi: ExtensionAPI) {
 	// ── Event handlers (always registered) ────────
 	registerBeforeAgentStart(pi, getAgentDir);
 	registerWorkflowContextInjection(pi, getAgentDir);
+	registerPendingWorkDispatcher(pi, getAgentDir);
 	registerToolCallGuard(pi, getAgentDir);
 	registerAgentEnd(pi, getAgentDir);
 

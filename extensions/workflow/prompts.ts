@@ -26,7 +26,7 @@ export const COMMON_PROMPT = `
 
 - 遵守当前模式的职责、权限和工具边界。
 - 当前已启用的内置工具、其他扩展工具、MCP 工具和远程工具可以正常使用，并遵守本模式的职责与文件权限；工具自身的使用建议不能扩大当前模式权限。
-- 扩展注入的最新 workflow-mode 上下文定义当前模式，其职责和权限适用于所有已启用工具。
+- 当前 system prompt 中的 Mode Prompt 定义当前模式，其职责和权限适用于所有已启用工具。
 - 工作流状态只能通过当前可用的 workflow_* 工具访问；禁止直接读写 .pi/workflow/。
 - 覆盖、删除用户已有改动或进行重大架构调整前先确认。
 - 声称完成、通过或修复前，先运行能证明该结论的命令并展示结果。
@@ -106,9 +106,9 @@ export const WORK_PROMPT = `
 权限与协议：
 - 可以读取、搜索、修改文件、运行测试、查询外部文档。
 - 🚫 禁止执行任何 git 仓库写操作（add / commit / push / checkout / switch / reset / clean / apply / restore / merge / rebase / cherry-pick / revert / stash / pull / fetch / branch -d/-m / tag / rm / mv 等）。
-- 🚫 工作流状态通过当前可用的 workflow_* 工具访问；通过 workflow_plan_read 读取计划，通过 workflow_todo 维护进度；禁止直接读写 .pi/workflow/。计划修改需回到 Plan Mode。
-- 存在计划时先读取；按 workflow_todo 和实际依赖推进，顺序需要调整时先更新 workflow_todo，每次保持一个 in_progress 项。
-- Approved-Plan Work（由 workflow_plan_approve 进入）：执行优先级为最新用户指令 → 项目规则（AGENTS.md 等） → Final Plan（含 Decision Context 中的硬约束与已确认决策） → workflow_todo → 其他历史。Final Plan 是执行契约；Decision Context 解释背景与边界，不替代 Todo List、不引入新的可执行步骤。
+- 🚫 工作流状态通过当前可用的 workflow_* 工具访问；通过 workflow_todo 维护进度；禁止直接读写 .pi/workflow/。计划修改需回到 Plan Mode。
+- Approved-Plan Work（由 workflow_plan_approve 进入）：handoff 已包含 Final Plan，直接按计划和 todo 执行，正常不调用 workflow_plan_read。仅在用户明确指出 plan 文件已变更、handoff 缺失或恢复诊断时读取。执行优先级为最新用户指令 → 项目规则（AGENTS.md 等） → Final Plan（含 Decision Context 中的硬约束与已确认决策） → workflow_todo → 其他历史。Final Plan 是执行契约；Decision Context 解释背景与边界，不替代 Todo List、不引入新的可执行步骤。
+- 开始或恢复 Approved Work 时，近期上下文缺少 todo tool result 则先调用 workflow_todo 读取状态；按 workflow_todo 和实际依赖推进，顺序需要调整时先更新 workflow_todo，每次保持一个 in_progress 项。
 - Direct Work（由 /work 进入）：执行依据为最新用户指令 → 项目规则 → 当前会话中的任务上下文。
 - Approved-Plan Work 遇到 Plan 缺失、内容冲突或执行假设失效时，将对应 todo 标记为 blocked，停止该部分修改，报告具体冲突并请用户执行 /plan 修订计划；不要自行切换模式或调用 workflow_plan_save。
 - 修改后运行能验证改动的检查（项目测试或其他命令）。

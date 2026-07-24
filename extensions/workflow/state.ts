@@ -88,6 +88,11 @@ export function normalizeState(raw: unknown): WorkflowState {
 			obj.worktreeBaseBranch.trim()
 				? obj.worktreeBaseBranch
 				: undefined,
+		pendingWorkKickoff:
+			typeof obj.pendingWorkKickoff === "string" &&
+			obj.pendingWorkKickoff.trim()
+				? obj.pendingWorkKickoff.trim()
+				: undefined,
 		todos: Array.isArray(obj.todos)
 			? (obj.todos as Array<WorkflowState["todos"][number]>)
 					.filter((t: any) => t && typeof t === "object")
@@ -183,6 +188,7 @@ export function loadState(cwd: string, sessionKey: string): WorkflowState {
 }
 
 /** Persist runtime state to the session-scoped path with normalization.
+ *  Uses atomic temp-file + rename to prevent partial-write corruption.
  *  Creates the session directory only when actually writing. */
 export function saveState(
 	cwd: string,
@@ -190,12 +196,97 @@ export function saveState(
 	state: WorkflowState,
 ): void {
 	const spath = sessionStatePath(cwd, sessionKey);
-	fs.mkdirSync(path.dirname(spath), { recursive: true });
-	fs.writeFileSync(
-		spath,
-		JSON.stringify(normalizeState(state), null, 2),
-		"utf8",
+	const dir = path.dirname(spath);
+	fs.mkdirSync(dir, { recursive: true });
+	const tmpFile = path.join(
+		dir,
+		`.tmp-state-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 	);
+	try {
+		fs.writeFileSync(
+			tmpFile,
+			JSON.stringify(normalizeState(state), null, 2),
+			"utf8",
+		);
+		fs.renameSync(tmpFile, spath);
+	} catch (err) {
+		// Clean up temp file on failure; rethrow so callers see the error.
+		try { fs.unlinkSync(tmpFile); } catch { /* best effort */ }
+		throw err;
+	}
+}
+
+// ── Session advisory lock ────────────────────────────────────────────────────
+
+/**
+ * Acquire a per-session advisory lock for the pending-work dispatcher.
+ * Uses atomic `openSync(lockPath, "wx")` to claim; writes pid for liveness
+ * checks. Returns true if the lock was acquired, false if another live
+ * process holds it.
+ *
+ * Stale locks (pid no longer alive) are cleaned up and retried once.
+ * Permission/unknown errors are treated conservatively as "locked".
+ */
+export function acquireDispatcherLock(
+	cwd: string,
+	sessionKey: string,
+): boolean {
+	const lockPath = sessionStatePath(cwd, sessionKey) + ".dispatch.lock";
+	const dir = path.dirname(lockPath);
+	fs.mkdirSync(dir, { recursive: true });
+
+	const tryClaim = (): boolean => {
+		try {
+			const fd = fs.openSync(lockPath, "wx");
+			fs.writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
+			fs.closeSync(fd);
+			return true;
+		} catch (err: any) {
+			if (err?.code !== "EEXIST") return false; // permission/unknown → skip
+			// Lock exists — check pid liveness.
+			try {
+				const raw = fs.readFileSync(lockPath, "utf8");
+				const { pid } = JSON.parse(raw) as { pid?: number };
+				if (typeof pid === "number" && isPidAlive(pid)) {
+					return false; // live process holds lock
+				}
+			} catch {
+				// Corrupt/unreadable lock — treat as live to be safe.
+				return false;
+			}
+			// Dead pid — remove stale lock and retry once.
+			try { fs.unlinkSync(lockPath); } catch { return false; }
+			try {
+				const fd = fs.openSync(lockPath, "wx");
+				fs.writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
+				fs.closeSync(fd);
+				return true;
+			} catch {
+				return false;
+			}
+		}
+	};
+
+	return tryClaim();
+}
+
+/** Release the per-session advisory lock. Best-effort; errors are swallowed. */
+export function releaseDispatcherLock(
+	cwd: string,
+	sessionKey: string,
+): void {
+	const lockPath = sessionStatePath(cwd, sessionKey) + ".dispatch.lock";
+	try { fs.unlinkSync(lockPath); } catch { /* best effort */ }
+}
+
+/** Check whether a process with the given pid is alive. */
+function isPidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 /**
