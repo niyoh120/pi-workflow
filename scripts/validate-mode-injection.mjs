@@ -100,7 +100,7 @@ assert(
 
 // ── commands.ts: before_agent_start builds system prompt ───────────────────
 assert(
-	/buildModeMessageBody\(state\.mode, state\)/.test(commands),
+	/buildModeMessageBody\(state\.mode, state, resolveTodoToolName\(pi\)\)/.test(commands),
 	"before_agent_start calls buildModeMessageBody for system prompt",
 );
 assert(
@@ -275,6 +275,43 @@ assert(
 	/sameMembers/.test(mode),
 	"mode.ts short-circuits setActiveTools when unchanged",
 );
+
+// ── config.ts: unified trust-aware config path ───────────────────────────
+const config = read("extensions/workflow/config.ts");
+assert(
+	config.includes("export function loadConfigForContext"),
+	"config.ts exports the unified ctx-aware loadConfigForContext",
+);
+assert(
+	!config.includes("export function loadConfigForSession"),
+	"config.ts no longer exports legacy loadConfigForSession",
+);
+assert(
+	!config.includes("export function loadConfigIfTrusted"),
+	"config.ts no longer exports legacy loadConfigIfTrusted",
+);
+assert(
+	!config.includes("export function loadConfig(") &&
+		!config.includes("export { loadConfig") &&
+		!config.includes("export const loadConfig") &&
+		!config.includes("export default function loadConfig"),
+	"config.ts no longer exports legacy loadConfig (internal only)",
+);
+// Business modules must not import the removed legacy loaders.
+for (const file of [
+	"extensions/workflow/mode.ts",
+	"extensions/workflow/commands.ts",
+	"extensions/workflow/tools.ts",
+	"extensions/workflow/settings.ts",
+	"extensions/workflow/index.ts",
+]) {
+	const src = read(file);
+	assert(
+		!/import\s*\{[^}]*\bloadConfigForSession\b[^}]*\}\s*from/.test(src) &&
+			!/import\s*\{[^}]*\bloadConfigIfTrusted\b[^}]*\}\s*from/.test(src),
+		`${file} has no legacy loadConfigForSession/loadConfigIfTrusted imports`,
+	);
+}
 
 console.log(`\n${runs - failures}/${runs} checks passed.`);
 if (failures > 0) process.exit(1);

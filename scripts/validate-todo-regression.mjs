@@ -11,6 +11,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { pathToFileURL } from "node:url";
+
+// Dynamic import of extensions/workflow/todo-compat.ts relies on Node's native
+// TypeScript loader (Node >= 22.19). Fail early with a clear message on older
+// runtimes instead of an opaque syntax error.
+const [major, minor] = process.versions.node.split(".").map(Number);
+if (major < 22 || (major === 22 && minor < 19)) {
+	console.error("validate-todo-regression.mjs requires Node >= 22.19 for native TypeScript loading.");
+	process.exit(1);
+}
 
 const CWD = process.cwd();
 
@@ -554,6 +564,29 @@ console.log("\n=== Check 6: Source structure verification ===");
 		const r = normalizeState([1, 2, 3]);
 		assert(r.mode === "idle", "real normalizeState: array input safe");
 	}
+
+	// Overlay lifecycle wiring: index.ts binds UI ctx in TUI session_start and
+	// disposes on session_shutdown so reload/replacement does not leak.
+	const indexTs = fs.readFileSync(
+		path.join(CWD, "extensions/workflow/index.ts"),
+		"utf8",
+	);
+	assert(
+		/overlay\.setUICtx\(\(ctx as any\)\.ui\)/.test(indexTs),
+		"index.ts session_start binds overlay.setUICtx(ctx.ui) in TUI",
+	);
+	assert(
+		/overlay\.update\(state\.todos\)/.test(indexTs),
+		"index.ts session_start refreshes overlay with current todos",
+	);
+	assert(
+		/ctx as any\)\.mode === "tui"/.test(indexTs),
+		"index.ts overlay binding is gated on ctx.mode === 'tui'",
+	);
+	assert(
+		/pi\.on\("session_shutdown"[\s\S]*?overlay\.dispose\(\)/.test(indexTs),
+		"index.ts registers session_shutdown handler that disposes overlay",
+	);
 }
 
 // ═══ Check 7: Code review tooling ═══
@@ -615,27 +648,25 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"tools.ts: workflow_plan_review no longer has role param (removed)",
 	);
 
-	// Conditional registration — now inside registerAllWorkflowTools in tools.ts
-	// and registerAllWorkflowCommands in commands.ts (not index.ts directly)
+	// Optional tool definitions are registered unconditionally; visibility is
+	// gated by mode reconciliation and each handler rechecks config.
 	assert(
-		/if\s*\(\s*config\.planReview\.enabled\s*\)\s*\{?\s*registerPlanReviewTool/.test(
-			toolsTs,
-		),
-		"tools.ts: conditionally registers plan review tool",
+		/export\s+function\s+registerPlanReviewTool\s*\(/.test(toolsTs),
+		"tools.ts registers the plan review tool definition",
 	);
 	assert(
-		/if\s*\(\s*config\.codeReview\.enabled\s*\)\s*\{?\s*registerCodeReviewTool/.test(
-			toolsTs,
-		),
-		"tools.ts: conditionally registers code review tool",
+		toolsTs.includes("registerPlanReviewTool(pi, getAgentDir);") &&
+			toolsTs.includes("registerCodeReviewTool(pi, getAgentDir);"),
+		"tools.ts registers plan/code review definitions unconditionally",
 	);
 	assert(
-		/if\s*\(\s*config\.codeReview\.enabled\s*\)\s*\{?\s*registerReviewCommand/.test(
-			commandsTs,
-		),
-		"commands.ts: conditionally registers /review command",
+		!/if\s*\(\s*config\.planReview\.enabled\)\s*\{?\s*registerPlanReviewTool/.test(toolsTs),
+		"tools.ts no longer gates plan review definition registration on factory-time config",
 	);
-
+	assert(
+		commandsTs.includes("registerReviewCommand(pi, getAgentDir);"),
+		"commands.ts registers /review unconditionally; the handler rechecks config",
+	);
 	// Conditional activation in mode.ts — mode-aware delete-then-add
 	assert(
 		modeTs.includes("WORKFLOW_GATED_TOOLS") &&
@@ -643,18 +674,32 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"mode.ts: separates gated workflow tools from cleanup names",
 	);
 	assert(
-		!modeTs.includes('"workflow_subagent"'),
-		"mode.ts: no old workflow_subagent cleanup entry",
+		!/update_plan/.test(modeTs.match(/WORKFLOW_GATED_TOOLS\s*=\s*\[[\s\S]*?\]/)?.[0] ?? ""),
+		"mode.ts: WORKFLOW_GATED_TOOLS excludes the update_plan alias",
 	);
 	assert(
-		/for \(const toolName of WORKFLOW_TOOL_CLEANUP_NAMES\)[\s\S]*?next\.delete\(toolName\)/.test(
-			modeTs,
-		),
-		"mode.ts: deletes workflow cleanup names before re-adding allowed tools",
+		modeTs.includes("workflowManagedToolNames"),
+		"mode.ts: workflow tool ownership is resolved live via workflowManagedToolNames",
 	);
 	assert(
-		/computeWorkflowToolNames\(mode, cfg\)/.test(modeTs),
+		modeTs.includes("const workflowCleanup = workflowManagedToolNames(pi)"),
+		"mode.ts: deletes owned workflow cleanup names before re-adding allowed tools",
+	);
+	assert(
+		/computeWorkflowToolNames\(mode, cfg(, \w+)?\)/.test(modeTs),
 		"mode.ts: uses computeWorkflowToolNames for mode-aware activation",
+	);
+	// Guard against the regression where withTodoToolName returns a new array
+	// but its result is discarded: the plan/work branches must assign the
+	// swapped tool list to `names`.
+	assert(
+		modeTs.includes("const names = withTodoToolName([...PLAN_WORKFLOW_TOOL_NAMES], todoToolName)") &&
+			modeTs.includes("const names = withTodoToolName([...WORK_WORKFLOW_TOOL_NAMES], todoToolName)"),
+		"mode.ts: computeWorkflowToolNames assigns withTodoToolName's result in plan and work branches",
+	);
+	assert(
+		!/withTodoToolName\(names, todoToolName\);/.test(modeTs),
+		"mode.ts: no discarded withTodoToolName return value (mutation-free swap)",
 	);
 	assert(
 		!/if \(!active\.includes\("workflow_todo"\)\) return/.test(modeTs),
@@ -1276,7 +1321,7 @@ console.log("\n=== Check 14: Explore mode ===");
 		);
 	}
 	assert(
-		/activateWorkflowToolsIfAllowed\([\s\S]*?mode: Mode[\s\S]*?computeWorkflowToolNames\(mode, cfg\)/.test(
+		/activateWorkflowToolsIfAllowed\([\s\S]*?mode: Mode[\s\S]*?computeWorkflowToolNames\(mode, cfg(, \w+)?\)/.test(
 			modeTs14,
 		),
 		"mode.ts: activateWorkflowToolsIfAllowed receives mode and computes tool set",
@@ -1343,9 +1388,7 @@ console.log("\n=== Check 14: Explore mode ===");
 		"commands.ts: workflow tools blocked outside workflow tool modes",
 	);
 	assert(
-		!commandsTs14.includes(
-			"activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir)",
-		),
+		!/activateWorkflowToolsIfAllowed\(\s*pi,\s*ctx\.cwd,\s*getAgentDir,\s*ctx\s*\)/.test(commandsTs14),
 		"commands.ts: before_agent_start does not pre-activate workflow tools without mode",
 	);
 
@@ -1564,6 +1607,126 @@ function validateInitModeStatic() {
 	assert(inlineIsWorkflowToolMode("idle") === false, "inline runtime: idle is not a workflow-tool mode");
 }
 validateInitModeStatic();
+
+// ═══ Check 16: Paseo update_plan compatibility contract ═══
+console.log("\n=== Check 16: Paseo update_plan compatibility ===");
+{
+	const tc = fs.readFileSync(path.join(CWD, "extensions/workflow/todo-compat.ts"), "utf8");
+
+	// Verified version/commit recorded so the contract is traceable.
+	assert(tc.includes('PASEO_VERIFIED_VERSION = "0.2.1"'), "todo-compat records verified Paseo version 0.2.1");
+	assert(
+		tc.includes('PASEO_VERIFIED_COMMIT = "65633004b23d6eeeda9321e04f096ca647694b2b"'),
+		"todo-compat records verified Paseo commit",
+	);
+	assert(tc.includes('UPDATE_PLAN_TOOL_NAME = "update_plan"'), "todo-compat fixes tool name to update_plan");
+	assert(tc.includes('BLOCKED_PREFIX = "[blocked] "'), "todo-compat fixes blocked prefix");
+
+	// Schema matches Paseo's UpdatePlanSchema: plan of { step, status } with
+	// the three-state enum.
+	assert(tc.includes("UpdatePlanItemSchema"), "todo-compat exports UpdatePlanItemSchema");
+	assert(tc.includes("UpdatePlanParamsSchema"), "todo-compat exports UpdatePlanParamsSchema");
+	assert(
+		tc.includes('Type.Literal("pending")') &&
+			tc.includes('Type.Literal("in_progress")') &&
+			tc.includes('Type.Literal("completed")'),
+		"todo-compat schema uses pending|in_progress|completed",
+	);
+
+	// Node >=22.19 loads TypeScript directly, so exercise the production
+	// mapping/mutation functions instead of verification copies.
+	const {
+		applyTodoAction,
+		toPaseoStatus,
+		fromPaseoStatus,
+		parsePaseoStep,
+	} = await import(
+		pathToFileURL(path.join(CWD, "extensions/workflow/todo-compat.ts")).href
+	);
+
+	assert(toPaseoStatus("done") === "completed", "toPaseoStatus: done -> completed");
+	assert(toPaseoStatus("blocked") === "pending", "toPaseoStatus: blocked -> pending");
+	assert(toPaseoStatus("in_progress") === "in_progress", "toPaseoStatus: in_progress preserved");
+	assert(fromPaseoStatus("[blocked] foo", "pending") === "blocked", "fromPaseoStatus: [blocked] prefix -> blocked");
+	assert(fromPaseoStatus("foo", "completed") === "done", "fromPaseoStatus: completed -> done");
+	assert(fromPaseoStatus("foo", "pending") === "pending", "fromPaseoStatus: pending preserved");
+	const p1 = parsePaseoStep("[blocked] Do thing — note here");
+	assert(p1.title === "Do thing" && p1.notes === "note here", "parsePaseoStep: blocked + notes parsed");
+	const p2 = parsePaseoStep("Plain task");
+	assert(p2.title === "Plain task" && p2.notes === undefined, "parsePaseoStep: plain task, no notes");
+	const p3 = parsePaseoStep("Fix login — high priority — note here");
+	assert(p3.title === "Fix login — high priority" && p3.notes === "note here", "parsePaseoStep: lastIndexOf splits notes from the end, keeping earlier em-dashes in title");
+
+	const replaced = applyTodoAction([], {
+		kind: "replace",
+		items: [
+			{ step: "[blocked] Verify trust gate — waiting on approval", status: "pending" },
+			{ step: "Ship fix", status: "completed" },
+		],
+	});
+	assert(
+		replaced[0]?.id === "T1" &&
+			replaced[0]?.title === "Verify trust gate" &&
+			replaced[0]?.status === "blocked" &&
+			replaced[0]?.notes === "waiting on approval" &&
+			replaced[1]?.id === "T2" &&
+			replaced[1]?.status === "done",
+		"applyTodoAction replace maps Paseo steps/statuses into internal todos",
+	);
+	const resetWithHole = applyTodoAction([], {
+		kind: "reset",
+		items: [
+			{ id: "T2", title: "Explicit" },
+			{ title: "Generated" },
+		],
+	});
+	assert(
+		resetWithHole[0]?.id === "T2" && resetWithHole[1]?.id === "T3",
+		"applyTodoAction reset generates an unused ID after explicit collisions",
+	);
+	let duplicateResetRejected = false;
+	try {
+		applyTodoAction([], {
+			kind: "reset",
+			items: [
+				{ id: "T1", title: "One" },
+				{ id: "T1", title: "Duplicate" },
+			],
+		});
+	} catch {
+		duplicateResetRejected = true;
+	}
+	assert(duplicateResetRejected, "applyTodoAction reset rejects duplicate explicit IDs");
+	let duplicateAddRejected = false;
+	try {
+		applyTodoAction([{ id: "T1", title: "One", status: "pending" }], {
+			kind: "add",
+			id: "T1",
+			title: "Duplicate",
+		});
+	} catch {
+		duplicateAddRejected = true;
+	}
+	assert(duplicateAddRejected, "applyTodoAction add rejects duplicate explicit IDs");
+
+	// tools.ts registers the alias and uses the shared mutation core.
+	const toolsTs = fs.readFileSync(path.join(CWD, "extensions/workflow/tools.ts"), "utf8");
+	assert(toolsTs.includes("registerUpdatePlanTool"), "tools.ts registers update_plan alias");
+	assert(toolsTs.includes("applyTodoAction"), "tools.ts uses shared applyTodoAction for todo mutation");
+	assert(toolsTs.includes('name: UPDATE_PLAN_TOOL_NAME'), "update_plan alias uses the contract tool name");
+	assert(toolsTs.includes("ensureRpcAliasRegistered"), "tools.ts exposes ensureRpcAliasRegistered for session_start-time RPC alias registration");
+
+	// index.ts registers the RPC alias in session_start (outside the
+	// _workflowRegistered idempotency guard) so autoEnter + RPC mode works.
+	const indexTs = fs.readFileSync(path.join(CWD, "extensions/workflow/index.ts"), "utf8");
+	assert(indexTs.includes("ensureRpcAliasRegistered"), "index.ts calls ensureRpcAliasRegistered in session_start");
+	assert(/pi\.on\("session_shutdown"[\s\S]*?overlay\.dispose\(\)/.test(indexTs), "index.ts session_shutdown disposes the captured overlay instance");
+
+	// mode.ts resolves todo tool ownership at activation time.
+	const modeTs = fs.readFileSync(path.join(CWD, "extensions/workflow/mode.ts"), "utf8");
+	assert(modeTs.includes("resolveTodoToolName"), "mode.ts exports resolveTodoToolName for live ownership");
+	assert(modeTs.includes('"update_plan"'), "mode.ts handles update_plan in tool visibility");
+}
 
 console.log(`\n=== Result: ${runs - failures}/${runs} passed ===`);
 if (failures > 0) {

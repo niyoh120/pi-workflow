@@ -1,4 +1,4 @@
-import { createBashTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createBashTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -11,7 +11,7 @@ import {
 	updatePlan,
 	readPlan,
 } from "./state.js";
-import { loadConfig } from "./config.js";
+import { loadConfigForContext } from "./config.js";
 import { todoText } from "./helpers.js";
 import {
 	createWorktree,
@@ -21,6 +21,15 @@ import {
 	validateWorktreeState,
 } from "./worktree.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
+import {
+	applyTodoAction,
+	UPDATE_PLAN_TOOL_NAME,
+	UpdatePlanParamsSchema,
+	isAliasConflicting,
+	isAliasOwned,
+	markAliasRegistered,
+	toolFingerprint,
+} from "./todo-compat.js";
 import type { WorkflowState } from "./types.js";
 import { executePlanReviewSidecall } from "./sidecall.js";
 import { transitionWorkflowMode } from "./mode.js";
@@ -103,7 +112,7 @@ function checkWorkflowEnabled(
 	try {
 		const sessionKey = getSessionKey(ctx.sessionManager);
 		const state = loadState(ctx.cwd, sessionKey);
-		const config = loadConfig(ctx.cwd, getAgentDir());
+		const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
 		if (!state.workflowEnabled && !config.workflow.autoEnter) {
 			return {
 				isError: true,
@@ -168,12 +177,10 @@ export function registerTodoTool(
 				const overlay = getWorkflowOverlay();
 				if (overlay) overlay.clearBookkeeping();
 
-				state.todos = (params.items ?? []).map((item: any, index: number) => ({
-					id: item.id || `T${index + 1}`,
-					title: item.title,
-					status: item.status ?? "pending",
-					notes: item.notes,
-				}));
+				state.todos = applyTodoAction(state.todos, {
+					kind: "reset",
+					items: params.items,
+				});
 			}
 
 			if (params.action === "add") {
@@ -181,29 +188,104 @@ export function registerTodoTool(
 					throw new Error("workflow_todo add requires title.");
 				}
 
-				state.todos.push({
-					id: params.id ?? `T${state.todos.length + 1}`,
+				state.todos = applyTodoAction(state.todos, {
+					kind: "add",
+					id: params.id,
 					title: params.title,
-					status: params.status ?? "pending",
+					status: params.status,
 					notes: params.notes,
 				});
 			}
 
 			if (params.action === "set") {
-				const item = state.todos.find((todo) => todo.id === params.id);
-				if (!item) {
+				if (!params.id) {
+					throw new Error("workflow_todo set requires a non-empty id.");
+				}
+				const exists = state.todos.some((todo) => todo.id === params.id);
+				if (!exists) {
 					throw new Error(`Todo not found: ${params.id}`);
 				}
 
-				if (params.title) item.title = params.title;
-				if (params.status) item.status = params.status;
-				if (params.notes !== undefined) item.notes = params.notes;
+				state.todos = applyTodoAction(state.todos, {
+					kind: "set",
+					id: params.id,
+					title: params.title,
+					status: params.status,
+					notes: params.notes,
+				});
 			}
 
 			saveState(ctx.cwd, sessionKey, state);
 
 			const overlay = getWorkflowOverlay();
 			if (overlay) overlay.update(state.todos);
+
+			return {
+				content: [{ type: "text", text: todoText(state) }],
+				details: { todos: state.todos },
+			};
+		},
+	});
+}
+
+// ── update_plan RPC alias (Paseo native TodoListCard) ──────────────────────
+
+/**
+ * Register the update_plan compatibility tool for RPC mode. The tool accepts
+ * an optional `plan` array matching Paseo's UpdatePlanSchema. Omitting `plan`
+ * reads the current todo list; providing it replaces the full list. Ownership
+ * is tracked via todo-compat so collision with external update_plan tools is
+ * detected and the alias is only activated when we own the name.
+ */
+export function registerUpdatePlanTool(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.registerTool({
+		name: UPDATE_PLAN_TOOL_NAME,
+		label: "Update Plan (Paseo native todo)",
+		description:
+			"Maintain the workflow todo list using Paseo's native todo card format. " +
+			"Provide `plan` to replace the full list (pending|in_progress|completed; " +
+			"prefix a step with \"[blocked] \" to mark it blocked). Omit `plan` to read " +
+			"the current list. IDs are per-call T1..Tn snapshots and must not be " +
+			"referenced across calls.",
+		parameters: UpdatePlanParamsSchema,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const denied = checkWorkflowEnabled(ctx, getAgentDir);
+			if (denied) return denied;
+
+			const sessionKey = getSessionKey(ctx.sessionManager);
+			const state = loadState(ctx.cwd, sessionKey);
+
+			// Read-only path: plan omitted → return current todos without mutating.
+			if (params.plan === undefined) {
+				return {
+					content: [{ type: "text", text: todoText(state) }],
+					details: { todos: state.todos },
+				};
+			}
+
+			// Full-list replacement. Clear overlay bookkeeping since IDs are snapshots.
+			try {
+				const overlay = getWorkflowOverlay();
+				if (overlay) overlay.clearBookkeeping();
+
+				state.todos = applyTodoAction(state.todos, {
+					kind: "replace",
+					items: params.plan,
+				});
+				saveState(ctx.cwd, sessionKey, state);
+
+				if (overlay) overlay.update(state.todos);
+			} catch (e) {
+				const errMsg = e instanceof Error ? e.message : String(e);
+				return {
+					isError: true,
+					content: [{ type: "text", text: `update_plan failed: ${errMsg}` }],
+					details: { todos: state.todos },
+				};
+			}
 
 			return {
 				content: [{ type: "text", text: todoText(state) }],
@@ -672,7 +754,8 @@ export function registerPlanReviewTool(
 				);
 			}
 
-			const config = loadConfig(ctx.cwd, getAgentDir());
+			const sessionKey = getSessionKey(ctx.sessionManager);
+			const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
 			const planMarkdown = state.planPath
 				? readPlan(ctx.cwd, state.planPath)
 				: params.task;
@@ -950,10 +1033,9 @@ export function registerAllWorkflowTools(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 	cwd: string,
+	_ctx?: ExtensionContext,
 ): void {
 	if (_workflowToolsRegistered.has(pi)) return;
-
-	const config = loadConfig(cwd, getAgentDir());
 
 	registerBashOverrideTool(pi, getAgentDir, cwd);
 	registerTodoTool(pi, getAgentDir);
@@ -962,9 +1044,64 @@ export function registerAllWorkflowTools(
 	registerPlanApproveTool(pi, getAgentDir);
 	registerPlanClearTool(pi, getAgentDir);
 	registerGrillRecordTool(pi, getAgentDir);
-	if (config.planReview.enabled) registerPlanReviewTool(pi, getAgentDir);
-	if (config.codeReview.enabled) registerCodeReviewTool(pi, getAgentDir);
+	// Register optional definitions unconditionally. Trust-resolved config in
+	// mode reconciliation controls visibility, and each execute/handler path
+	// rechecks workflow/config gates with the real session context.
+	registerPlanReviewTool(pi, getAgentDir);
+	registerCodeReviewTool(pi, getAgentDir);
 	registerInitCompleteTool(pi, getAgentDir);
 
 	_workflowToolsRegistered.add(pi);
+}
+
+/**
+ * Idempotently register the update_plan RPC alias for Paseo's native
+ * TodoListCard. Called from session_start (after ctx is available) because
+ * alias registration needs ctx.mode, which is undefined at factory time.
+ *
+ * Collision-safe: if another extension already owns update_plan (detected
+ * via sourceInfo fingerprint), skip registration and let the external tool
+ * win; TUI stays on workflow_todo. Safe to call multiple times per
+ * ExtensionAPI instance — no-op once this instance owns the alias and the
+ * live tool still matches our fingerprint.
+ */
+export function ensureRpcAliasRegistered(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+	ctx: ExtensionContext | undefined,
+): void {
+	if (ctx?.mode !== "rpc") return;
+	// Already owned and still live → nothing to do.
+	if (isAliasOwned(pi)) return;
+	// Another extension owns it → skip.
+	if (isAliasConflicting(pi)) {
+		console.warn(
+			"[workflow] update_plan already registered by another extension; " +
+				"RPC todo alias skipped, falling back to workflow_todo.",
+		);
+		return;
+	}
+	registerUpdatePlanTool(pi, getAgentDir);
+	// Record ownership using the live tool's real sourceInfo fingerprint so
+	// later conflict detection compares apples to apples. If the registry is
+	// eventually consistent and the tool is not enumerable yet, leave ownership
+	// unset so the next session_start re-registers cleanly instead of
+	// recording an undefined fingerprint that would break isAliasOwned.
+	const all = pi.getAllTools();
+	const found = all.find((t) => t.name === UPDATE_PLAN_TOOL_NAME);
+	if (!found) {
+		// Registry eventually consistent: mark provisional ownership so the
+		// next session_start's isAliasConflicting does not misclassify our own
+		// tool as an external conflict. isAliasConflicting treats a registered
+		// instance with no fingerprint as non-conflicting (optimistically ours),
+		// allowing the next session_start to re-resolve and store the real
+		// fingerprint once the tool becomes enumerable.
+		markAliasRegistered(pi, undefined);
+		console.warn(
+			"[workflow] update_plan registered but not enumerable in getAllTools(); " +
+				"ownership marked provisionally — fingerprint resolved on next session_start.",
+		);
+		return;
+	}
+	markAliasRegistered(pi, toolFingerprint(found));
 }

@@ -157,22 +157,46 @@ export const INIT_PROMPT = `
 
 // ── Mode prompt dispatch ───────────────────────
 
-/** Return the system prompt for a workflow mode. Returns undefined for idle. */
-export function promptForMode(mode: Mode): string | undefined {
+/**
+ * Return the system prompt for a workflow mode, substituting the todo tool
+ * protocol for the active surface. When `todoToolName` is "update_plan"
+ * (RPC alias owned), workflow_todo call syntax is rewritten to update_plan
+ * full-list syntax so the model emits arguments Paseo renders natively.
+ * Returns undefined for idle.
+ */
+export function promptForMode(
+	mode: Mode,
+	todoToolName: "workflow_todo" | "update_plan" = "workflow_todo",
+): string | undefined {
+	let prompt: string | undefined;
 	switch (mode) {
 		case "idle":
 			return undefined;
 		case "explore":
-			return EXPLORE_PROMPT;
+			prompt = EXPLORE_PROMPT;
+			break;
 		case "init":
-			return INIT_PROMPT;
+			prompt = INIT_PROMPT;
+			break;
 		case "plan":
-			return PLAN_PROMPT;
+			prompt = PLAN_PROMPT;
+			break;
 		case "work":
-			return WORK_PROMPT;
+			prompt = WORK_PROMPT;
+			break;
 		case "commit":
-			return COMMIT_PROMPT;
+			prompt = COMMIT_PROMPT;
+			break;
 		default:
 			return assertNever(mode);
 	}
+	if (todoToolName === "update_plan" && prompt) {
+		prompt = prompt
+			.replace(
+				/workflow_todo\(action="reset"\)/g,
+				'update_plan(plan=[{step, status}])（完整列表替换）',
+			)
+			.replace(/workflow_todo\b/g, "update_plan");
+	}
+	return prompt;
 }

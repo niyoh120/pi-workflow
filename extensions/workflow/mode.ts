@@ -1,7 +1,8 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Mode, WorkflowConfig, WorkflowState } from "./types.js";
-import { loadConfig, loadConfigForSession } from "./config.js";
+import { loadConfigForContext } from "./config.js";
 import { assertNever, modeLabel, modeStatusLabel } from "./helpers.js";
+import { isAliasOwned, isAliasRegistered, UPDATE_PLAN_TOOL_NAME } from "./todo-compat.js";
 import { saveState, getSessionKey } from "./state.js";
 
 // ── Workflow tool mode gating ─────────────────────────────────────────────────
@@ -19,6 +20,17 @@ export const WORKFLOW_GATED_TOOLS = [
 ] as const;
 
 export const WORKFLOW_TOOL_CLEANUP_NAMES = [...WORKFLOW_GATED_TOOLS] as const;
+
+/**
+ * Workflow-owned tool names for the current ExtensionAPI instance. The
+ * update_plan alias is included only while its live sourceInfo fingerprint
+ * proves ownership, preserving an external tool with the same name.
+ */
+export function workflowManagedToolNames(pi: ExtensionAPI): Set<string> {
+	const names = new Set<string>(WORKFLOW_TOOL_CLEANUP_NAMES);
+	if (isAliasOwned(pi)) names.add(UPDATE_PLAN_TOOL_NAME);
+	return names;
+}
 
 const PLAN_WORKFLOW_TOOL_NAMES = [
 	"workflow_todo",
@@ -44,18 +56,34 @@ export function isWorkflowToolMode(mode: Mode): boolean {
 	return mode === "plan" || mode === "work" || mode === "init" || mode === "explore";
 }
 
+/**
+ * Swap workflow_todo for update_plan in a tool-name list when the RPC alias
+ * is the active todo surface. Returns the list untouched when workflow_todo
+ * is absent (defensive against future edits to the base arrays).
+ */
+function withTodoToolName(
+	names: readonly string[],
+	todoToolName: "workflow_todo" | "update_plan",
+): string[] {
+	if (todoToolName === "update_plan") {
+		return names.map((n) => (n === "workflow_todo" ? "update_plan" : n));
+	}
+	return [...names];
+}
+
 export function computeWorkflowToolNames(
 	mode: Mode,
 	config: WorkflowConfig,
+	todoToolName: "workflow_todo" | "update_plan" = "workflow_todo",
 ): string[] {
 	switch (mode) {
 		case "plan": {
-			const names = [...PLAN_WORKFLOW_TOOL_NAMES];
+			const names = withTodoToolName([...PLAN_WORKFLOW_TOOL_NAMES], todoToolName);
 			if (config.planReview.enabled) names.push("workflow_plan_review");
 			return names;
 		}
 		case "work": {
-			const names = [...WORK_WORKFLOW_TOOL_NAMES];
+			const names = withTodoToolName([...WORK_WORKFLOW_TOOL_NAMES], todoToolName);
 			if (config.codeReview.enabled) names.push("workflow_code_review");
 			return names;
 		}
@@ -85,11 +113,13 @@ export async function setRole(
 ): Promise<boolean> {
 	try {
 		// Resolve config with this session's override layer so /wf-settings
-		// Session-scope model/thinking changes take effect immediately.
-		const config = loadConfigForSession(
+		// Session-scope model/thinking changes take effect immediately. Project
+		// trust is honored via ctx.isProjectTrusted() when available.
+		const config = loadConfigForContext(
 			ctx.cwd,
 			getAgentDir(),
 			getSessionKey(ctx.sessionManager),
+			ctx,
 		);
 		const spec = config.models[role as keyof typeof config.models];
 
@@ -128,6 +158,15 @@ export async function setRole(
 }
 
 /**
+ * Resolve which todo tool name to activate. Returns "update_plan" when this
+ * extension has registered the RPC alias and still owns it (no external
+ * override detected at activation time); "workflow_todo" otherwise.
+ */
+export function resolveTodoToolName(pi: ExtensionAPI): "workflow_todo" | "update_plan" {
+	return isAliasOwned(pi) ? "update_plan" : "workflow_todo";
+}
+
+/**
  * Reconcile workflow tools for the current mode.
  *
  * pi-workflow manages only its own workflow_* tools. Built-in and other
@@ -141,6 +180,7 @@ export function activateWorkflowToolsIfAllowed(
 	cwd: string,
 	getAgentDir: () => string,
 	mode: Mode,
+	ctx?: ExtensionContext,
 ): void {
 	try {
 		const active = pi.getActiveTools().map((tool: any) => {
@@ -148,17 +188,25 @@ export function activateWorkflowToolsIfAllowed(
 			return tool.name;
 		});
 
+		// Resolve which todo tool to activate: update_plan RPC alias when we
+		// own it and no external tool has overridden it; workflow_todo otherwise.
+		// This is recomputed each activation so late overrides are detected.
+		const todoToolName = resolveTodoToolName(pi);
+
 		let workflowToolNames: string[] = [];
 		try {
-			const cfg = loadConfig(cwd, getAgentDir());
-			workflowToolNames = computeWorkflowToolNames(mode, cfg);
+			const cfg = ctx
+				? loadConfigForContext(cwd, getAgentDir(), getSessionKey(ctx.sessionManager), ctx)
+				: loadConfigForContext(cwd, getAgentDir(), "", undefined);
+			workflowToolNames = computeWorkflowToolNames(mode, cfg, todoToolName);
 		} catch {
-			// Preserve core workflow tools if config cannot be read.
-			workflowToolNames = computeFallbackWorkflowToolNames(mode);
+			// Preserve core workflow tools and the already-resolved todo surface
+			// when config cannot be read.
+			workflowToolNames = computeFallbackWorkflowToolNames(mode, todoToolName);
 		}
 
 		// Short-circuit when active and allowed workflow sets already match.
-		const workflowCleanup = new Set<string>(WORKFLOW_TOOL_CLEANUP_NAMES);
+		const workflowCleanup = workflowManagedToolNames(pi);
 		const activeWorkflow = new Set(
 			active.filter((name) => workflowCleanup.has(name)),
 		);
@@ -170,7 +218,7 @@ export function activateWorkflowToolsIfAllowed(
 		if (sameMembers) return;
 
 		const next = new Set(active);
-		for (const toolName of WORKFLOW_TOOL_CLEANUP_NAMES) {
+		for (const toolName of workflowCleanup) {
 			next.delete(toolName);
 		}
 		for (const toolName of workflowToolNames) {
@@ -199,7 +247,7 @@ export async function applyModeRuntime(
 	const role = modeRole(mode);
 	try {
 		if (!(await setRole(pi, ctx, role, getAgentDir))) return false;
-		activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir, mode);
+		activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir, mode, ctx);
 		return true;
 	} catch {
 		return false;
@@ -228,14 +276,17 @@ export function modeRole(mode: Mode): string {
 }
 
 /** Fallback tool set when config cannot be read. Mirrors computeWorkflowToolNames. */
-function computeFallbackWorkflowToolNames(mode: Mode): string[] {
+function computeFallbackWorkflowToolNames(
+	mode: Mode,
+	todoToolName: "workflow_todo" | "update_plan" = "workflow_todo",
+): string[] {
 	switch (mode) {
 		case "plan":
-			return [...PLAN_WORKFLOW_TOOL_NAMES];
+			return withTodoToolName([...PLAN_WORKFLOW_TOOL_NAMES], todoToolName);
 		case "explore":
 			return [...EXPLORE_WORKFLOW_TOOL_NAMES];
 		case "work":
-			return [...WORK_WORKFLOW_TOOL_NAMES];
+			return withTodoToolName([...WORK_WORKFLOW_TOOL_NAMES], todoToolName);
 		case "init":
 			return [...INIT_WORKFLOW_TOOL_NAMES];
 		case "idle":
@@ -254,6 +305,13 @@ export const WORKFLOW_TOOL_NAMES = WORKFLOW_GATED_TOOLS;
 /**
  * Remove all workflow tool names from the active tool set.
  * Used by /wf-exit to ensure the next reload starts clean.
+ *
+ * update_plan is activated by this extension only when isAliasOwned confirms
+ * our registration fingerprint still matches. On /wf-exit we remove it if we
+ * ever registered the alias (isAliasRegistered), even if ownership was lost
+ * mid-session (e.g., another extension re-registered the name after our
+ * activation), preventing a stale alias from lingering into the next reload
+ * while preserving an external tool we never owned.
  */
 export function deactivateWorkflowTools(pi: ExtensionAPI): void {
 	try {
@@ -261,7 +319,11 @@ export function deactivateWorkflowTools(pi: ExtensionAPI): void {
 			if (typeof tool === "string") return tool;
 			return tool.name;
 		});
-		const workflowSet = new Set<string>(WORKFLOW_TOOL_NAMES);
+		const workflowSet = workflowManagedToolNames(pi);
+		// Remove update_plan if we ever registered it (isAliasRegistered), even if
+		// ownership was lost mid-session, so a stale alias doesn't linger into
+		// the next reload. An external tool we never registered is preserved.
+		if (isAliasRegistered(pi)) workflowSet.add(UPDATE_PLAN_TOOL_NAME);
 		const next = active.filter((t: string) => !workflowSet.has(t));
 		if (next.length < active.length) {
 			pi.setActiveTools(next);

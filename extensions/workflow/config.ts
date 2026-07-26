@@ -34,20 +34,49 @@ export function deepMerge<T>(base: T, override: Partial<T>): T {
 	return output;
 }
 
-function loadConfigInternal(
+/** Raw layer record for source diagnostics. Each field is a deep-partial raw
+ *  object as read from disk (or DEFAULT for the default layer), NOT yet
+ *  normalized. `undefined` means the layer was absent (project untrusted or
+ *  no file; session override not set). */
+export interface ConfigLayers {
+	default: WorkflowConfig;
+	global: Record<string, any> | undefined;
+	project: Record<string, any> | undefined;
+	session: WorkflowConfigOverride | undefined;
+}
+
+/** Result of {@link loadConfigLayers}: the raw layers, the merged effective
+ *  config, and whether the project layer was skipped due to an untrusted
+ *  project. `projectSkipped` is derived from the same trust evaluation that
+ *  decided `includeProject`, so source attribution never drifts from runtime
+ *  semantics. */
+export interface ConfigLayersResult {
+	layers: ConfigLayers;
+	effective: WorkflowConfig;
+	projectSkipped: boolean;
+}
+
+/** Read each config layer separately without merging. Internal helper for
+ *  loadConfigLayers (which also computes the merged effective config and
+ *  projectSkipped). Does NOT create directories. */
+function loadConfigLayersRaw(
 	cwd: string,
 	agentDir: string,
 	sessionOverride: WorkflowConfigOverride | undefined,
 	options: { includeProject: boolean },
-): WorkflowConfig {
-	let merged = { ...DEFAULT_CONFIG };
+): ConfigLayers {
+	const layers: ConfigLayers = {
+		default: { ...DEFAULT_CONFIG },
+		global: undefined,
+		project: undefined,
+		session: undefined,
+	};
 
 	// Layer global config
 	const gpath = globalConfigPath(agentDir);
 	if (fs.existsSync(gpath)) {
 		try {
-			const globalCfg = JSON.parse(fs.readFileSync(gpath, "utf8"));
-			merged = deepMerge(merged, globalCfg);
+			layers.global = JSON.parse(fs.readFileSync(gpath, "utf8"));
 		} catch (e) {
 			console.error(`Warning: Could not parse global config ${gpath}: ${e}`);
 		}
@@ -58,81 +87,135 @@ function loadConfigInternal(
 		const ppath = configPath(cwd);
 		if (fs.existsSync(ppath)) {
 			try {
-				const projectCfg = JSON.parse(fs.readFileSync(ppath, "utf8"));
-				merged = deepMerge(merged, projectCfg);
+				layers.project = JSON.parse(fs.readFileSync(ppath, "utf8"));
 			} catch (e) {
 				console.error(`Warning: Could not parse project config ${ppath}: ${e}`);
 			}
 		}
 	}
 
-	// Layer session override (highest priority). WorkflowConfigOverride is a
-	// deep-partial; deepMerge handles partial nesting at runtime, so the cast
-	// to Partial<WorkflowConfig> only satisfies the generic's shallow shape.
+	// Layer session override (highest priority).
 	if (sessionOverride && typeof sessionOverride === "object") {
-		merged = deepMerge(merged, sessionOverride as Partial<WorkflowConfig>);
+		layers.session = sessionOverride;
 	}
 
-	// Normalize: strip stale fields from old configs (e.g. the removed
-	// subagent section, old planReview.maxLoops/codeReview.maxLoops/codeReview.auto).
-	return normalizeConfig(merged);
+	return layers;
 }
 
-/** Load merged config: DEFAULT ← global ← project ← session override.
- *  The optional sessionOverride is the highest-priority layer (used by
- *  /wf-settings Session scope).
- *
- *  NOTE: This is a read-only operation. It does NOT create directories.
- *  For write operations, use writeProjectConfigRaw/writeGlobalConfigRaw
- *  which handle directory creation. */
-export function loadConfig(
-	cwd: string,
-	agentDir: string,
-	sessionOverride?: WorkflowConfigOverride,
-): WorkflowConfig {
-	return loadConfigInternal(cwd, agentDir, sessionOverride, {
-		includeProject: true,
-	});
-}
-
-/** Load merged config including this session's override layer.
- *  Reads sessionConfig from the session state and passes it as the
- *  highest-priority layer to loadConfig. */
-export function loadConfigForSession(
+/** Read effective config layers for a session, honoring project trust.
+ *  Returns the per-layer raw objects (plus DEFAULT) for source diagnostics,
+ *  plus the merged normalized effective config. The sole ctx-aware public
+ *  entry point for runtime/settings/status. */
+export function loadConfigLayers(
 	cwd: string,
 	agentDir: string,
 	sessionKey: string,
-): WorkflowConfig {
-	let sessionOverride: WorkflowConfigOverride | undefined;
-	try {
-		sessionOverride = loadState(cwd, sessionKey).sessionConfig;
-	} catch {
-		sessionOverride = undefined;
-	}
-	return loadConfig(cwd, agentDir, sessionOverride);
-}
-
-/** Load config with Project Trust awareness.
- *  When ctx.isProjectTrusted() returns true, loads all config layers.
- *  When ctx is not trusted or not provided, falls back to DEFAULT + global only.
- *  This prevents untrusted project config from being loaded at startup. */
-export function loadConfigIfTrusted(
-	cwd: string,
-	agentDir: string,
 	ctx?: { isProjectTrusted?: () => boolean },
-	sessionOverride?: WorkflowConfigOverride,
-): WorkflowConfig {
-	// Check project trust if ctx is provided
-	if (ctx && typeof ctx.isProjectTrusted === "function") {
-		const isTrusted = ctx.isProjectTrusted();
-		if (!isTrusted) {
-			return loadConfigInternal(cwd, agentDir, sessionOverride, {
-				includeProject: false,
-			});
+): ConfigLayersResult {
+	let sessionOverride: WorkflowConfigOverride | undefined;
+	if (sessionKey) {
+		try {
+			sessionOverride = loadState(cwd, sessionKey).sessionConfig;
+		} catch (e) {
+			console.error(`Warning: Could not load session state for key ${sessionKey}: ${e instanceof Error ? e.message : e}`);
+			sessionOverride = undefined;
 		}
 	}
-	// Trusted or no ctx: load full config as before
-	return loadConfig(cwd, agentDir, sessionOverride);
+	// Missing trust context is conservative: default/global only. Project
+	// config participates only after Pi explicitly reports the project trusted.
+	const includeProject =
+		!!ctx && typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted();
+	const layers = loadConfigLayersRaw(cwd, agentDir, sessionOverride, { includeProject });
+	let effective: WorkflowConfig = { ...DEFAULT_CONFIG };
+	if (layers.global) effective = deepMerge(effective, layers.global);
+	if (layers.project) effective = deepMerge(effective, layers.project);
+	if (layers.session) effective = deepMerge(effective, layers.session as Partial<WorkflowConfig>);
+	effective = normalizeConfig(effective);
+	// Reuse the exact decision above so diagnostics cannot drift from the
+	// effective config. Missing trust context also means the project layer was
+	// conservatively skipped.
+	const projectSkipped = !includeProject;
+	return { layers, effective, projectSkipped };
+}
+
+/** Unified ctx-aware effective config loader. Reads session override from
+ *  session state and includes the project layer only when the project is
+ *  trusted. All business modules (mode/commands/tools/settings/status)
+ *  MUST use this instead of the legacy loadConfig/loadConfigForSession/
+ *  loadConfigIfTrusted entry points. */
+export function loadConfigForContext(
+	cwd: string,
+	agentDir: string,
+	sessionKey: string,
+	ctx?: { isProjectTrusted?: () => boolean },
+): WorkflowConfig {
+	return loadConfigLayers(cwd, agentDir, sessionKey, ctx).effective;
+}
+
+// ── Config source diagnostics ──────────────────────────────────────────────
+
+export type ConfigSource = "default" | "global" | "project" | "session";
+
+export interface ConfigSourceReport {
+	/** Per-leaf source map. Keys are dotted paths like "models.plan.model". */
+	sources: Record<string, ConfigSource>;
+	/** True when the project layer was skipped due to untrusted project. */
+	projectSkipped: boolean;
+	/** The effective merged config (trusted-aware). */
+	effective: WorkflowConfig;
+}
+
+/**
+ * Resolve the origin layer of each config leaf by walking the layer stack
+ * from highest to lowest priority: session → project → global → default.
+ * Reuses the same loadConfigLayers result that effective config is built
+ * from, so source attribution never drifts from runtime semantics.
+ */
+export function resolveConfigSources(
+	cwd: string,
+	agentDir: string,
+	sessionKey: string,
+	ctx?: { isProjectTrusted?: () => boolean },
+): ConfigSourceReport {
+	const { layers, effective, projectSkipped } = loadConfigLayers(cwd, agentDir, sessionKey, ctx);
+
+	const sources: Record<string, ConfigSource> = {};
+
+	const leafPaths = [
+		"workflow.autoEnter",
+		"planReview.enabled",
+		"codeReview.enabled",
+		...(["explore", "plan", "planReview", "work", "commit"] as const).flatMap(
+			(role) => [
+				`models.${role}.provider`,
+				`models.${role}.model`,
+				`models.${role}.thinking`,
+			],
+		),
+	];
+
+	for (const path of leafPaths) {
+		sources[path] = sourceOfPath(path, layers);
+	}
+
+	return { sources, projectSkipped, effective };
+}
+
+/** Find the highest-priority layer that defines a given dotted path. */
+function sourceOfPath(path: string, layers: ConfigLayers): ConfigSource {
+	const segs = path.split(".");
+	const get = (obj: Record<string, any> | undefined): unknown => {
+		let cur: any = obj;
+		for (const seg of segs) {
+			if (cur == null || typeof cur !== "object") return undefined;
+			cur = cur[seg];
+		}
+		return cur;
+	};
+	if (get(layers.session) !== undefined) return "session";
+	if (get(layers.project) !== undefined) return "project";
+	if (get(layers.global) !== undefined) return "global";
+	return "default";
 }
 
 /**

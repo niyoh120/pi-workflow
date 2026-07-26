@@ -275,6 +275,35 @@ The `workflow_code_review` tool:
 
 For interactive scope selection and the full review/fix/re-review loop, use `/review` — it shows a TUI and prompts the model to call the tool.
 
+## RPC / Paseo Compatibility
+
+pi-workflow adapts to Pi's run modes so Paseo (and other Pi RPC clients) can drive the workflow without a terminal.
+
+### Run-mode behavior matrix
+
+| Command / surface | TUI | RPC (Paseo) | JSON / print |
+|---|---|---|---|
+| `/wf-settings` | `SettingsList` overlay + searchable model picker | basic-dialog wizard: scope → setting → value (select/input) | stderr guidance, no UI |
+| `/review` | custom scope/ref overlay | basic-dialog wizard: scope (select) + refs (input) | stderr guidance, no UI |
+| `/wf-status` | `notify` | `notify` (handled-command, Paseo surfaces it) | stderr text |
+| todo tool | `workflow_todo` + TUI overlay | `update_plan` alias (Paseo native TodoListCard) | provider-dependent |
+| `setStatus` / `setWidget` | footer + overlay widget | Pi emits events; Paseo currently ignores persistent status/widgets | n/a |
+
+### Paseo native todo (`update_plan` compatibility)
+
+In RPC mode, pi-workflow registers an `update_plan` tool whose arguments match Paseo's existing `UpdatePlanSchema (`{ plan: [{ step, status }] }`, status: `pending | in_progress | completed`). Paseo renders these as native TodoListCard entries; Pi's history mapper replays persisted tool calls, so resumed sessions reconstruct the todo card.
+
+- **Full-list replacement**: providing `plan` replaces the entire todo list; IDs are per-call `T1..Tn` snapshots and must not be referenced across calls.
+- **Read-only**: omitting `plan` returns the current list without mutating.
+- **Blocked encoding**: pi-workflow's internal `blocked` status has no native slot in Paseo's three-state enum; it is encoded as a `[blocked] ` prefix on the step text. Structured `notes` are inlined into the step text.
+- **Collision-safe**: if another extension already owns `update_plan`, pi-workflow skips the alias and falls back to `workflow_todo`; the active tool and mode prompt are recomputed each turn so fallback is consistent.
+
+Verified against Paseo `0.2.1` (commit `65633004b23d6eeeda9321e04f096ca647694b2b`). Upgrading past the blocked/notes ceilings requires a Paseo mapper change.
+
+### Project Trust
+
+Config loading is trust-aware: `DEFAULT ← global ← trusted project ← session`. In an untrusted session the project layer is skipped for both effective config and source attribution, and `/wf-settings` refuses to read or write the Project scope. Use `--approve` (or `/trust` in interactive mode) to trust project-local config.
+
 ## Session-Scoped Runtime State
 
 Runtime workflow state is scoped to the current Pi session:

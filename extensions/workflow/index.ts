@@ -15,12 +15,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadState, getSessionKey } from "./state.js";
-import { loadConfig, loadConfigIfTrusted } from "./config.js";
+import { loadConfigForContext } from "./config.js";
 import { applyModeRuntime, setWorkflowStatus, transitionWorkflowMode } from "./mode.js";
 import type { WorkflowState } from "./types.js";
-import { WorkflowTodoOverlay, setWorkflowOverlay } from "./todo-overlay.js";
+import { WorkflowTodoOverlay, setWorkflowOverlay, getWorkflowOverlay } from "./todo-overlay.js";
 
-import { registerAllWorkflowTools } from "./tools.js";
+import { registerAllWorkflowTools, ensureRpcAliasRegistered } from "./tools.js";
 
 import { registerWfSettingsCommand } from "./settings.js";
 
@@ -47,11 +47,12 @@ function ensureWorkflowRegistered(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 	cwd: string,
+	ctx?: any,
 ): void {
 	if (_workflowRegistered.has(pi)) return;
 
 	registerAllWorkflowCommands(pi, getAgentDir, cwd);
-	registerAllWorkflowTools(pi, getAgentDir, cwd);
+	registerAllWorkflowTools(pi, getAgentDir, cwd, ctx);
 
 	_workflowRegistered.add(pi);
 }
@@ -78,7 +79,7 @@ function registerWorkflowSessionStart(
 			});
 			const cwd = (ctx as any).cwd;
 			const state: WorkflowState = loadState(cwd, sessionKey);
-			const config = loadConfigIfTrusted(cwd, getAgentDir(), ctx as any);
+			const config = loadConfigForContext(cwd, getAgentDir(), sessionKey, ctx as any);
 			const workflowActive =
 				(state.workflowEnabled || config.workflow.autoEnter) &&
 				!state.workflowExplicitlyDisabled;
@@ -88,7 +89,23 @@ function registerWorkflowSessionStart(
 				return;
 			}
 
-			ensureWorkflowRegistered(pi, getAgentDir, cwd);
+			ensureWorkflowRegistered(pi, getAgentDir, cwd, ctx);
+
+			// RPC alias registration needs ctx.mode, which is undefined at factory
+			// time. Register/update it here on every session_start so the
+			// update_plan alias is available in RPC mode regardless of whether
+			// workflow was auto-entered (factory-time registration) or enabled
+			// via /wf. Idempotent: no-op when already owned and live.
+			ensureRpcAliasRegistered(pi, getAgentDir, ctx);
+
+			// TUI-only: bind the todo overlay UI context and refresh from state.
+			// RPC/JSON/print cannot consume the component factory widget, so
+			// overlay stays dormant there; todos remain visible via tool results.
+			const overlay = getWorkflowOverlay();
+			if (overlay && (ctx as any).mode === "tui") {
+				overlay.setUICtx((ctx as any).ui);
+				overlay.update(state.todos);
+			}
 
 			// Promote idle → explore via the unified transition path so persisted
 			// mode, status line, runtime, and guards stay aligned. Otherwise restore
@@ -135,7 +152,9 @@ function registerWorkflowSessionStart(
 // ── Main entry point ────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-	const config = loadConfig(process.cwd(), getAgentDir());
+	// Factory time has no Project Trust context. loadConfigForContext therefore
+	// resolves default/global only and ignores session/project layers.
+	const config = loadConfigForContext(process.cwd(), getAgentDir(), "", undefined);
 
 	// ── /wf and /wf-settings are always registered ──
 	registerWfCommand(pi, getAgentDir);
@@ -143,9 +162,10 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Workflow commands/tools: conditional ──────
 	if (config.workflow.autoEnter) {
-		// Auto-enter: register immediately so tools are available before the
-		// first session_start fires.
-		ensureWorkflowRegistered(pi, getAgentDir, process.cwd());
+		// Global/default auto-enter registers definitions immediately. Trusted
+		// project auto-enter is resolved in session_start once ctx is available;
+		// the update_plan RPC alias is also registered there.
+		ensureWorkflowRegistered(pi, getAgentDir, process.cwd(), undefined);
 	}
 	// Unified session_start path: register when /wf has enabled workflow,
 	// apply runtime (tools/model) before the first prompt is built, and set
@@ -162,4 +182,14 @@ export default function (pi: ExtensionAPI) {
 	// ── Overlay setup ─────────────────────────────
 	const overlay = new WorkflowTodoOverlay();
 	setWorkflowOverlay(overlay);
+
+	// ── Overlay lifecycle ─────────────────────────
+	// session_shutdown disposes the overlay so reload/session replacement
+	// does not leak the old UI context or leave a stale widget registered.
+	// Capture the instance in the closure so each pi disposes only the
+	// overlay it created, not whatever is current at shutdown time (which
+	// could belong to a newer ExtensionAPI instance after a rebind).
+	pi.on("session_shutdown", () => {
+		overlay.dispose();
+	});
 }

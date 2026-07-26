@@ -19,6 +19,7 @@
 
 import type {
 	ExtensionAPI,
+	ExtensionCommandContext,
 	ModelRegistry,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -42,7 +43,7 @@ import {
 	type SettingItem,
 } from "@earendil-works/pi-tui";
 import {
-	loadConfigForSession,
+	loadConfigForContext,
 	readProjectConfigRaw,
 	readGlobalConfigRaw,
 	writeProjectConfigRaw,
@@ -56,6 +57,37 @@ import type { WorkflowConfig } from "./types.js";
 
 type Scope = "session" | "project" | "global";
 type ScopeAction = Scope | "reset-session" | "reset-project";
+
+/**
+ * Structural subset of the Pi command-handler context for the RPC settings
+ * wizard. The full ExtensionCommandContext type is exported but carries many
+ * members unused here; this Pick keeps strict-mode type checking for the RPC
+ * path while documenting exactly what the wizard touches.
+ */
+type RpcContext = Pick<
+	ExtensionCommandContext,
+	"mode" | "cwd" | "modelRegistry" | "isProjectTrusted" | "ui"
+>;
+
+/** Wrap a writeLayer call with error reporting matching the TUI path. */
+async function commitRpcWrite(
+	ctx: RpcContext,
+	scope: Scope,
+	layer: Record<string, any>,
+	cwd: string,
+	agentDir: string,
+	sessionKey: string,
+	changedScopes: Set<Scope>,
+): Promise<boolean> {
+	try {
+		await writeLayer(scope, layer, cwd, agentDir, sessionKey);
+		changedScopes.add(scope);
+		return true;
+	} catch (e: any) {
+		ctx.ui.notify(`Failed to write ${scope} setting: ${e?.message ?? String(e)}`, "error");
+		return false;
+	}
+}
 
 const SCOPE_LABELS: Record<Scope, string> = {
 	session: "Session (this Pi process)",
@@ -729,16 +761,21 @@ export function registerWfSettingsCommand(
 			const agentDir = getAgentDir();
 			const sessionKey = ctxSessionKey(ctx);
 
-			// Non-TUI mode: provide text-based instructions
-			if (ctx.mode !== "tui") {
-				ctx.ui.notify(
-					"Settings menu requires interactive mode (TUI). " +
-						"In RPC/JSON/print mode, please edit config files directly:\n" +
+			// JSON/print: no UI surface; stderr keeps stdout protocol/print output clean.
+			if (ctx.mode === "json" || ctx.mode === "print") {
+				console.error(
+					"workflow settings: /wf-settings requires interactive mode (TUI/RPC). " +
+						"In JSON/print mode, edit config files directly:\n" +
 						"  - Session: stored in session state\n" +
 						"  - Project: .pi/workflow/config.json\n" +
 						"  - Global: ~/.pi/agent/workflow/config.json",
-					"info",
 				);
+				return;
+			}
+
+			// RPC mode: basic-dialog wizard (scope → setting → value).
+			if (ctx.mode === "rpc") {
+				await runRpcSettingsWizard(pi, ctx, getAgentDir, sessionKey, cwd, agentDir);
 				return;
 			}
 
@@ -771,6 +808,13 @@ export function registerWfSettingsCommand(
 					resetScope = "project";
 				}
 				if (resetScope) {
+					if (resetScope === "project" && !ctx.isProjectTrusted()) {
+						ctx.ui.notify(
+							"Project config cannot be reset: this session is not project-trusted.",
+							"warning",
+						);
+						continue;
+					}
 					try {
 						const layer = readLayer(resetScope, cwd, agentDir, sessionKey);
 						if (Object.keys(layer).length === 0) {
@@ -803,6 +847,14 @@ export function registerWfSettingsCommand(
 				}
 
 				const scope = action as Scope;
+				if (scope === "project" && !ctx.isProjectTrusted()) {
+					ctx.ui.notify(
+						"Project config is skipped: this session is not project-trusted. " +
+							"Use --approve or /trust, or edit Session/Global instead.",
+						"warning",
+					);
+					continue;
+				}
 
 				// Pre-flight the layer read so a corrupt config.json surfaces a
 				// friendly message instead of crashing the editor (and prevents
@@ -830,10 +882,11 @@ export function registerWfSettingsCommand(
 						// Hoist single read of layer + effective — avoid per-item IO. Pre-flight
 						// above already guarded against corrupt files, so this is safe.
 						const initialLayer = readLayer(scope, cwd, agentDir, sessionKey);
-						const initialEffective = loadConfigForSession(
+						const initialEffective = loadConfigForContext(
 							cwd,
 							agentDir,
 							sessionKey,
+							ctx,
 						);
 
 						const items: SettingItem[] = scopeDescriptors.map((desc) => {
@@ -859,10 +912,11 @@ export function registerWfSettingsCommand(
 							} else if (desc.kind === "model" && desc.role) {
 								item.submenu = (_cur, submenuDone) => {
 									const layer = readLayer(scope, cwd, agentDir, sessionKey);
-									const effective = loadConfigForSession(
+									const effective = loadConfigForContext(
 										cwd,
 										agentDir,
 										sessionKey,
+										ctx,
 									);
 									const paths = modelPaths(desc.role!);
 									const rawProvider = getPath(layer, paths.provider);
@@ -906,7 +960,7 @@ export function registerWfSettingsCommand(
 
 						const refreshItems = () => {
 							const layer = readLayer(scope, cwd, agentDir, sessionKey);
-							const effective = loadConfigForSession(cwd, agentDir, sessionKey);
+							const effective = loadConfigForContext(cwd, agentDir, sessionKey, ctx);
 							for (const item of items) {
 								const desc = byId.get(item.id);
 								if (!desc) continue;
@@ -1043,7 +1097,7 @@ export function registerWfSettingsCommand(
 			// Mirror the before_agent_start activeness check so autoEnter-only
 			// sessions (workflowEnabled still false) also get the new model.
 			const state = loadState(cwd, sessionKey);
-			const effective = loadConfigForSession(cwd, agentDir, sessionKey);
+			const effective = loadConfigForContext(cwd, agentDir, sessionKey, ctx);
 			const workflowActive =
 				(state.workflowEnabled || effective.workflow.autoEnter) &&
 				!state.workflowExplicitlyDisabled;
@@ -1083,4 +1137,236 @@ export function registerWfSettingsCommand(
 			}
 		},
 	});
+}
+
+// ── RPC Settings wizard (basic dialogs) ────────────────────────────────────
+
+/**
+ * Run the /wf-settings wizard over Pi's basic select/input dialogs. Reuses
+ * the same descriptor/scope/readLayer/writeLayer/effective-config plumbing
+ * as the TUI path so writes are atomic and runtime apply is identical.
+ *
+ * Loop: pick a scope → edit settings in that scope → return to scope picker.
+ * Each value confirmation is committed immediately via writeLayer; cancelling
+ * a value prompt only returns to the setting list, keeping prior commits.
+ */
+async function runRpcSettingsWizard(
+	pi: ExtensionAPI,
+	ctx: RpcContext,
+	getAgentDir: () => string,
+	sessionKey: string,
+	cwd: string,
+	agentDir: string,
+): Promise<void> {
+	const descriptors = buildDescriptors();
+	const changedScopes = new Set<Scope>();
+
+	while (true) {
+		// Scope selector.
+		const scopeLabels = SCOPE_ITEMS.map((i) => i.value as ScopeAction);
+		const scopeChoice = await ctx.ui.select(
+			"Workflow Settings — pick a scope (or Done to finish)",
+			[...scopeLabels, "done"],
+		);
+		if (!scopeChoice || scopeChoice === "done") break;
+
+		// Reset actions.
+		if (scopeChoice === "reset-session" || scopeChoice === "reset-project") {
+			const resetScope: Scope = scopeChoice === "reset-session" ? "session" : "project";
+			if (resetScope === "project" && !ctx.isProjectTrusted()) {
+				ctx.ui.notify(
+					"Project config cannot be reset: this session is not project-trusted.",
+					"warning",
+				);
+				continue;
+			}
+			try {
+				await writeLayer(resetScope, {}, cwd, agentDir, sessionKey);
+				changedScopes.add(resetScope);
+				ctx.ui.notify(`Workflow settings: reset ${resetScope} scope to inherit.`, "info");
+			} catch (e: any) {
+				ctx.ui.notify(`Cannot reset ${resetScope} scope: ${e?.message ?? String(e)}`, "error");
+			}
+			continue;
+		}
+
+		const scope = scopeChoice as Scope;
+
+		// Project untrusted gate: refuse to read/write project config.
+		if (scope === "project" && !ctx.isProjectTrusted()) {
+			ctx.ui.notify(
+				"Project config is skipped: this session is not project-trusted. " +
+					"Use --approve or /trust, or edit Session/Global instead.",
+				"warning",
+			);
+			continue;
+		}
+
+		// Pre-flight layer read so corrupt files surface a friendly error.
+		try {
+			readLayer(scope, cwd, agentDir, sessionKey);
+		} catch (e: any) {
+			ctx.ui.notify(`Cannot edit ${scope} scope: ${e?.message ?? String(e)}`, "error");
+			continue;
+		}
+
+		// Session scope hides reload-sensitive flags.
+		const scopeDescriptors =
+			scope === "session" ? descriptors.filter((d) => !d.reloadSensitive) : descriptors;
+
+		// Setting selector loop.
+		let editing = true;
+		while (editing) {
+			const effective = loadConfigForContext(cwd, agentDir, sessionKey, ctx);
+			const layer = readLayer(scope, cwd, agentDir, sessionKey);
+
+			// Build setting labels with current/effective display.
+			const settingLabels = scopeDescriptors.map((d) => {
+				const disp = currentDisplay(d, scope, layer, effective);
+				return `${d.label} → ${disp}`;
+			});
+			settingLabels.push("(back to scopes)");
+
+			const settingChoice = await ctx.ui.select(
+				`Scope: ${SCOPE_LABELS[scope]} — pick a setting`,
+				settingLabels,
+			);
+			if (!settingChoice || settingChoice === "(back to scopes)") {
+				editing = false;
+				break;
+			}
+
+			// Resolve chosen descriptor by index for an exact match (label
+			// prefix matching is fragile when one label is a prefix of another).
+			const idx = settingLabels.indexOf(settingChoice as string);
+			if (idx < 0 || idx >= scopeDescriptors.length) {
+				editing = false;
+				break;
+			}
+			const desc = scopeDescriptors[idx];
+
+			// Edit value.
+			await editRpcSettingValue(pi, ctx, desc, scope, cwd, agentDir, sessionKey, effective, changedScopes);
+		}
+	}
+
+	if (changedScopes.size === 0) {
+		ctx.ui.notify("Workflow settings: no changes.", "info");
+		return;
+	}
+
+	// Apply model/thinking changes to the running session immediately.
+	const state = loadState(cwd, sessionKey);
+	const effective = loadConfigForContext(cwd, agentDir, sessionKey, ctx);
+	const workflowActive =
+		(state.workflowEnabled || effective.workflow.autoEnter) &&
+		!state.workflowExplicitlyDisabled;
+	let runtimeApplied = true;
+	if (workflowActive && state.mode !== "idle") {
+		runtimeApplied = await applyModeRuntime(pi, ctx, state.mode, getAgentDir);
+	}
+	const scopes = [...changedScopes].join(", ");
+	if (!runtimeApplied) {
+		ctx.ui.notify(
+			`Workflow settings saved (${scopes}), but the runtime failed to switch model/thinking. Check provider/model names and API key.`,
+			"warning",
+		);
+	} else {
+		ctx.ui.notify(
+			`Workflow settings saved (${scopes}). Model/thinking changes apply to the current and later turns.`,
+			"info",
+		);
+	}
+}
+
+/**
+ * Edit a single setting value via the appropriate RPC dialog. Scalar
+ * (boolean/thinking) uses select; model uses provider→model two-stage select;
+ * string uses input. Commits immediately via writeLayer on confirmation.
+ */
+async function editRpcSettingValue(
+	pi: ExtensionAPI,
+	ctx: RpcContext,
+	desc: SettingDescriptor,
+	scope: Scope,
+	cwd: string,
+	agentDir: string,
+	sessionKey: string,
+	effective: WorkflowConfig,
+	changedScopes: Set<Scope>,
+): Promise<void> {
+	const label = inheritLabel(scope);
+
+	if (desc.kind === "boolean") {
+		const choice = await ctx.ui.select(desc.label, [label, "true", "false"]);
+		if (!choice) return;
+		const layer = readLayer(scope, cwd, agentDir, sessionKey);
+		if (INHERIT_WORDS.has(choice)) unsetPath(layer, desc.path);
+		else setPath(layer, desc.path, choice === "true");
+		await commitRpcWrite(ctx, scope, layer, cwd, agentDir, sessionKey, changedScopes);
+		return;
+	}
+
+	if (desc.kind === "thinking" && desc.role) {
+		const levels = thinkingValuesFor(desc, scope, effective, ctx.modelRegistry);
+		const choice = await ctx.ui.select(desc.label, levels);
+		if (!choice) return;
+		const layer = readLayer(scope, cwd, agentDir, sessionKey);
+		if (INHERIT_WORDS.has(choice)) unsetPath(layer, desc.path);
+		else setPath(layer, desc.path, choice);
+		await commitRpcWrite(ctx, scope, layer, cwd, agentDir, sessionKey, changedScopes);
+		return;
+	}
+
+	if (desc.kind === "model" && desc.role) {
+		// Provider → Model two-stage select. Refresh the registry first so the
+		// picker has fresh model data (the TUI path refreshes before its UI too).
+		let models = ctx.modelRegistry.getAvailable();
+		try {
+			await ctx.modelRegistry.refresh();
+			models = ctx.modelRegistry.getAvailable();
+		} catch {
+			// Keep the cached catalog when refresh fails.
+		}
+		const providers = [...new Set(models.map((m: any) => m.provider))].sort();
+		const providerChoice = await ctx.ui.select(
+			`${desc.label} — pick provider (or ${label} to clear)`,
+			[label, ...providers],
+		);
+		if (!providerChoice) return;
+		if (providerChoice === label) {
+			const layer = readLayer(scope, cwd, agentDir, sessionKey);
+			const paths = modelPaths(desc.role);
+			unsetPath(layer, paths.provider);
+			unsetPath(layer, paths.model);
+			await commitRpcWrite(ctx, scope, layer, cwd, agentDir, sessionKey, changedScopes);
+			return;
+		}
+		const providerModels = models
+			.filter((m: any) => m.provider === providerChoice)
+			.sort((a: any, b: any) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+		const modelLabels = providerModels.map((m: any) => m.id);
+		const modelChoice = await ctx.ui.select(
+			`${desc.label} — pick model (${providerChoice})`,
+			modelLabels,
+		);
+		if (!modelChoice) return;
+		const layer = readLayer(scope, cwd, agentDir, sessionKey);
+		const paths = modelPaths(desc.role);
+		setPath(layer, paths.provider, providerChoice);
+		setPath(layer, paths.model, modelChoice);
+		await commitRpcWrite(ctx, scope, layer, cwd, agentDir, sessionKey, changedScopes);
+		return;
+	}
+
+	// String: single-line input.
+	const layer = readLayer(scope, cwd, agentDir, sessionKey);
+	const raw = getPath(layer, desc.path);
+	const initial = raw === undefined ? "" : String(raw);
+	const value = await ctx.ui.input(desc.label, initial);
+	if (value === undefined) return;
+	const trimmed = value.trim();
+	if (trimmed === "") unsetPath(layer, desc.path);
+	else setPath(layer, desc.path, trimmed);
+	await commitRpcWrite(ctx, scope, layer, cwd, agentDir, sessionKey, changedScopes);
 }

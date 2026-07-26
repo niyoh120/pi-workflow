@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { getSessionKey, loadState, saveState, acquireDispatcherLock, releaseDispatcherLock } from "./state.js";
@@ -20,7 +20,8 @@ import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
 import { planDir } from "./paths.js";
-import { loadConfig } from "./config.js";
+import { loadConfigForContext, resolveConfigSources } from "./config.js";
+import { PASEO_VERIFIED_VERSION } from "./todo-compat.js";
 import {
 	setRole,
 	modeRole,
@@ -31,8 +32,9 @@ import {
 	deactivateWorkflowTools,
 	transitionWorkflowMode,
 	isWorkflowToolMode,
-	WORKFLOW_GATED_TOOLS,
+	workflowManagedToolNames,
 	computeWorkflowToolNames,
+	resolveTodoToolName,
 } from "./mode.js";
 import { execSync } from "node:child_process";
 import path from "node:path";
@@ -140,8 +142,15 @@ export function registerBeforeAgentStart(
 ): void {
 	pi.on("before_agent_start", async (event, ctx) => {
 		const sessionKey = ctxSessionKey(ctx);
-		const state = loadState(ctx.cwd, sessionKey);
-		const config = loadConfig(ctx.cwd, getAgentDir());
+		let state: WorkflowState;
+		let config;
+		try {
+			state = loadState(ctx.cwd, sessionKey);
+			config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
+		} catch (e) {
+			console.error(`[workflow] before_agent_start failed to load state/config: ${e instanceof Error ? e.message : e}`);
+			return { systemPrompt: event.systemPrompt };
+		}
 		const workflowActive =
 			(state.workflowEnabled || config.workflow.autoEnter) &&
 			!state.workflowExplicitlyDisabled;
@@ -179,11 +188,11 @@ export function registerBeforeAgentStart(
 			);
 		}
 		await setRole(pi, ctx, modeRole(state.mode), getAgentDir);
-		activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir, state.mode);
+		activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir, state.mode, ctx);
 
 		// Build stable system prompt: COMMON + Mode Prompt + worktree notice.
 		// No dynamic state (todos, run IDs) — those come from tool results.
-		const modeBody = buildModeMessageBody(state.mode, state);
+		const modeBody = buildModeMessageBody(state.mode, state, resolveTodoToolName(pi));
 		const systemPrompt = modeBody
 			? event.systemPrompt + "\n\n" + COMMON_PROMPT + "\n\n" + modeBody
 			: event.systemPrompt + "\n\n" + COMMON_PROMPT;
@@ -206,7 +215,7 @@ export function registerWorkflowContextInjection(
 		try {
 			const sessionKey = ctxSessionKey(ctx);
 			const state = loadState(ctx.cwd, sessionKey);
-			const config = loadConfig(ctx.cwd, getAgentDir());
+			const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
 			const workflowActive =
 				(state.workflowEnabled || config.workflow.autoEnter) &&
 				!state.workflowExplicitlyDisabled;
@@ -375,7 +384,7 @@ export async function runPendingWorkDispatcher(
 		try {
 			// Locked section: reload everything and recheck.
 			const state = loadState(ctx.cwd, sessionKey);
-			const config = loadConfig(ctx.cwd, getAgentDir());
+			const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
 			const workflowActive =
 				(state.workflowEnabled || config.workflow.autoEnter) &&
 				!state.workflowExplicitlyDisabled;
@@ -463,8 +472,15 @@ export function registerToolCallGuard(
 	// read-only workflows.
 	pi.on("tool_call", async (event, ctx) => {
 		const sessionKey = ctxSessionKey(ctx);
-		const state = loadState(ctx.cwd, sessionKey);
-		const config = loadConfig(ctx.cwd, getAgentDir());
+		let state: WorkflowState;
+		let config;
+		try {
+			state = loadState(ctx.cwd, sessionKey);
+			config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
+		} catch (e) {
+			console.error(`[workflow] tool_call guard failed to load state/config: ${e instanceof Error ? e.message : e}`);
+			return; // pass-through: don't block on internal error
+		}
 		const workflowActive =
 			(state.workflowEnabled || config.workflow.autoEnter) &&
 			!state.workflowExplicitlyDisabled;
@@ -472,9 +488,11 @@ export function registerToolCallGuard(
 		// Use per-turn effective guard mode; fall back to state mode.
 		const effectiveMode = getCurrentTurnGuardMode(sessionKey) ?? state.mode;
 
-		// Block workflow tool calls outside workflow-enabled implementation modes.
-		// This catches stale tool registrations and direct tool invocations.
-		if ((WORKFLOW_GATED_TOOLS as readonly string[]).includes(event.toolName)) {
+		// Block workflow-owned tool calls outside workflow-enabled implementation
+		// modes. update_plan participates only while its live sourceInfo proves
+		// ownership; an external tool with that name remains outside this guard.
+		const todoToolName = resolveTodoToolName(pi);
+		if (workflowManagedToolNames(pi).has(event.toolName)) {
 			if (!workflowActive) {
 				return {
 					block: true,
@@ -489,7 +507,7 @@ export function registerToolCallGuard(
 				};
 			}
 			if (
-				!computeWorkflowToolNames(effectiveMode, config).includes(
+				!computeWorkflowToolNames(effectiveMode, config, todoToolName).includes(
 					event.toolName,
 				)
 			) {
@@ -716,16 +734,16 @@ export function isWorkflowCommandsRegistered(): boolean {
 export function registerAllWorkflowCommands(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
-	cwd: string,
+	_cwd: string,
 ): void {
 	if (_workflowCommandsRegistered.has(pi)) return;
-
-	const config = loadConfig(cwd, getAgentDir());
 
 	registerExploreCommand(pi, getAgentDir);
 	registerPlanCommand(pi, getAgentDir);
 	registerWorkCommand(pi, getAgentDir);
-	if (config.codeReview.enabled) registerReviewCommand(pi, getAgentDir);
+	// Register the command definition unconditionally. The handler resolves
+	// codeReview.enabled with the real trusted session context before running.
+	registerReviewCommand(pi, getAgentDir);
 	registerCommitCommand(pi, getAgentDir);
 	registerWfStatusCommand(pi, getAgentDir);
 	registerWfResetCommand(pi);
@@ -900,7 +918,8 @@ export function registerReviewCommand(
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 
-			const config = loadConfig(ctx.cwd, getAgentDir());
+			const sessionKey = ctxSessionKey(ctx);
+			const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
 			if (!config.codeReview.enabled) {
 				ctx.ui.notify(
 					"Code review is not enabled. Set codeReview.enabled: true in config.",
@@ -909,14 +928,62 @@ export function registerReviewCommand(
 				return;
 			}
 
-			// Non-TUI mode: provide text-based instructions
-			if (ctx.mode !== "tui") {
-				ctx.ui.notify(
-					"Code review requires interactive mode (TUI). " +
-						"In RPC/JSON/print mode, please use workflow_code_review tool directly. " +
-						"Parameters: scope (workspace|range|commit), background, from, to, commit, preview.",
-					"info",
+			// JSON/print: no UI surface; stderr keeps stdout protocol/print output clean.
+			if (ctx.mode === "json" || ctx.mode === "print") {
+				console.error(
+					"workflow review: /review requires interactive mode (TUI/RPC). " +
+						"In JSON/print mode, call workflow_code_review directly: " +
+						"scope (workspace|range|commit), background, from, to, commit, preview.",
 				);
+				return;
+			}
+
+			// RPC mode: basic-dialog wizard (select scope, input refs).
+			if (ctx.mode === "rpc") {
+				const scopeKind = await ctx.ui.select(
+					"Review Scope — pick what to review",
+					["workspace", "range", "commit"],
+				);
+				if (!scopeKind) {
+					ctx.ui.notify("Review cancelled: no scope selected.", "info");
+					return;
+				}
+
+				let from: string | undefined;
+				let to: string | undefined;
+				let commit: string | undefined;
+
+				if (scopeKind === "range") {
+					from = await rpcReadNonEmptyRef(ctx, "From ref");
+					if (from === undefined) return;
+					if (!from) {
+						ctx.ui.notify("Review cancelled: from ref cannot be empty.", "info");
+						return;
+					}
+					to = await rpcReadNonEmptyRef(ctx, "To ref");
+					if (to === undefined) return;
+					if (!to) {
+						ctx.ui.notify("Review cancelled: to ref cannot be empty.", "info");
+						return;
+					}
+				}
+
+				if (scopeKind === "commit") {
+					commit = await rpcReadNonEmptyRef(ctx, "Commit hash");
+					if (commit === undefined) return;
+					if (!commit) {
+						ctx.ui.notify("Review cancelled: commit hash cannot be empty.", "info");
+						return;
+					}
+				}
+
+				if (scopeKind !== "workspace" && scopeKind !== "range" && scopeKind !== "commit") {
+					ctx.ui.notify(`Review cancelled: unknown scope "${scopeKind}".`, "error");
+					return;
+				}
+
+				// Hand off to the same worktree/transition/kickoff path as TUI.
+				await startReviewLoop(pi, ctx, getAgentDir, sessionKey, { scopeKind, from, to, commit });
 				return;
 			}
 
@@ -977,57 +1044,74 @@ export function registerReviewCommand(
 				}
 			}
 
-			// 3. Move the next agent turn into Work runtime so the review loop can
-			// call workflow_code_review, edit files, and run tests when fixes are needed.
-			const sessionKey = ctxSessionKey(ctx);
-			const current = loadState(ctx.cwd, sessionKey);
-			if (current.worktreePath) {
-				const validation = validateWorktreeState(ctx.cwd, current);
-				if (!validation.ok) {
-					ctx.ui.notify(
-						`Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
-						"error",
-					);
-					return;
-				}
-			}
-			const state: WorkflowState = {
-				...current,
-				mode: "work",
-				workRunId: current.workRunId ?? crypto.randomUUID(),
-			};
-			const result = await transitionWorkflowMode({
-				pi,
-				ctx,
-				sessionKey,
-				nextState: state,
-				getAgentDir,
-			});
-			if (!result.ok) {
-				ctx.ui.notify(result.reason, "error");
-				return;
-			}
+			// Hand off to the shared review-loop kickoff (worktree/transition/prompt).
+			await startReviewLoop(pi, ctx, getAgentDir, sessionKey, { scopeKind, from, to, commit });
+			return;
+		},
+	});
+}
 
-			// 4. Build prompt instructing the model to run the full review/fix loop.
-			let scopeDescription: string;
-			let toolArguments: string;
-			switch (scopeKind) {
-				case "workspace":
-					scopeDescription =
-						"workspace (unstaged + staged + untracked changes)";
-					toolArguments = 'scope="workspace"';
-					break;
-				case "range":
-					scopeDescription = `range from=${from} to=${to}`;
-					toolArguments = `scope="range", from=${JSON.stringify(from)}, to=${JSON.stringify(to)}`;
-					break;
-				case "commit":
-					scopeDescription = `commit=${commit}`;
-					toolArguments = `scope="commit", commit=${JSON.stringify(commit)}`;
-					break;
-			}
+/**
+ * Shared review-loop kickoff for TUI and RPC. Validates the worktree, moves
+ * the next agent turn into Work runtime, and sends the review/fix/re-review
+ * prompt. `scope` carries the chosen kind and any refs.
+ */
+async function startReviewLoop(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	getAgentDir: () => string,
+	sessionKey: string,
+	scope: { scopeKind: ReviewScope["kind"]; from?: string; to?: string; commit?: string },
+): Promise<void> {
+	const current = loadState(ctx.cwd, sessionKey);
+	if (current.worktreePath) {
+		const validation = validateWorktreeState(ctx.cwd, current);
+		if (!validation.ok) {
+			ctx.ui.notify(
+				`Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
+				"error",
+			);
+			return;
+		}
+	}
+	const state: WorkflowState = {
+		...current,
+		mode: "work",
+		workRunId: current.workRunId ?? crypto.randomUUID(),
+	};
+	const result = await transitionWorkflowMode({
+		pi,
+		ctx,
+		sessionKey,
+		nextState: state,
+		getAgentDir,
+	});
+	if (!result.ok) {
+		ctx.ui.notify(result.reason, "error");
+		return;
+	}
 
-			const promptText = `请执行 code review 循环。
+	let scopeDescription: string;
+	let toolArguments: string;
+	switch (scope.scopeKind) {
+		case "workspace":
+			scopeDescription = "workspace (unstaged + staged + untracked changes)";
+			toolArguments = 'scope="workspace"';
+			break;
+		case "range":
+			scopeDescription = `range from=${scope.from} to=${scope.to}`;
+			toolArguments = `scope="range", from=${JSON.stringify(scope.from)}, to=${JSON.stringify(scope.to)}`;
+			break;
+		case "commit":
+			scopeDescription = `commit=${scope.commit}`;
+			toolArguments = `scope="commit", commit=${JSON.stringify(scope.commit)}`;
+			break;
+		default:
+			ctx.ui.notify(`Unhandled review scope: ${scope.scopeKind}`, "error");
+			return;
+	}
+
+	const promptText = `请执行 code review 循环。
 
 Review scope: ${scopeDescription}
 
@@ -1039,15 +1123,30 @@ Review scope: ${scopeDescription}
 5. 如果你判断某个 reviewer 问题是误判、超出范围、投入产出比不合理或与项目约束冲突，在下一轮 background 中说明技术理由。
 6. 第一轮 review 已经没有 Critical/Important 问题时，可以结束循环。2-3 轮后仍存在分歧时，停止并交给用户裁决。
 7. Minor 问题按价值选择处理，不能阻塞 review 通过。`;
-			const fullPromptText = [worktreeRuntimeNotice(state), promptText]
-				.filter(Boolean)
-				.join("\n\n");
+	const fullPromptText = [worktreeRuntimeNotice(state), promptText]
+		.filter(Boolean)
+		.join("\n\n");
 
-			ctx.ui.notify(`Starting code review loop: ${scopeDescription}.`, "info");
-			pi.setSessionName(`review: ${scopeKind}`);
-			pi.sendUserMessage(fullPromptText);
-		},
-	});
+	ctx.ui.notify(`Starting code review loop: ${scopeDescription}.`, "info");
+	pi.setSessionName(`review: ${scope.scopeKind}`);
+	pi.sendUserMessage(fullPromptText);
+}
+
+/**
+ * Read a non-empty git ref via RPC input. Returns the trimmed value, "" for
+ * an empty submit (caller treats as cancel), or undefined when the user
+ * cancels the input dialog. Re-prompts once on empty input so users do not
+ * lose the whole wizard on an accidental blank Enter.
+ */
+async function rpcReadNonEmptyRef(ctx: ExtensionCommandContext, label: string): Promise<string | undefined> {
+	const first = await ctx.ui.input(label, "");
+	if (first === undefined) return undefined; // user cancelled
+	const trimmed = first.trim();
+	if (trimmed) return trimmed;
+	// Empty submit: re-prompt once with a clearer placeholder.
+	const second = await ctx.ui.input(`${label} (required — press Esc to cancel)`, "");
+	if (second === undefined) return undefined;
+	return second.trim();
 }
 
 export function registerCommitCommand(
@@ -1108,10 +1207,10 @@ export function registerCommitCommand(
 
 export function registerWfStatusCommand(
 	pi: ExtensionAPI,
-	_getAgentDir: () => string,
+	getAgentDir: () => string,
 ): void {
 	pi.registerCommand("wf-status", {
-		description: "显示当前轻量 workflow 状态",
+		description: "显示当前轻量 workflow 状态、有效配置与来源",
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 			const sessionKey = ctxSessionKey(ctx);
@@ -1123,6 +1222,57 @@ export function registerWfStatusCommand(
 				const validation = validateWorktreeState(ctx.cwd, state);
 				msg += `\n\nworktreeValidation: ${validation.ok ? "ok" : validation.reason}`;
 				msg += `\nworktreeStatus:\n${gitStatusInWorktree(state.worktreePath)}`;
+			}
+
+			// Effective config + per-leaf source attribution + project trust.
+			let report: ReturnType<typeof resolveConfigSources>;
+			try {
+				report = resolveConfigSources(
+					ctx.cwd,
+					getAgentDir(),
+					sessionKey,
+					ctx,
+				);
+			} catch (e: unknown) {
+				const errMsg = `wf-status: failed to resolve config sources: ${e instanceof Error ? e.message : String(e)}`;
+				if (ctx.mode === "json" || ctx.mode === "print") {
+					console.error(errMsg);
+					return;
+				}
+				ctx.ui.notify(errMsg, "error");
+				return;
+			}
+			const role = state.mode ? modeRole(state.mode) : "explore";
+			const eff = report.effective;
+			const roleSpec = eff.models[role as keyof typeof eff.models];
+			msg += `\n\n# Effective Config`;
+			msg += `\nprojectConfig: ${report.projectSkipped ? "skipped (untrusted)" : "active"}`;
+			msg += `\nrole: ${role}`;
+			msg += `\nmodel: ${roleSpec ? `${roleSpec.provider}/${roleSpec.model}` : "(none)"}`;
+			msg += `\nthinking: ${roleSpec?.thinking ?? "(none)"}`;
+			msg += `\nworkflow.autoEnter: ${eff.workflow.autoEnter} (source: ${report.sources["workflow.autoEnter"]})`;
+			msg += `\nplanReview.enabled: ${eff.planReview.enabled} (source: ${report.sources["planReview.enabled"]})`;
+			msg += `\ncodeReview.enabled: ${eff.codeReview.enabled} (source: ${report.sources["codeReview.enabled"]})`;
+			for (const r of ["explore", "plan", "planReview", "work", "commit"] as const) {
+				const spec = eff.models[r];
+				if (!spec) continue;
+				msg += `\nmodels.${r}: ${spec.provider}/${spec.model} / ${spec.thinking ?? "(none)"}`;
+				msg += ` (provider: ${report.sources[`models.${r}.provider`]}, model: ${report.sources[`models.${r}.model`]}, thinking: ${report.sources[`models.${r}.thinking`]})`;
+			}
+
+			// Active todo tool + alias ownership (RPC compatibility status).
+			const todoTool = resolveTodoToolName(pi);
+			msg += `\n\ntodoTool: ${todoTool}`;
+			if (todoTool === "update_plan") {
+				msg += ` (Paseo native TodoListCard; verified Paseo ${PASEO_VERIFIED_VERSION})`;
+			} else if (ctx.mode === "rpc") {
+				msg += ` (workflow_todo; update_plan alias unavailable — external collision or not registered)`;
+			}
+
+			// JSON/print: no UI surface; stderr keeps stdout protocol/print clean.
+			if (ctx.mode === "json" || ctx.mode === "print") {
+				console.error(msg);
+				return;
 			}
 			ctx.ui.notify(msg, "info");
 		},

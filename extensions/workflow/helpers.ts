@@ -163,8 +163,9 @@ export function worktreeRuntimeNotice(state: WorkflowState): string {
 export function buildModeMessageBody(
 	mode: Mode,
 	state: WorkflowState,
+	todoToolName: "workflow_todo" | "update_plan" = "workflow_todo",
 ): string | undefined {
-	const modePrompt = promptForMode(mode);
+	const modePrompt = promptForMode(mode, todoToolName);
 	if (!modePrompt) return undefined;
 
 	return [modePrompt, worktreeRuntimeNotice(state)]
