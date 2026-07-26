@@ -13,6 +13,9 @@ export interface BranchEntry {
 	type: string;
 	id?: string;
 	customType?: string;
+	/** CustomEntry.data — approval journal payload lives here. */
+	data?: unknown;
+	/** CustomMessageEntry.details — handoff marker metadata lives here. */
 	details?: unknown;
 	timestamp?: string;
 	message?: { role?: string; content?: unknown; toolCallId?: string };
@@ -65,7 +68,8 @@ export function findApprovalJournalIndex(
 		const e = entries[i];
 		if (e.type !== "custom") continue;
 		if (e.customType !== WORK_APPROVAL_CUSTOM_TYPE) continue;
-		const data = e.details as ApprovalJournalData | undefined;
+		// pi.appendEntry stores the payload as CustomEntry.data, not details.
+		const data = e.data as ApprovalJournalData | undefined;
 		if (data?.workRunId === workRunId) return i;
 	}
 	return -1;
@@ -158,7 +162,7 @@ function resolveHandoff(
 	if (!branch || !state.workRunId) return undefined;
 	const journalIdx = findApprovalJournalIndex(branch, state.workRunId);
 	if (journalIdx === -1) return undefined;
-	const data = branch[journalIdx].details as ApprovalJournalData | undefined;
+	const data = branch[journalIdx].data as ApprovalJournalData | undefined;
 	if (!data?.handoffBody) return undefined;
 	return { handoffBody: data.handoffBody, workRunId: state.workRunId };
 }

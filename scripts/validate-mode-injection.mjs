@@ -14,6 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 const root = process.cwd();
 
@@ -219,11 +220,39 @@ assert(
 	workContext.includes("DispatcherPorts"),
 	"work-context defines DispatcherPorts interface",
 );
+assert(
+	workContext.includes("data?: unknown"),
+	"BranchEntry declares data field for CustomEntry payload",
+);
+assert(
+	/e\.data as ApprovalJournalData/.test(workContext),
+	"findApprovalJournalIndex reads approval journal from entry.data",
+);
+assert(
+	/branch\[journalIdx\]\.data as ApprovalJournalData/.test(workContext),
+	"resolveHandoff reads approval journal from entry.data",
+);
+assert(
+	!/e\.details as ApprovalJournalData/.test(workContext),
+	"work-context does NOT read approval journal from entry.details",
+);
+assert(
+	!/branch\[journalIdx\]\.details as ApprovalJournalData/.test(workContext),
+	"resolveHandoff does NOT read approval journal from entry.details",
+);
 
 // ── tools.ts: approval journal + pending + terminate ───────────────────────
 assert(
 	/pi\.appendEntry\(WORK_APPROVAL_CUSTOM_TYPE/.test(tools),
 	"approval writes journal via pi.appendEntry",
+);
+assert(
+	/journalEntry as any\)\.data as/.test(commands),
+	"context handler reads journal handoffBody from entry.data",
+);
+assert(
+	!/journalEntry as any\)\.details as/.test(commands),
+	"context handler does NOT read journal handoffBody from entry.details",
 );
 assert(
 	/pendingWorkKickoff: workRunId/.test(tools),
@@ -310,6 +339,32 @@ for (const file of [
 		!/import\s*\{[^}]*\bloadConfigForSession\b[^}]*\}\s*from/.test(src) &&
 			!/import\s*\{[^}]*\bloadConfigIfTrusted\b[^}]*\}\s*from/.test(src),
 		`${file} has no legacy loadConfigForSession/loadConfigIfTrusted imports`,
+	);
+}
+
+// ── runtime entry shape: appendCustomEntry stores payload in .data ───────
+// Regression for the bug where approval journal was read from .details.
+// SessionManager.inMemory() bypasses disk so this runs in any environment.
+{
+	const sm = SessionManager.inMemory("/tmp/pi-workflow-validate-injection");
+	const payload = { workRunId: "run-1", handoffBody: "handoff" };
+	const id = sm.appendCustomEntry("workflow-work-approval", payload);
+	const entry = sm.getEntry(id);
+	assert(entry && entry.type === "custom", "appendCustomEntry creates a custom entry");
+	assert(
+		entry && "data" in entry && (entry).data === payload,
+		"appendCustomEntry stores payload as CustomEntry.data",
+	);
+	assert(
+		entry && !("details" in entry),
+		"appendCustomEntry does NOT store payload as details",
+	);
+	const branch = sm.getBranch();
+	assert(
+		Array.isArray(branch) && branch.some(
+			(e) => e.type === "custom" && (e).data === payload,
+		),
+		"getBranch exposes the approval journal with .data payload",
 	);
 }
 

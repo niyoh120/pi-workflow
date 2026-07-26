@@ -291,7 +291,7 @@ export function registerWorkflowContextInjection(
 						// Journal exists but no marker — pending dispatcher will
 						// handle. Use journal handoffBody as ephemeral head.
 						const journalEntry = branch[journalIdx];
-						const journalData = (journalEntry as any).details as
+						const journalData = (journalEntry as any).data as
 							| { handoffBody?: string }
 							| undefined;
 						if (journalData?.handoffBody) {
