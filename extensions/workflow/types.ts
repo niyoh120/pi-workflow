@@ -69,6 +69,48 @@ export interface WorkflowConfig {
 	};
 }
 
+// ── OCR normalized finding/result types (cross-module) ─────────────────────
+
+/** Severity bucket for display ordering; preserves unknown values. */
+export type OcrSeverity = "critical" | "high" | "medium" | "low" | "info" | (string & {});
+
+/** A single normalized OCR finding. `existingCode` is dropped from the
+ *  model-visible view (it duplicates repo source); kept only in raw JSON. */
+export interface OcrFinding {
+	/** Stable fingerprint-based id (sha1 of normalized identity). */
+	id: string;
+	severity: OcrSeverity;
+	/** Model-generated rule/category, e.g. bug, security. Preserved verbatim. */
+	rule: string;
+	file: string;
+	/** 1-based start line; undefined when absent. */
+	line?: number;
+	/** 1-based end line (inclusive); undefined when absent. */
+	endLine?: number;
+	message: string;
+	/** Proposed fix from the reviewer; omitted when empty. */
+	suggestion?: string;
+}
+
+/** Compact review result sent to the model (content) and tools (details). */
+export interface OcrReviewResult {
+	status: string;
+	/** Present on the no-comments success path. */
+	message?: string;
+	/** Absolute path to the saved raw JSON file. */
+	rawPath: string;
+	findings: OcrFinding[];
+	/** Per-severity counts (keys are the observed severity strings). */
+	counts: Record<string, number>;
+	/** Files reviewed + token usage from summary, when present. */
+	stats?: {
+		filesReviewed?: number;
+		totalTokens?: number;
+		elapsed?: string;
+	};
+	sessionId?: string;
+}
+
 export interface WorkflowState {
 	/** Whether workflow commands/tools are enabled for this session. */
 	workflowEnabled: boolean;

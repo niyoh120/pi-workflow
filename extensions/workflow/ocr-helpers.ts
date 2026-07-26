@@ -25,8 +25,10 @@ export type ReviewScopeKind = "workspace" | "range" | "commit";
 
 /**
  * Build the full argv array for `ocr review`.
- * Always includes --audience agent. Adds --background when non-empty.
- * Appends scope flags for range/commit; workspace needs no scope flags.
+ * Always includes `--audience agent` and `--format json` so the model-visible
+ * result can be parsed and compacted by ocr-result.ts. Adds `--background`
+ * when non-empty. Appends scope flags for range/commit; workspace needs no
+ * scope flags.
  */
 export function buildReviewArgv(
   background: string,
@@ -36,7 +38,7 @@ export function buildReviewArgv(
   commit?: string,
   preview?: boolean,
 ): string[] {
-  const argv = ["review", "--audience", "agent"];
+  const argv = ["review", "--audience", "agent", "--format", "json"];
 
   if (background) {
     argv.push("--background", background);

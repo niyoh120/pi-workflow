@@ -58,7 +58,7 @@ function inlineLoadState(wfDir, sessionKey) {
 }
 
 function inlineIsWorkflowToolMode(mode) {
-	return mode === "plan" || mode === "work" || mode === "init" || mode === "explore";
+	return mode === "plan" || mode === "work" || mode === "init";
 }
 
 function inlineComputeWorkflowToolNames(mode, config) {
@@ -75,12 +75,12 @@ function inlineComputeWorkflowToolNames(mode, config) {
 			return names;
 		}
 		case "work": {
-			const names = ["workflow_todo", "workflow_plan_read"];
+			const names = ["workflow_todo"];
 			if (config.codeReview.enabled) names.push("workflow_code_review");
 			return names;
 		}
 		case "explore":
-			return ["workflow_plan_read"];
+			return [];
 		case "init":
 			return ["workflow_init_complete"];
 		default:
@@ -1275,35 +1275,37 @@ console.log("\n=== Check 14: Explore mode ===");
 		codeReview: { enabled: false },
 	};
 	assert(
-		inlineComputeWorkflowToolNames("explore", cfgAllReviewTools).join(",") ===
-			"workflow_plan_read" &&
+		inlineComputeWorkflowToolNames("explore", cfgAllReviewTools).length === 0 &&
 			inlineComputeWorkflowToolNames("idle", cfgAllReviewTools).length === 0,
-		"inline runtime: explore exposes workflow_plan_read; idle exposes none",
+		"inline runtime: explore exposes no workflow tools; idle exposes none",
 	);
 	assert(
 		inlineComputeWorkflowToolNames("plan", cfgAllReviewTools).join(",") ===
 			"workflow_todo,workflow_plan_read,workflow_plan_save,workflow_plan_approve,workflow_plan_clear,workflow_plan_review" &&
 			inlineComputeWorkflowToolNames("work", cfgAllReviewTools).join(",") ===
-				"workflow_todo,workflow_plan_read,workflow_code_review" &&
+				"workflow_todo,workflow_code_review" &&
 			inlineComputeWorkflowToolNames("work", cfgNoReviewTools).join(",") ===
-				"workflow_todo,workflow_plan_read" &&
+				"workflow_todo" &&
 			inlineComputeWorkflowToolNames("commit", cfgAllReviewTools).length === 0,
-		"inline runtime: plan/work expose workflow tools; commit exposes none",
+		"inline runtime: plan exposes plan tools; work exposes todo (+optional review); commit exposes none",
 	);
 	assert(
-		/export function isWorkflowToolMode\([\s\S]*?mode === "plan"[\s\S]*?mode === "work"[\s\S]*?mode === "explore"/.test(
+		/export function isWorkflowToolMode\([\s\S]*?mode === "plan"[\s\S]*?mode === "work"[\s\S]*?mode === "init"/.test(
 			modeTs14,
 		) &&
+			!/export function isWorkflowToolMode\([\s\S]*?mode === "explore"/.test(
+				modeTs14,
+			) &&
 			!/export function isWorkflowToolMode\([\s\S]*?mode === "commit"/.test(
 				modeTs14,
 			),
-		"mode.ts: isWorkflowToolMode allow-list is plan/work/explore",
+		"mode.ts: isWorkflowToolMode allow-list is plan/work/init (explore excluded)",
 	);
 	assert(
-		/const PLAN_WORKFLOW_TOOL_NAMES[\s\S]*?workflow_plan_save[\s\S]*?const WORK_WORKFLOW_TOOL_NAMES[\s\S]*?workflow_plan_read[\s\S]*?export function computeWorkflowToolNames[\s\S]*?config\.planReview\.enabled[\s\S]*?config\.codeReview\.enabled[\s\S]*?return \[\]/.test(
+		/const PLAN_WORKFLOW_TOOL_NAMES[\s\S]*?workflow_plan_save[\s\S]*?const WORK_WORKFLOW_TOOL_NAMES[\s\S]*?export function computeWorkflowToolNames[\s\S]*?config\.planReview\.enabled[\s\S]*?config\.codeReview\.enabled[\s\S]*?return \[\]/.test(
 			modeTs14,
 		),
-		"mode.ts: computeWorkflowToolNames mirrors mode-specific runtime behavior",
+		"mode.ts: computeWorkflowToolNames mirrors mode-specific runtime behavior (work has no plan_read)",
 	);
 	const expectedWorkflowTools = [
 		"workflow_todo",
@@ -1603,10 +1605,72 @@ function validateInitModeStatic() {
 	const initTools = inlineComputeWorkflowToolNames("init", { planReview: { enabled: true }, codeReview: { enabled: true } });
 	assert(JSON.stringify(initTools) === JSON.stringify(["workflow_init_complete"]), "inline runtime: init exposes only workflow_init_complete");
 	assert(inlineIsWorkflowToolMode("init") === true, "inline runtime: init is a workflow-tool mode");
-	assert(inlineIsWorkflowToolMode("explore") === true, "inline runtime: explore is a workflow-tool mode");
+	assert(inlineIsWorkflowToolMode("explore") === false, "inline runtime: explore is no longer a workflow-tool mode");
 	assert(inlineIsWorkflowToolMode("idle") === false, "inline runtime: idle is not a workflow-tool mode");
 }
 validateInitModeStatic();
+
+// ═══ Check 17: Todo delta/snapshot + grilling batch ═══
+console.log("\n=== Check 17: todo delta/snapshot + grilling batch ===");
+{
+	const helpersTs = fs.readFileSync(path.join(CWD, "extensions/workflow/helpers.ts"), "utf8");
+	const toolsTs = fs.readFileSync(path.join(CWD, "extensions/workflow/tools.ts"), "utf8");
+	const promptsTs = fs.readFileSync(path.join(CWD, "extensions/workflow/prompts.ts"), "utf8");
+
+	// helpers.ts exports delta/snapshot formatters and next-todo helper.
+	assert(/export function todoDeltaText/.test(helpersTs), "helpers.ts exports todoDeltaText");
+	assert(/export function todoSnapshotText/.test(helpersTs), "helpers.ts exports todoSnapshotText");
+	assert(/export function nextTodo/.test(helpersTs), "helpers.ts exports nextTodo");
+	assert(/export function todoStatusCounts/.test(helpersTs), "helpers.ts exports todoStatusCounts");
+	assert(helpersTs.includes("[todo delta]"), "todoDeltaText marks output as delta");
+	assert(helpersTs.includes("[todo snapshot]"), "todoSnapshotText marks output as snapshot");
+
+	// workflow_todo: list returns snapshot, reset/add/set return delta.
+	const todoToolStart = toolsTs.indexOf("export function registerTodoTool");
+	const todoToolEnd = toolsTs.indexOf("export function registerUpdatePlanTool", todoToolStart);
+	assert(todoToolStart >= 0 && todoToolEnd > todoToolStart, "tools.ts: todo tool block anchors exist");
+	const todoBlock = toolsTs.slice(todoToolStart, todoToolEnd);
+	assert(todoBlock.includes('action === "list"'), "workflow_todo handles list action");
+	assert(todoBlock.includes("todoSnapshotText(state)"), "workflow_todo list returns snapshot");
+	assert(todoBlock.includes("todoDeltaText(state"), "workflow_todo mutation returns delta");
+	// Guard the add-path diff logic (changedId is found post-add; isAdd flag
+	// distinguishes add from change; before-set captures the added item).
+	assert(todoBlock.includes("new Set(state.todos.map") && todoBlock.includes("deltaIsAdd"), "workflow_todo add captures before-set + isAdd flag for delta diff");
+	assert(todoBlock.includes("details: { todos: state.todos }"), "workflow_todo keeps full todos in details");
+
+	// update_plan: read returns snapshot, replace returns delta.
+	const upStart = toolsTs.indexOf("export function registerUpdatePlanTool");
+	const upEnd = toolsTs.indexOf("// ── workflow plan tools", upStart);
+	assert(upStart >= 0 && upEnd > upStart, "tools.ts: update_plan block anchors exist");
+	const upBlock = toolsTs.slice(upStart, upEnd);
+	assert(upBlock.includes("todoSnapshotText(state)"), "update_plan read returns snapshot");
+	assert(upBlock.includes("todoDeltaText(state)"), "update_plan replace returns delta");
+	assert(upBlock.includes("details: { todos: state.todos }"), "update_plan keeps full todos in details");
+
+	// Grilling: batch decisions schema + prepareGrillArguments legacy compat.
+	const grillStart = toolsTs.indexOf("// ── workflow_grill_record tool");
+	const grillEnd = toolsTs.indexOf("// ── workflow_plan_review tool", grillStart);
+	assert(grillStart >= 0 && grillEnd > grillStart, "tools.ts: grill block anchors exist");
+	const grillBlock = toolsTs.slice(grillStart, grillEnd);
+	assert(grillBlock.includes("const GrillDecisionSchema"), "grill defines GrillDecisionSchema");
+	assert(/decisions: Type\.Optional\(Type\.Array\(GrillDecisionSchema/.test(grillBlock), "grill parameters accept decisions[] batch");
+	assert(grillBlock.includes("function prepareGrillArguments"), "grill has prepareGrillArguments");
+	// Legacy single-field shape is accepted and converted.
+	assert(/question: Type\.Optional\(Type\.String\(\)\)/.test(grillBlock), "grill keeps legacy optional question field");
+	assert(/recommendedAnswer: Type\.Optional\(Type\.String\(\)\)/.test(grillBlock), "grill keeps legacy optional recommendedAnswer field");
+	assert(/decisionStatus: Type\.Optional\(GrillDecisionStatusSchema\)/.test(grillBlock), "grill keeps legacy optional decisionStatus field");
+	// Both shapes persist into grillTurns.
+	assert(grillBlock.includes("state.grillTurns.push"), "grill persists into grillTurns");
+	// Compact result: only count + total in content; full grillTurns in details.
+	assert(/Recorded \$\{decisions\.length\} grill decision/.test(grillBlock), "grill content reports batch count");
+	assert(/Total: \$\{state\.grillTurns\.length\}/.test(grillBlock), "grill content reports running total");
+	assert(/details: \{ recorded: decisions\.length, count: state\.grillTurns\.length, grillTurns: state\.grillTurns \}/.test(grillBlock), "grill details keep full grillTurns");
+
+	// Plan prompt: grilling protocol uses batch decisions.
+	assert(/workflow_grill_record\(decisions=\[/.test(promptsTs), "plan prompt instructs batch decisions via workflow_grill_record(decisions=[...])");
+	// Work prompt: snapshot read uses action="list".
+	assert(/workflow_todo\(action="list"\) 读取状态/.test(promptsTs), "work prompt reads todo snapshot via action=list");
+}
 
 // ═══ Check 16: Paseo update_plan compatibility contract ═══
 console.log("\n=== Check 16: Paseo update_plan compatibility ===");

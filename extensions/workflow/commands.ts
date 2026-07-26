@@ -14,7 +14,6 @@ import {
 	buildModeMessageBody,
 	currentStatusText,
 	WORK_HANDOFF_CUSTOM_TYPE,
-	worktreeRuntimeNotice,
 } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
@@ -311,11 +310,29 @@ export function registerWorkflowContextInjection(
 					}
 				}
 
-				// Full fail-open: keep original messages, log degradation.
+				// Full fail-open: marker/journal unavailable or pairing broken.
+				// Inject a hidden recovery warning so the model stops execution,
+				// blocks the current todo, and asks the user to run /plan —
+				// rather than silently continuing without the plan contract.
 				console.error(
 					"[workflow] work context isolation fail-open: marker/journal unavailable or pairing broken",
 				);
-				return { messages };
+				const recoveryWarning =
+					"# Approved-Plan Work Recovery Warning\n\n" +
+					"计划恢复失败：handoff marker 与 approval journal 均不可用或配对失效。\n" +
+					"立即停止执行：将当前 workflow_todo 标记为 blocked，不要继续修改文件，\n" +
+					"并向用户报告冲突，请用户执行 /plan 修订计划。不要自行切换模式或调用 workflow_plan_save。";
+				return {
+					messages: [
+						{
+							role: "user" as const,
+							content: recoveryWarning,
+							display: false,
+							timestamp: Date.now(),
+						},
+						...messages,
+					],
+				};
 			}
 
 			// Step 3: Direct Work / other modes — clean old handoff messages.
@@ -898,9 +915,10 @@ export function registerWorkCommand(
 
 			ctx.ui.notify("已进入 Work Mode。可以直接描述任务。", "info");
 
-			const notice = worktreeRuntimeNotice(result.state);
-			if (workArgs || notice) {
-				pi.sendUserMessage([notice, workArgs].filter(Boolean).join("\n\n"));
+			// Worktree notice is injected into the stable system prompt by
+			// buildModeMessageBody; do not repeat it in the kickoff message.
+			if (workArgs) {
+				pi.sendUserMessage(workArgs);
 			}
 		},
 	});
@@ -1123,13 +1141,9 @@ Review scope: ${scopeDescription}
 5. 如果你判断某个 reviewer 问题是误判、超出范围、投入产出比不合理或与项目约束冲突，在下一轮 background 中说明技术理由。
 6. 第一轮 review 已经没有 Critical/Important 问题时，可以结束循环。2-3 轮后仍存在分歧时，停止并交给用户裁决。
 7. Minor 问题按价值选择处理，不能阻塞 review 通过。`;
-	const fullPromptText = [worktreeRuntimeNotice(state), promptText]
-		.filter(Boolean)
-		.join("\n\n");
-
 	ctx.ui.notify(`Starting code review loop: ${scopeDescription}.`, "info");
 	pi.setSessionName(`review: ${scope.scopeKind}`);
-	pi.sendUserMessage(fullPromptText);
+	pi.sendUserMessage(promptText);
 }
 
 /**
@@ -1194,12 +1208,7 @@ export function registerCommitCommand(
 				: "";
 
 			pi.sendUserMessage(
-				[
-					worktreeRuntimeNotice(state),
-					`请查看当前 diff，生成合适的 commit message，并直接执行 git add 和 git commit。${extra}`,
-				]
-					.filter(Boolean)
-					.join("\n\n"),
+				`请查看当前 diff，生成合适的 commit message，并直接执行 git add 和 git commit。${extra}`,
 			);
 		},
 	});

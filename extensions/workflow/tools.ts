@@ -12,7 +12,7 @@ import {
 	readPlan,
 } from "./state.js";
 import { loadConfigForContext } from "./config.js";
-import { todoText } from "./helpers.js";
+import { todoDeltaText, todoSnapshotText } from "./helpers.js";
 import {
 	createWorktree,
 	deleteWorktreeBranch,
@@ -30,7 +30,7 @@ import {
 	markAliasRegistered,
 	toolFingerprint,
 } from "./todo-compat.js";
-import type { WorkflowState } from "./types.js";
+import type { TodoStatus, WorkflowState } from "./types.js";
 import { executePlanReviewSidecall } from "./sidecall.js";
 import { transitionWorkflowMode } from "./mode.js";
 import {
@@ -48,6 +48,12 @@ import {
 	runOcrReview,
 	type ReviewScopeKind,
 } from "./ocr-helpers.js";
+import {
+	parseOcrReviewJson,
+	compactReviewText,
+	compactPreviewText,
+	OcrParseError,
+} from "./ocr-result.js";
 
 function cleanupCreatedWorktree(cwd: string, worktreePath: string, branch: string): void {
 	try {
@@ -173,6 +179,19 @@ export function registerTodoTool(
 			const sessionKey = getSessionKey(ctx.sessionManager);
 			const state = loadState(ctx.cwd, sessionKey);
 
+			// Explicit read: return a full snapshot (clearly marked). No mutation.
+			if (params.action === "list") {
+				return {
+					content: [{ type: "text", text: todoSnapshotText(state) }],
+					details: { todos: state.todos },
+				};
+			}
+
+			let changedId: string | undefined;
+			let changedTitle: string | undefined;
+			let changedStatus: TodoStatus | undefined;
+			let deltaIsAdd = false;
+
 			if (params.action === "reset") {
 				const overlay = getWorkflowOverlay();
 				if (overlay) overlay.clearBookkeeping();
@@ -181,6 +200,11 @@ export function registerTodoTool(
 					kind: "reset",
 					items: params.items,
 				});
+				// reset replaces the whole list; report first item as the next delta.
+				const first = state.todos[0];
+				changedId = first?.id;
+				changedTitle = first?.title;
+				changedStatus = first?.status;
 			}
 
 			if (params.action === "add") {
@@ -188,6 +212,7 @@ export function registerTodoTool(
 					throw new Error("workflow_todo add requires title.");
 				}
 
+				const before = new Set(state.todos.map((t) => t.id));
 				state.todos = applyTodoAction(state.todos, {
 					kind: "add",
 					id: params.id,
@@ -195,6 +220,12 @@ export function registerTodoTool(
 					status: params.status,
 					notes: params.notes,
 				});
+				const added = state.todos.find((t) => !before.has(t.id));
+				changedId = added?.id;
+				changedTitle = params.title;
+				changedStatus = params.status as TodoStatus | undefined;
+				// Signal to todoDeltaText that this is an add (label "added", not "changed").
+				deltaIsAdd = true;
 			}
 
 			if (params.action === "set") {
@@ -213,6 +244,7 @@ export function registerTodoTool(
 					status: params.status,
 					notes: params.notes,
 				});
+				changedId = params.id;
 			}
 
 			saveState(ctx.cwd, sessionKey, state);
@@ -221,7 +253,7 @@ export function registerTodoTool(
 			if (overlay) overlay.update(state.todos);
 
 			return {
-				content: [{ type: "text", text: todoText(state) }],
+				content: [{ type: "text", text: todoDeltaText(state, { changedId, changedTitle, changedStatus, isAdd: deltaIsAdd }) }],
 				details: { todos: state.todos },
 			};
 		},
@@ -258,10 +290,10 @@ export function registerUpdatePlanTool(
 			const sessionKey = getSessionKey(ctx.sessionManager);
 			const state = loadState(ctx.cwd, sessionKey);
 
-			// Read-only path: plan omitted → return current todos without mutating.
+			// Read-only path: plan omitted → return full snapshot without mutating.
 			if (params.plan === undefined) {
 				return {
-					content: [{ type: "text", text: todoText(state) }],
+					content: [{ type: "text", text: todoSnapshotText(state) }],
 					details: { todos: state.todos },
 				};
 			}
@@ -288,7 +320,7 @@ export function registerUpdatePlanTool(
 			}
 
 			return {
-				content: [{ type: "text", text: todoText(state) }],
+				content: [{ type: "text", text: todoDeltaText(state) }],
 				details: { todos: state.todos },
 			};
 		},
@@ -646,11 +678,61 @@ export function registerPlanClearTool(
 
 // ── workflow_grill_record tool (grilling 阶段决策落盘) ───────
 
-const GrillDecisionStatusSchema = StringEnum([
-	"resolved",
-	"open",
-	"needs-codebase-check",
-] as const);
+/** Single source for the grill decision-status union (schema + runtime guard). */
+const GRILL_DECISION_STATUSES = ["resolved", "open", "needs-codebase-check"] as const;
+const GrillDecisionStatusSchema = StringEnum(GRILL_DECISION_STATUSES);
+
+/** A single grilling decision in the batched public schema. */
+const GrillDecisionSchema = Type.Object({
+	question: Type.String({ description: "The exact question asked, one question only." }),
+	recommendedAnswer: Type.String({ description: "The assistant's recommended answer to the question." }),
+	userAnswer: Type.Optional(Type.String({ description: "The user's answer, if already provided." })),
+	decisionStatus: GrillDecisionStatusSchema,
+	notes: Type.Optional(Type.String({ description: "Short rationale, dependency, or follow-up note." })),
+});
+
+/** Runtime check for the closed grill decision-status union. */
+function isGrillDecisionStatus(v: unknown): v is (typeof GRILL_DECISION_STATUSES)[number] {
+	return typeof v === "string" && (GRILL_DECISION_STATUSES as readonly string[]).includes(v);
+}
+
+/**
+ * Normalize tool-call params into a decisions[] array. Accepts the new
+ * batched `decisions` schema; legacy single-decision calls (question /
+ * recommendedAnswer / userAnswer / decisionStatus / notes as top-level
+ * fields) are converted into a one-element array so old session tool-call
+ * replays still persist correctly.
+ */
+function prepareGrillArguments(params: Record<string, unknown>): Array<{
+	question: string;
+	recommendedAnswer: string;
+	userAnswer?: string;
+	decisionStatus: "resolved" | "open" | "needs-codebase-check";
+	notes?: string;
+}> {
+	if (Array.isArray(params.decisions)) {
+		return (params.decisions as Array<Record<string, unknown>>)
+			.filter((d) => d && typeof d.question === "string" && typeof d.recommendedAnswer === "string")
+			.map((d) => ({
+				question: String(d.question),
+				recommendedAnswer: String(d.recommendedAnswer),
+				userAnswer: typeof d.userAnswer === "string" ? d.userAnswer : undefined,
+				decisionStatus: isGrillDecisionStatus(d.decisionStatus) ? d.decisionStatus : "open",
+				notes: typeof d.notes === "string" ? d.notes : undefined,
+			}));
+	}
+	// Legacy single-decision shape.
+	if (typeof params.question === "string" && typeof params.recommendedAnswer === "string") {
+		return [{
+			question: params.question,
+			recommendedAnswer: params.recommendedAnswer,
+			userAnswer: typeof params.userAnswer === "string" ? params.userAnswer : undefined,
+			decisionStatus: isGrillDecisionStatus(params.decisionStatus) ? params.decisionStatus : "open",
+			notes: typeof params.notes === "string" ? params.notes : undefined,
+		}];
+	}
+	return [];
+}
 
 export function registerGrillRecordTool(
 	pi: ExtensionAPI,
@@ -660,23 +742,22 @@ export function registerGrillRecordTool(
 		name: "workflow_grill_record",
 		label: "Grill Record Turn",
 		description:
-			"Record one grilling decision during Plan Mode: a single question, its recommended answer, the user answer, and decision status. Call once per resolved question. Plan Mode only.",
+			"Record grilling decisions during Plan Mode. Pass `decisions` (a batch of " +
+			"{question, recommendedAnswer, userAnswer?, decisionStatus, notes?}) to persist " +
+			"multiple decisions from one round of user answers at once. Legacy single-field " +
+			"calls (question/recommendedAnswer/userAnswer/decisionStatus/notes) are accepted " +
+			"for backward compatibility. Plan Mode only.",
 		parameters: Type.Object({
-			question: Type.String({
-				description: "The exact question asked, one question only.",
-			}),
-			recommendedAnswer: Type.String({
-				description: "The assistant's recommended answer to the question.",
-			}),
-			userAnswer: Type.Optional(
-				Type.String({ description: "The user's answer, if already provided." }),
-			),
-			decisionStatus: GrillDecisionStatusSchema,
-			notes: Type.Optional(
-				Type.String({
-					description: "Short rationale, dependency, or follow-up note.",
-				}),
-			),
+			decisions: Type.Optional(Type.Array(GrillDecisionSchema, {
+				description: "Batch of grilling decisions to record. Prefer this over the legacy single fields.",
+			})),
+			// Legacy single-decision fields (kept for backward compatibility with old
+			// session tool-call replays; converted into a one-element decisions array).
+			question: Type.Optional(Type.String()),
+			recommendedAnswer: Type.Optional(Type.String()),
+			userAnswer: Type.Optional(Type.String()),
+			decisionStatus: Type.Optional(GrillDecisionStatusSchema),
+			notes: Type.Optional(Type.String()),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const denied = checkWorkflowEnabled(ctx, getAgentDir);
@@ -691,33 +772,34 @@ export function registerGrillRecordTool(
 				);
 			}
 
-			state.grillTurns.push({
-				question: params.question,
-				recommendedAnswer: params.recommendedAnswer,
-				userAnswer: params.userAnswer as string | undefined,
-				decisionStatus: params.decisionStatus as
-					| "resolved"
-					| "open"
-					| "needs-codebase-check",
-				notes: params.notes as string | undefined,
-			});
+			const decisions = prepareGrillArguments(params as Record<string, unknown>);
+			if (decisions.length === 0) {
+				throw new Error(
+					"workflow_grill_record requires either `decisions` (batch) or the legacy single-decision fields (question + recommendedAnswer + decisionStatus).",
+				);
+			}
+
+			for (const d of decisions) {
+				state.grillTurns.push({
+					question: d.question,
+					recommendedAnswer: d.recommendedAnswer,
+					userAnswer: d.userAnswer,
+					decisionStatus: d.decisionStatus,
+					notes: d.notes,
+				});
+			}
 			saveState(ctx.cwd, sessionKey, state);
 
-			const summary = state.grillTurns
-				.map(
-					(t, i) =>
-						`${i + 1}. [${t.decisionStatus}] ${t.question}`,
-				)
-				.join("\n");
-
+			// Compact confirmation: only this batch's count and the running total.
+			// Full grillTurns stay in details for UI/state recovery.
 			return {
 				content: [
 					{
 						type: "text",
-						text: `Recorded grill turn #${state.grillTurns.length} (status: ${params.decisionStatus}).\n\n${summary || "(no turns yet)"}`,
+						text: `Recorded ${decisions.length} grill decision(s). Total: ${state.grillTurns.length}.`,
 					},
 				],
-				details: { count: state.grillTurns.length, grillTurns: state.grillTurns },
+				details: { recorded: decisions.length, count: state.grillTurns.length, grillTurns: state.grillTurns },
 			};
 		},
 	});
@@ -787,6 +869,25 @@ export function registerPlanReviewTool(
 
 export const OCR_BINARY = "ocr";
 export const OCR_TIMEOUT_MS = 1_800_000;
+
+/**
+ * Compact argv summary that omits the --background value, so the model-visible
+ * result does not echo the full background context back. Used in
+ * model-visible content; the full `ocrCommandSummary` stays in error/details.
+ */
+function ocrScopeSummary(argv: string[]): string {
+	const flags: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const a = argv[i];
+		if (a === "--background") {
+			flags.push("--background <redacted>");
+			i++; // skip value
+			continue;
+		}
+		flags.push(a);
+	}
+	return [OCR_BINARY, ...flags].join(" ");
+}
 
 // ── workflow_code_review tool ────────────────────────────
 
@@ -870,6 +971,9 @@ export function registerCodeReviewTool(
 				preview,
 			);
 			const cmdSummary = ocrCommandSummary(OCR_BINARY, argv);
+			// Compact summary for model-visible output: omits the full --background
+			// value (kept in cmdSummary / details) to avoid echoing context back.
+			const scopeSummary = ocrScopeSummary(argv);
 
 			try {
 				const rawOutput = await runOcrReview(
@@ -880,19 +984,68 @@ export function registerCodeReviewTool(
 					_signal,
 				);
 
+				// Preview output is ANSI text (ocr ignores --format json for preview);
+				// compact it into a file list. Full review output is JSON parsed
+				// into normalized findings with the raw JSON saved to a temp file.
+				if (preview) {
+					const previewText = compactPreviewText(rawOutput);
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Code review preview (files only, no LLM run).\n\n${previewText}`,
+							},
+						],
+						details: {
+							scope,
+							preview: true,
+						},
+					};
+				}
+
+				let result;
+				try {
+					result = parseOcrReviewJson(rawOutput);
+				} catch (parseErr) {
+					// parseOcrReviewJson wraps all errors in OcrParseError carrying the
+					// saved raw file path plus the real cause. Surface both so the model
+					// can inspect the original output.
+					const rawPath = parseErr instanceof OcrParseError ? parseErr.rawPath : "";
+					const errMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+					return {
+						content: [
+							{
+								type: "text",
+								text:
+									`Code review output could not be processed.` +
+									(rawPath ? `\nRaw output saved to: ${rawPath}` : "") +
+									`\nError: ${errMsg}` +
+									`\n\nCommand: ${scopeSummary}`,
+							},
+						],
+						details: {
+							scope,
+							parseError: true,
+							rawPath,
+							error: errMsg,
+						},
+					};
+				}
+
 				return {
 					content: [
 						{
 							type: "text",
-							text:
-								`Code review complete.\n\n` +
-								`Command: ${cmdSummary}\n\n` +
-								`${rawOutput || "(empty output)"}`,
+							text: `Code review complete.\n\n${compactReviewText(result)}`,
 						},
 					],
 					details: {
-						command: cmdSummary,
 						scope,
+						counts: result.counts,
+						findings: result.findings.length,
+						rawPath: result.rawPath,
+						sessionId: result.sessionId,
+						stats: result.stats,
 					},
 				};
 			} catch (err: unknown) {

@@ -213,5 +213,44 @@ console.log("=== Test 1: RPC /wf-status effective-config notify ===");
 	}
 }
 
+// ── Test 2: update_plan Paseo contract unchanged + replace returns delta ──
+console.log("\n=== Test 2: update_plan Paseo contract (source-level) ===");
+{
+	const toolsSrc = fs.readFileSync(
+		path.join(REPO, "extensions/workflow/tools.ts"),
+		"utf8",
+	);
+	const compatSrc = fs.readFileSync(
+		path.join(REPO, "extensions/workflow/todo-compat.ts"),
+		"utf8",
+	);
+	// Paseo parameter contract unchanged: UpdatePlanParamsSchema with plan of {step, status}.
+	assert(
+		compatSrc.includes("UpdatePlanParamsSchema") &&
+			compatSrc.includes('Type.Literal("pending")') &&
+			compatSrc.includes('Type.Literal("in_progress")') &&
+			compatSrc.includes('Type.Literal("completed")'),
+		"todo-compat: Paseo UpdatePlanParamsSchema status enum unchanged",
+	);
+	// update_plan read returns snapshot, replace returns delta; details.todos full.
+	const upStart = toolsSrc.indexOf("export function registerUpdatePlanTool");
+	const upEnd = toolsSrc.indexOf("// ── workflow plan tools", upStart);
+	assert(upStart >= 0 && upEnd > upStart, "tools.ts: update_plan block anchors exist");
+	const upBlock = toolsSrc.slice(upStart, upEnd);
+	assert(
+		upBlock.includes("todoSnapshotText(state)") &&
+			upBlock.includes("todoDeltaText(state)") &&
+			/details: \{ todos: state\.todos \}/.test(upBlock),
+		"update_plan: read returns snapshot, replace returns delta, details.todos kept full",
+	);
+	// applyTodoAction replace still maps Paseo steps into internal todos.
+	assert(
+		compatSrc.includes('case "replace"') &&
+			compatSrc.includes('parsePaseoStep(entry.step)') &&
+			compatSrc.includes('fromPaseoStatus(entry.step'),
+		"todo-compat: replace action + Paseo-to-internal status mapping retained",
+	);
+}
+
 console.log(`\n${runs - failures}/${runs} checks passed.`);
 if (failures > 0) process.exit(1);

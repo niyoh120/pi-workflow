@@ -31,8 +31,8 @@ idle → explore → plan → work → /review loop → commit → idle
 
 - **Tool ownership**: pi-workflow manages only its own `workflow_*` tools. Built-in tools and other extension tools preserve their active/inactive state across mode changes; mode permissions apply to every active tool through prompts and stable path guards. There is no special auto-activation of `ask_user_question`.
 - **Mode runtime**: model role and workflow tools are synchronized in one ordered `session_start` handler (registration before runtime), and re-applied on each mode transition. `before_agent_start` only recalibrates the model role and appends stable `COMMON_PROMPT` to the system prompt.
-- **Mode context**: the current mode prompt, worktree notice, and workflow state are injected as one ephemeral hidden custom message before every provider request through Pi’s `context` event, so Plan→Work transitions within the same agent run always see the latest mode.
-- **Explore Mode**: Default landing after `/wf`. Read-only codebase exploration and Q&A (same permissions as Plan Mode) plus read-only `workflow_plan_read` to inspect a preserved plan. Use `/plan` when ready to design.
+- **Mode context**: the current mode prompt and worktree notice are injected into the stable system prompt (via `before_agent_start`), and the Approved-Plan Work handoff is isolated via a canonical marker so Plan→Work transitions within the same agent run always see the latest mode. Dynamic state (todos, run IDs) comes from tool results, not the system prompt.
+- **Explore Mode**: Default landing after `/wf`. Read-only codebase exploration and Q&A (same permissions as Plan Mode). Explore exposes no workflow tools; a preserved plan is read in Plan Mode. Use `/plan` when ready to design.
 - **Plan Review**: Optional, model-initiated `workflow_plan_review` tool call — the plan agent may invoke it after saving a plan. Same-turn `provider.streamSimple(...).result()` sidecall with curated context (plan text + auto-extracted key file snippets + tool inventory). Not a separate mode; runs within Plan Mode.
 - **Code Review**: `/review` selects scope, prompts the model to invoke `workflow_code_review`, and runs the review/fix/re-review loop. Work Mode points users to `/review` after implementation.
 
@@ -322,11 +322,12 @@ Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) ar
 
 | Tool | Purpose |
 |------|---------|
-| `workflow_todo` | Maintain the todo list (reset, add, set, list) |
-| `workflow_plan_read` | Read the active plan — response includes plan path |
+| `workflow_todo` | Maintain the todo list (reset, add, set, list). Mutations return a delta; `list` returns a full snapshot. Full todos are kept in `details` for the overlay and state recovery. |
+| `workflow_plan_read` | Read the active plan — Plan Mode only. Approved Work relies on the handoff marker and approval journal for automatic recovery. |
 | `workflow_plan_save` | Save or revise the active plan |
 | `workflow_plan_approve` | Approve the active plan and hand off to Work Mode |
 | `workflow_plan_clear` | Clear workflow state and return to idle mode |
+| `workflow_grill_record` | Record grilling decisions (batch `decisions[]`; legacy single fields accepted) |
 | `workflow_plan_review` | Run an optional plan review sidecall via provider stream |
 | `workflow_code_review` | Run OCR code review on workspace or git ref range |
 
@@ -347,6 +348,8 @@ Run OCR code review (only available when `codeReview.enabled: true`). Defaults t
 - `background` (required): task context and review focus
 - `scope`: `"workspace"` (default), `"range"`, or `"commit"`
 - `from` / `to` / `commit`: scope-specific refs
+
+OCR runs with `--audience agent --format json`. The raw JSON is saved to a temp file and parsed into normalized findings (severity, rule, file, line range, message, suggestion); exact-duplicate findings are deduped. The model-visible result is a compact summary + finding list; the full raw JSON path, per-severity counts, and stats are kept in `details`. Preview output is ANSI text and is compacted into a file list. If JSON parsing fails, the raw file path is surfaced so the output can be inspected. The review → fix → re-review loop behavior is unchanged.
 
 | Path | Purpose |
 |------|---------|

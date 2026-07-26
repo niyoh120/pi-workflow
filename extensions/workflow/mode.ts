@@ -41,19 +41,20 @@ const PLAN_WORKFLOW_TOOL_NAMES = [
 	"workflow_grill_record",
 ];
 
-const WORK_WORKFLOW_TOOL_NAMES = ["workflow_todo", "workflow_plan_read"];
+const WORK_WORKFLOW_TOOL_NAMES = ["workflow_todo"];
 
-const EXPLORE_WORKFLOW_TOOL_NAMES = ["workflow_plan_read"];
+const EXPLORE_WORKFLOW_TOOL_NAMES: string[] = [];
 
 const INIT_WORKFLOW_TOOL_NAMES = ["workflow_init_complete"];
 
 /**
  * Modes that may call gated workflow tools. Each mode's allowed set is
- * resolved by computeWorkflowToolNames; explore exposes only the read-only
- * workflow_plan_read so a preserved plan can be inspected.
+ * resolved by computeWorkflowToolNames. Explore exposes no workflow tools;
+ * Work exposes todo (+ optional code review); Plan keeps plan read/save and
+ * grilling; Init exposes only init_complete.
  */
 export function isWorkflowToolMode(mode: Mode): boolean {
-	return mode === "plan" || mode === "work" || mode === "init" || mode === "explore";
+	return mode === "plan" || mode === "work" || mode === "init";
 }
 
 /**

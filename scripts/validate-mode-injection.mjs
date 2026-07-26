@@ -91,11 +91,11 @@ assert(
 	"WORK_PROMPT states handoff already contains Final Plan",
 );
 assert(
-	/WORK_PROMPT[\s\S]*?正常不调用 workflow_plan_read/.test(prompts),
-	"WORK_PROMPT says normal execution does not call plan_read",
+	/WORK_PROMPT[\s\S]*?handoff marker 与 approval journal 自动恢复计划/.test(prompts),
+	"WORK_PROMPT relies on handoff marker/journal for recovery (no plan_read call path)",
 );
 assert(
-	/WORK_PROMPT[\s\S]*?workflow_todo 读取状态/.test(prompts),
+	/WORK_PROMPT[\s\S]*?workflow_todo\(action="list"\) 读取状态/.test(prompts),
 	"WORK_PROMPT requires todo read when context lacks recent result",
 );
 
@@ -298,7 +298,15 @@ assert(
 // ── mode.ts: tool ownership invariants ─────────────────────────────────────
 assert(
 	mode.includes("EXPLORE_WORKFLOW_TOOL_NAMES"),
-	"mode.ts exposes read-only workflow_plan_read in Explore Mode",
+	"mode.ts declares EXPLORE_WORKFLOW_TOOL_NAMES (now empty)",
+);
+assert(
+	/const EXPLORE_WORKFLOW_TOOL_NAMES: string\[\] = \[\];/.test(mode),
+	"mode.ts: Explore workflow tool set is empty (plan_read removed from Explore)",
+);
+assert(
+	/const WORK_WORKFLOW_TOOL_NAMES = \["workflow_todo"\];/.test(mode),
+	"mode.ts: Work base tool set is todo only (plan_read removed from Work)",
 );
 assert(
 	/sameMembers/.test(mode),
@@ -365,6 +373,92 @@ for (const file of [
 			(e) => e.type === "custom" && (e).data === payload,
 		),
 		"getBranch exposes the approval journal with .data payload",
+	);
+}
+
+// ── T3: worktree notice dedup + recovery warning + plan_read scoping ──────
+console.log("\n=== T3: worktree notice dedup + recovery warning ===");
+{
+	// buildWorkHandoffBody no longer embeds the worktree notice.
+	const handoffStart = helpers.indexOf("export function buildWorkHandoffBody");
+	const handoffEnd = helpers.indexOf("/**", handoffStart + 1);
+	const handoffBlock = helpers.slice(handoffStart, handoffEnd > 0 ? handoffEnd : helpers.length);
+	assert(
+		!/worktreeRuntimeNotice\(state\)/.test(handoffBlock),
+		"buildWorkHandoffBody does NOT call worktreeRuntimeNotice (notice lives in system prompt)",
+	);
+	assert(
+		/worktreeRuntimeNotice/.test(helpers) && /buildModeMessageBody/.test(helpers),
+		"helpers.ts still exports worktreeRuntimeNotice for buildModeMessageBody",
+	);
+
+	// /work, /review, /commit kickoffs do not append the worktree notice.
+	const workCmdStart = commands.indexOf("export function registerWorkCommand");
+	assert(workCmdStart !== -1, "registerWorkCommand found in commands.ts");
+	const workCmdEnd = commands.indexOf("export function registerReviewCommand", workCmdStart);
+	const workCmdBlock = commands.slice(workCmdStart, workCmdEnd > 0 ? workCmdEnd : commands.length);
+	assert(
+		!/worktreeRuntimeNotice/.test(workCmdBlock),
+		"/work kickoff does not append worktree notice",
+	);
+	const reviewStart = commands.indexOf("async function startReviewLoop");
+	assert(reviewStart !== -1, "startReviewLoop found in commands.ts");
+	const reviewEnd = commands.indexOf("async function rpcReadNonEmptyRef", reviewStart);
+	const reviewBlock = commands.slice(reviewStart, reviewEnd > 0 ? reviewEnd : commands.length);
+	assert(
+		!/worktreeRuntimeNotice/.test(reviewBlock),
+		"/review (startReviewLoop) does not append worktree notice",
+	);
+	const commitStart = commands.indexOf("export function registerCommitCommand");
+	assert(commitStart !== -1, "registerCommitCommand found in commands.ts");
+	const commitEnd = commands.indexOf("export function registerWfStatusCommand", commitStart);
+	const commitBlock = commands.slice(commitStart, commitEnd > 0 ? commitEnd : commands.length);
+	assert(
+		!/worktreeRuntimeNotice/.test(commitBlock),
+		"/commit kickoff does not append worktree notice",
+	);
+	// commands.ts no longer references worktreeRuntimeNotice anywhere.
+	assert(
+		!/\bworktreeRuntimeNotice\b/.test(commands),
+		"commands.ts no longer references worktreeRuntimeNotice",
+	);
+
+	// Recovery warning injected on full fail-open.
+	assert(
+		/recoveryWarning/.test(commands) && /Recovery Warning/.test(commands),
+		"context handler injects a recovery warning on full fail-open",
+	);
+	assert(
+		/role: "user" as const,\s*content: recoveryWarning,\s*display: false/.test(commands),
+		"recovery warning is a hidden user message",
+	);
+	// Verify the recoveryWarning string itself contains both instructions,
+	// scoped to the literal so the loose cross-section match can't false-pass.
+	const warnMatch = commands.match(/const recoveryWarning =\s*([\s\S]*?);\s*\n/);
+	assert(
+		!!warnMatch && /标记为 blocked/.test(warnMatch[1]) && /\/plan/.test(warnMatch[1]),
+		"recovery warning tells the model to block the todo and run /plan",
+	);
+
+	// workflow_plan_read is only in the Plan tool set, not Work/Explore.
+	assert(
+		/PLAN_WORKFLOW_TOOL_NAMES[\s\S]*?"workflow_plan_read"/.test(mode),
+		"mode.ts: PLAN_WORKFLOW_TOOL_NAMES includes workflow_plan_read",
+	);
+	const workSetMatch = mode.match(/const WORK_WORKFLOW_TOOL_NAMES = (\[[^\]]*\]);/);
+	assert(
+		workSetMatch && !/workflow_plan_read/.test(workSetMatch[1]),
+		"mode.ts: WORK_WORKFLOW_TOOL_NAMES excludes workflow_plan_read",
+	);
+	const exploreSetMatch = mode.match(/const EXPLORE_WORKFLOW_TOOL_NAMES[^;]*;/);
+	assert(
+		exploreSetMatch && !/workflow_plan_read/.test(exploreSetMatch[0]),
+		"mode.ts: EXPLORE_WORKFLOW_TOOL_NAMES excludes workflow_plan_read",
+	);
+	// Tool pairing validation is still used by the context handler.
+	assert(
+		/validateToolPairing/.test(commands),
+		"context handler still validates tool pairing",
 	);
 }
 

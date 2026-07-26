@@ -1,4 +1,4 @@
-import type { Mode, WorkflowState } from "./types.js";
+import type { Mode, TodoItem, TodoStatus, WorkflowState } from "./types.js";
 import { promptForMode } from "./prompts.js";
 
 // ── Work handoff ─────────────────────────────────────────────────────────────
@@ -27,8 +27,9 @@ export interface WorkApprovalData {
 
 /**
  * Build the static Approved-Plan Work handoff body at approval time.
- * Contains only immutable content: run metadata, worktree notice, and the
- * Final Plan snapshot. No todo snapshot, no dynamic state, no timestamps.
+ * Contains only immutable content: run metadata and the Final Plan snapshot.
+ * No worktree notice (injected into the stable system prompt by
+ * buildModeMessageBody), no todo snapshot, no dynamic state, no timestamps.
  * The full execution priority lives in WORK_PROMPT (system prompt).
  */
 export function buildWorkHandoffBody(
@@ -43,11 +44,8 @@ export function buildWorkHandoffBody(
 		.filter(Boolean)
 		.join("\n");
 
-	const worktree = worktreeRuntimeNotice(state);
-
 	return [
 		header,
-		worktree || undefined,
 		"",
 		"以下为本次 Work 的 approved 计划契约与隔离边界。",
 		"",
@@ -77,6 +75,74 @@ export function todoText(s: WorkflowState): string {
 			return `- [${item.status}] ${item.id}: ${item.title}${notes}`;
 		})
 		.join("\n");
+}
+
+/** Find the first in-progress todo, or the first pending todo if none in progress. */
+export function nextTodo(s: WorkflowState): TodoItem | undefined {
+	return (
+		s.todos.find((t) => t.status === "in_progress") ??
+		s.todos.find((t) => t.status === "pending")
+	);
+}
+
+/** Format a single todo as a compact one-line delta entry. Newlines (LF, CRLF,
+ *  CR) in notes are collapsed to spaces so the delta block stays one line
+ *  per item. */
+export function todoLine(item: TodoItem): string {
+	const notes = item.notes ? ` — ${item.notes.replace(/\r\n|\n|\r/g, " ")}` : "";
+	return `- [${item.status}] ${item.id}: ${item.title}${notes}`;
+}
+
+/**
+ * Compact delta result for a todo modification: the changed/added/next item and a
+ * minimal status count. Full todos stay in `details.todos` for overlay and
+ * state recovery. Use `todoSnapshotText` for explicit reads.
+ */
+export function todoDeltaText(
+	s: WorkflowState,
+	opts: { changedId?: string; changedTitle?: string; changedStatus?: TodoStatus; isAdd?: boolean } = {},
+): string {
+	const counts = todoStatusCounts(s.todos);
+	const parts: string[] = ["[todo delta]"];
+	if (opts.isAdd && opts.changedId) {
+		// Explicit add: the item now exists in state, but label it "added".
+		const item = s.todos.find((t) => t.id === opts.changedId);
+		if (item) {
+			parts.push(`added: ${todoLine(item)}`);
+		} else if (opts.changedTitle) {
+			parts.push(`added: ${todoLine({ id: opts.changedId, title: opts.changedTitle, status: opts.changedStatus ?? "pending" })}`);
+		}
+	} else if (opts.changedId) {
+		const changed = s.todos.find((t) => t.id === opts.changedId);
+		if (changed) {
+			parts.push(`changed: ${todoLine(changed)}`);
+		} else if (opts.changedTitle) {
+			parts.push(`changed: ${todoLine({ id: opts.changedId, title: opts.changedTitle, status: opts.changedStatus ?? "pending" })}`);
+		}
+	}
+	const next = nextTodo(s);
+	if (next) {
+		parts.push(`next: ${todoLine(next)}`);
+	}
+	parts.push(`total: ${s.todos.length} (done=${counts.done}, in_progress=${counts.in_progress}, pending=${counts.pending}, blocked=${counts.blocked})`);
+	return parts.join("\n");
+}
+
+/** Full snapshot result for an explicit todo read, clearly marked. */
+export function todoSnapshotText(s: WorkflowState): string {
+	const counts = todoStatusCounts(s.todos);
+	const header = `[todo snapshot] total: ${s.todos.length} (done=${counts.done}, in_progress=${counts.in_progress}, pending=${counts.pending}, blocked=${counts.blocked})`;
+	if (s.todos.length === 0) return `${header}\n当前没有 todo。`;
+	return `${header}\n${s.todos.map(todoLine).join("\n")}`;
+}
+
+/** Tally todos by status. */
+export function todoStatusCounts(todos: TodoItem[]): Record<string, number> {
+	const counts: Record<string, number> = { done: 0, in_progress: 0, pending: 0, blocked: 0 };
+	for (const t of todos) {
+		counts[t.status] = (counts[t.status] ?? 0) + 1;
+	}
+	return counts;
 }
 
 /** Map internal mode to user-visible label. */
