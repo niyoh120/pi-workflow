@@ -44,7 +44,6 @@ function assert(condition, msg) {
 const DEFAULT_STATE = {
 	mode: "idle",
 	todos: [],
-	hiddenDoneIds: [],
 };
 
 function inlineLoadState(wfDir, sessionKey) {
@@ -395,13 +394,14 @@ console.log("\n=== Check 6: Source structure verification ===");
 	assert(
 		planToolIdx >= 0 &&
 			saveEndIdx > planToolIdx &&
-			saveBlock.includes("state.todos = []") &&
-			saveBlock.includes("state.hiddenDoneIds = []") &&
-			saveBlock.includes("overlay.clearBookkeeping()") &&
-			saveBlock.indexOf("state.todos = []") < saveBlock.indexOf("saveState(") &&
-			saveBlock.indexOf("saveState(") <
-				saveBlock.indexOf("overlay.clearBookkeeping()"),
-		"workflow_plan_save: clear todos, then saveState, then overlay cleanup",
+			saveBlock.includes('state.todos = []') &&
+			saveBlock.includes('state.grillTurns = []') &&
+			!saveBlock.includes('hiddenDoneIds') &&
+			saveBlock.includes('overlay.clearBookkeeping()') &&
+			saveBlock.indexOf('state.todos = []') < saveBlock.indexOf('saveState(') &&
+			saveBlock.indexOf('saveState(') <
+				saveBlock.indexOf('overlay.clearBookkeeping()'),
+		'workflow_plan_save: clear todos + grillTurns (no persisted hiddenDoneIds), then saveState, then overlay cleanup',
 	);
 
 	// /plan and /work call clearBookkeeping
@@ -1164,9 +1164,9 @@ console.log("\n=== Check 7: Code review tooling ===");
 			? commandsTs.slice(basStart, basEnd)
 			: "";
 	assert(
-		basBlock.includes("workflowActive") &&
-			basBlock.includes("workflowExplicitlyDisabled"),
-		"commands.ts: before_agent_start scoped check for workflowActive + explicit disable",
+		basBlock.includes('workflowActive') &&
+			basBlock.includes('isWorkflowActive(state, config)'),
+		'commands.ts: before_agent_start uses unified isWorkflowActive helper',
 	);
 
 	// index.ts gating
@@ -1473,8 +1473,10 @@ function validateWorktreeIntegrationStatic() {
 			state.includes("path.isAbsolute(obj.worktreePath.trim())") &&
 			state.includes("worktreePrefix") &&
 			state.includes("/^[a-fA-F0-9]{8}/") &&
-			state.includes("branchMatchesRun") &&
-			state.includes("@wf-"),
+			state.includes('branchMatchesWorkRun') &&
+			state.includes('from "./worktree.js"') &&
+			worktree.includes('branchMatchesWorkRun') &&
+			worktree.includes('@wf-'),
 		"normalizeState validates worktree path against 8-hex workRunId prefix and accepts semantic @wf-<id> branches",
 	);
 	assert(
@@ -1644,7 +1646,7 @@ console.log("\n=== Check 17: todo delta/snapshot + grilling batch ===");
 	assert(upStart >= 0 && upEnd > upStart, "tools.ts: update_plan block anchors exist");
 	const upBlock = toolsTs.slice(upStart, upEnd);
 	assert(upBlock.includes("todoSnapshotText(state)"), "update_plan read returns snapshot");
-	assert(upBlock.includes("todoDeltaText(state)"), "update_plan replace returns delta");
+	assert(upBlock.includes('todoDeltaText(state, { mutation: "replaced" })'), "update_plan replace returns replaced-mutation delta");
 	assert(upBlock.includes("details: { todos: state.todos }"), "update_plan keeps full todos in details");
 
 	// Grilling: batch decisions schema + prepareGrillArguments legacy compat.
@@ -1790,6 +1792,106 @@ console.log("\n=== Check 16: Paseo update_plan compatibility ===");
 	const modeTs = fs.readFileSync(path.join(CWD, "extensions/workflow/mode.ts"), "utf8");
 	assert(modeTs.includes("resolveTodoToolName"), "mode.ts exports resolveTodoToolName for live ownership");
 	assert(modeTs.includes('"update_plan"'), "mode.ts handles update_plan in tool visibility");
+}
+
+// ═══ Check 18: T1–T3 hardened error paths and shared invariants ═══
+console.log("\n=== Check 18: hardened error paths + shared invariants ===");
+{
+	// isWorkflowActive truth table — inline the pure predicate so this runs
+	// without loading helpers.ts (whose ./prompts.js import Node's native TS
+	// loader does not rewrite to .ts).
+	function isWorkflowActive(state, config) {
+		return (state.workflowEnabled || config.workflow.autoEnter) && !state.workflowExplicitlyDisabled;
+	}
+	assert(isWorkflowActive({ workflowEnabled: false, workflowExplicitlyDisabled: false }, { workflow: { autoEnter: true } }) === true, "isWorkflowActive: autoEnter alone activates");
+	assert(isWorkflowActive({ workflowEnabled: true, workflowExplicitlyDisabled: false }, { workflow: { autoEnter: false } }) === true, "isWorkflowActive: workflowEnabled alone activates");
+	assert(isWorkflowActive({ workflowEnabled: true, workflowExplicitlyDisabled: true }, { workflow: { autoEnter: true } }) === false, "isWorkflowActive: explicit disable overrides both flags");
+	assert(isWorkflowActive({ workflowEnabled: false, workflowExplicitlyDisabled: false }, { workflow: { autoEnter: false } }) === false, "isWorkflowActive: nothing on stays inactive");
+
+	// helpers.ts exports the typed predicate and is referenced by tools/commands/index/settings.
+	const helpersSrc = fs.readFileSync(path.join(CWD, "extensions/workflow/helpers.ts"), "utf8");
+	// Guard against drift: the inlined predicate above must match the canonical
+	// export in helpers.ts so the truth table validates real logic.
+	assert(/return\s*\(\s*\(state\.workflowEnabled \|\| config\.workflow\.autoEnter\)\s*&&\s*!state\.workflowExplicitlyDisabled/.test(helpersSrc), "isWorkflowActive: inlined predicate matches helpers.ts canonical implementation");
+	assert(/export function isWorkflowActive\(/.test(helpersSrc), "helpers.ts exports isWorkflowActive");
+	const toolsSrc18 = fs.readFileSync(path.join(CWD, "extensions/workflow/tools.ts"), "utf8");
+	assert(toolsSrc18.includes("isWorkflowActive(state, config)"), "tools.ts checkWorkflowEnabled uses isWorkflowActive");
+	const commandsSrc18 = fs.readFileSync(path.join(CWD, "extensions/workflow/commands.ts"), "utf8");
+	assert(commandsSrc18.includes("isWorkflowActive(state, config)"), "commands.ts uses isWorkflowActive");
+	const indexSrc18 = fs.readFileSync(path.join(CWD, "extensions/workflow/index.ts"), "utf8");
+	assert(indexSrc18.includes("isWorkflowActive(state, config)"), "index.ts uses isWorkflowActive");
+	const settingsSrc18 = fs.readFileSync(path.join(CWD, "extensions/workflow/settings.ts"), "utf8");
+	assert(settingsSrc18.includes("isWorkflowActive(state, effective)"), "settings.ts uses isWorkflowActive");
+
+	// Plan non-empty validation: readPlanTrimmed + requirePlanMarkdown exported and used.
+	const stateSrc18 = fs.readFileSync(path.join(CWD, "extensions/workflow/state.ts"), "utf8");
+	assert(/export function readPlanTrimmed\(/.test(stateSrc18), "state.ts exports readPlanTrimmed");
+	assert(/export function requirePlanMarkdown\(/.test(stateSrc18), "state.ts exports requirePlanMarkdown");
+	assert(toolsSrc18.includes("requirePlanMarkdown(ctx.cwd, state.planPath)"), "tools.ts: approve uses requirePlanMarkdown");
+	assert(/workflow_plan_save requires non-blank markdown/.test(toolsSrc18), "tools.ts: plan_save rejects blank markdown");
+	assert(/Active plan is missing or empty/.test(toolsSrc18), "tools.ts: plan_read surfaces missing/empty plan error");
+
+	// OCR parse failure returns isError: true with rawPath + command.
+	const parseCatchStart = toolsSrc18.indexOf("} catch (parseErr) {");
+	const parseCatchEnd = toolsSrc18.indexOf("} catch (err: unknown)", parseCatchStart);
+	assert(parseCatchStart >= 0 && parseCatchEnd > parseCatchStart, "tools.ts: OCR parse catch block anchors exist");
+	const ocrParseBlock = toolsSrc18.slice(parseCatchStart, parseCatchEnd);
+	assert(/isError: true/.test(ocrParseBlock), "OCR parse failure returns isError: true");
+	assert(/parseError: true/.test(ocrParseBlock), "OCR parse failure details.parseError set");
+	assert(/rawPath/.test(ocrParseBlock), "OCR parse failure preserves rawPath");
+	assert(/command: scopeSummary/.test(ocrParseBlock), "OCR parse failure keeps compact command in details");
+
+	// Pure path getters: no directory creation as a side effect.
+	const pathsMod = await import(
+		pathToFileURL(path.join(CWD, "extensions/workflow/paths.ts")).href
+	);
+	const tmpCwd18 = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wf-paths-"));
+	try {
+		const planDir18 = pathsMod.planDir(tmpCwd18);
+		const globalCfg18 = pathsMod.globalConfigPath(path.join(tmpCwd18, "agent"));
+		assert(!fs.existsSync(planDir18), "planDir(): pure getter, does not create directory");
+		assert(!fs.existsSync(path.dirname(globalCfg18)), "globalConfigPath(): pure getter, does not create directory");
+		// writeNewPlan creates the plan directory at write time (verified via source + fs).
+		assert(/writeNewPlan[\s\S]*?mkdirSync\(dir, \{ recursive: true \}\)/.test(stateSrc18), "state.ts: writeNewPlan creates plan dir before writing");
+		fs.mkdirSync(planDir18, { recursive: true });
+		fs.writeFileSync(path.join(planDir18, "plan-x.md"), "# Plan\nbody");
+		assert(fs.existsSync(path.join(planDir18, "plan-x.md")), "plan dir writable after explicit mkdir");
+	} finally {
+		fs.rmSync(tmpCwd18, { recursive: true, force: true });
+	}
+
+	// Terminal sanitizer: single source with two semantics.
+	const ttMod = await import(
+		pathToFileURL(path.join(CWD, "extensions/workflow/terminal-text.ts")).href
+	);
+	assert(typeof ttMod.stripTerminalControl === "function", "terminal-text.ts exports stripTerminalControl");
+	assert(ttMod.stripTerminalControl("a\x1B[31mb\nc\td") === "abcd", "stripTerminalControl: default removes newlines + tabs");
+	assert(ttMod.stripTerminalControl("a\x1B[31mb\nc\td", { keepNewlines: true }) === "ab\nc\td", "stripTerminalControl: keepNewlines preserves LF + tab");
+	assert(ttMod.stripTerminalControl("a\u0000b\x07c") === "abc", "stripTerminalControl: strips C0/C1 controls");
+	// Three prior implementations now delegate to the shared module.
+	const ocrResultSrc = fs.readFileSync(path.join(CWD, "extensions/workflow/ocr-result.ts"), "utf8");
+	const ocrHelpersSrc = fs.readFileSync(path.join(CWD, "extensions/workflow/ocr-helpers.ts"), "utf8");
+	const reviewTuiSrc = fs.readFileSync(path.join(CWD, "extensions/workflow/review-tui.ts"), "utf8");
+	assert(ocrResultSrc.includes('from "./terminal-text.js"') && /stripTerminalControl\(s, \{ keepNewlines: true \}\)/.test(ocrResultSrc), "ocr-result.ts delegates stripAnsi to shared sanitizer (keepNewlines)");
+	assert(ocrHelpersSrc.includes('from "./terminal-text.js"') && !/function stripTerminalControlChars/.test(ocrHelpersSrc), "ocr-helpers.ts delegates to shared sanitizer, local impl removed");
+	assert(reviewTuiSrc.includes('from "./terminal-text.js"') && !/function stripTerminalControlChars/.test(reviewTuiSrc), "review-tui.ts delegates to shared sanitizer, local impl removed");
+
+	// Shared branch matcher reused by state normalization.
+	const wtMod = await import(
+		pathToFileURL(path.join(CWD, "extensions/workflow/worktree.ts")).href
+	);
+	assert(typeof wtMod.branchMatchesWorkRun === "function", "worktree.ts exports branchMatchesWorkRun");
+	assert(wtMod.branchMatchesWorkRun("wf/abcd1234", "abcd1234-aaaa-bbbb-cccc-dddddddddddd") === true, "branchMatchesWorkRun: legacy wf/<prefix> matches");
+	assert(wtMod.branchMatchesWorkRun("feat/x@wf-abcd1234", "abcd1234-aaaa-bbbb-cccc-dddddddddddd") === true, "branchMatchesWorkRun: semantic <slug>@wf-<prefix> matches");
+	assert(wtMod.branchMatchesWorkRun("wf/deadbeef", "abcd1234-aaaa-bbbb-cccc-dddddddddddd") === false, "branchMatchesWorkRun: mismatched prefix rejected");
+	assert(stateSrc18.includes('branchMatchesWorkRun') && stateSrc18.includes('from "./worktree.js"'), "state.ts normalization reuses branchMatchesWorkRun from worktree.ts");
+
+	// todo_delta mutation labels: reset and replaced keep next item + four-state count.
+	const helpersTodoSrc = helpersSrc;
+	assert(/mutation\?: "reset" \| "replaced"/.test(helpersTodoSrc), "todoDeltaText: opts declare reset | replaced mutation");
+	assert(/\$\{opts.mutation\}: \$\{todoLine\(first\)\}/.test(helpersTodoSrc), "todoDeltaText: mutation labels first item");
+	assert(toolsSrc18.includes('mutation: deltaMutation') && /deltaMutation = "reset"/.test(toolsSrc18), "tools.ts: reset passes mutation=reset");
+	assert(/todoDeltaText\(state, \{ mutation: "replaced" \}\)/.test(toolsSrc18), "tools.ts: update_plan replace passes mutation=replaced");
 }
 
 console.log(`\n=== Result: ${runs - failures}/${runs} passed ===`);

@@ -462,5 +462,27 @@ console.log("\n=== T3: worktree notice dedup + recovery warning ===");
 	);
 }
 
+// ── T1: workflow data read guard is mode-independent ───────────────────────
+console.log("\n=== T1: workflow data read guard (all modes) ===");
+{
+	// The direct-read guard for .pi/workflow/ lives above the readonly/commit
+	// branches so Work and Commit cannot bypass it either.
+	const tcgStart = commands.indexOf("registerToolCallGuard");
+	const tcgEnd = commands.indexOf("registerAgentEnd", tcgStart);
+	const tcgBlock = commands.slice(tcgStart, tcgEnd);
+	// Generic read guard precedes the readonly branch.
+	const readGuardIdx = tcgBlock.indexOf("Workflow data protection: block direct read to .pi/workflow/");
+	const readonlyIdx = tcgBlock.indexOf("Read-only modes: block local file mutations");
+	assert(readGuardIdx !== -1, "tool_call guard: has mode-independent workflow data read guard");
+	assert(readonlyIdx !== -1 && readGuardIdx < readonlyIdx, "tool_call guard: read guard runs before readonly branch (covers Work/Commit)");
+	assert(/if \(event.toolName === "read"\)[\s\S]*?isWorkflowDataPath\(filePath, ctx.cwd\)/.test(tcgBlock), "tool_call guard: read path checks isWorkflowDataPath");
+	// The old read guard inside the readonly branch is gone (no duplicate).
+	const readonlyBlock = tcgBlock.slice(readonlyIdx, tcgBlock.length);
+	assert(!/event.toolName === "read"[\s\S]{0,80}?isWorkflowDataPath/.test(readonlyBlock), "tool_call guard: readonly branch no longer re-checks read workflow data");
+	// Workflow plan tools still reach the plan file via state.ts (workflow_plan_read/save).
+	assert(tools.includes("workflow_plan_read"), "tools.ts registers workflow_plan_read (plan access path retained)");
+	assert(/requirePlanMarkdown\(ctx.cwd, state.planPath\)/.test(tools), "tools.ts: approve reaches plan via requirePlanMarkdown");
+}
+
 console.log(`\n${runs - failures}/${runs} checks passed.`);
 if (failures > 0) process.exit(1);

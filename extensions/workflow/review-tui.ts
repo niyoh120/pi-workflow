@@ -19,18 +19,7 @@ import {
 	type Focusable,
 } from "@earendil-works/pi-tui";
 import { DynamicBorder, type Theme } from "@earendil-works/pi-coding-agent";
-
-// ── Terminal control character stripping (shared helper) ─────────────────────
-
-/** Strip ANSI escape sequences, OSC/DCS/PM/APC sequences, and C0/C1 control characters for safe terminal rendering. */
-function stripTerminalControlChars(s: string): string {
-	return s
-		.replace(
-			/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\)|P[^\x1B]*(?:\x1B\\)|[\^_][^\x1B]*(?:\x1B\\))/g,
-			"",
-		)
-		.replace(/[\x00-\x1F\x7F-\x9F]/g, "");
-}
+import { stripTerminalControl } from "./terminal-text.js";
 
 // ── OCR review option types ──────────────────────────────────────────────────
 
@@ -171,7 +160,7 @@ class ScopeInputForm implements Focusable {
 	private handleConfirm(): void {
 		const values: Record<string, string> = {};
 		for (let i = 0; i < this.keys.length; i++) {
-			values[this.keys[i]] = stripTerminalControlChars(
+			values[this.keys[i]] = stripTerminalControl(
 				this.inputs[i].getValue(),
 			).trim();
 		}
@@ -252,7 +241,7 @@ class ScopeInputForm implements Focusable {
 		for (let i = 0; i < this.inputs.length; i++) {
 			const isActive = i === this.activeField;
 			const label = this.labels[i];
-			const inputText = stripTerminalControlChars(this.inputs[i].getValue());
+			const inputText = stripTerminalControl(this.inputs[i].getValue());
 
 			const prefix = isActive ? theme.fg("accent", "▶") : "  ";
 			const labelStyled = isActive

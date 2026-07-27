@@ -17,6 +17,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
 import type { OcrFinding, OcrReviewResult, OcrSeverity } from "./types.js";
+import { stripTerminalControl } from "./terminal-text.js";
 
 // ── Raw JSON shapes (subset we depend on) ───────────────────────────────────
 
@@ -54,14 +55,11 @@ interface RawReview {
 
 // ── ANSI / control stripping ────────────────────────────────────────────────
 
-/** Strip ANSI escape sequences and C0/C1 control characters (preserving newlines). */
+/** Strip ANSI escape sequences and C0/C1 control characters, preserving
+ *  newlines and tabs so multi-line review text stays readable. Delegates to
+ *  the shared terminal-text sanitizer. */
 export function stripAnsi(s: string): string {
-	return s
-		.replace(
-			/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\)|P[^\x1B]*(?:\x1B\\)|[\^_][^\x1B]*(?:\x1B\\))/g,
-			"",
-		)
-		.replace(/[\x00-\x08\x0B-\x1F\x7F-\x9F]/g, "");
+	return stripTerminalControl(s, { keepNewlines: true });
 }
 
 // ── Normalization helpers ────────────────────────────────────────────────────

@@ -9,10 +9,11 @@ import {
 	saveState,
 	writeNewPlan,
 	updatePlan,
-	readPlan,
+	readPlanTrimmed,
+	requirePlanMarkdown,
 } from "./state.js";
 import { loadConfigForContext } from "./config.js";
-import { todoDeltaText, todoSnapshotText } from "./helpers.js";
+import { todoDeltaText, todoSnapshotText, isWorkflowActive } from "./helpers.js";
 import {
 	createWorktree,
 	deleteWorktreeBranch,
@@ -99,27 +100,34 @@ export function registerBashOverrideTool(pi: ExtensionAPI, _getAgentDir: () => s
 
 // ── Workflow-enabled guard ──────────────────────────────────────
 
+/** Error result returned when workflow is disabled or its state/config
+ *  cannot be safely read. Workflow-owned tools surface the failure as an
+ *  explicit tool error so the model does not mistake silence for success. */
+interface WorkflowDenied {
+	isError: true;
+	content: { type: "text"; text: string }[];
+	details: Record<string, unknown>;
+}
+
 /**
  * Check whether workflow is enabled for the current session.
- * Returns an error result if disabled, null if enabled.
+ * Returns an error result when workflow is explicitly disabled or when the
+ * state/config needed to decide cannot be read. Returns null when workflow
+ * is active and the tool call may proceed.
  *
- * NOTE: This returns an error result rather than throwing because
- * it's a business precondition check (permission denied style).
- * The caller decides how to handle this non-error case.
+ * NOTE: This returns an error result rather than throwing because it's a
+ * business precondition check (permission denied style). The caller decides
+ * how to handle this non-error case.
  */
 function checkWorkflowEnabled(
 	ctx: any,
 	getAgentDir: () => string,
-): {
-	isError: true;
-	content: { type: "text"; text: string }[];
-	details: Record<string, unknown>;
-} | null {
+): WorkflowDenied | null {
 	try {
 		const sessionKey = getSessionKey(ctx.sessionManager);
 		const state = loadState(ctx.cwd, sessionKey);
 		const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
-		if (!state.workflowEnabled && !config.workflow.autoEnter) {
+		if (!isWorkflowActive(state, config)) {
 			return {
 				isError: true,
 				content: [
@@ -132,8 +140,20 @@ function checkWorkflowEnabled(
 			};
 		}
 		return null;
-	} catch {
-		return null; // If we can't check, allow through.
+	} catch (e) {
+		// Workflow-owned tools surface read failures as explicit tool errors so
+		// the model does not interpret silence as success.
+		const reason = e instanceof Error ? e.message : String(e);
+		return {
+			isError: true,
+			content: [
+				{
+					type: "text",
+					text: `Workflow state could not be read: ${reason}`,
+				},
+			],
+			details: { readError: true, error: reason },
+		};
 	}
 }
 
@@ -191,6 +211,7 @@ export function registerTodoTool(
 			let changedTitle: string | undefined;
 			let changedStatus: TodoStatus | undefined;
 			let deltaIsAdd = false;
+			let deltaMutation: "reset" | "replaced" | undefined;
 
 			if (params.action === "reset") {
 				const overlay = getWorkflowOverlay();
@@ -200,11 +221,9 @@ export function registerTodoTool(
 					kind: "reset",
 					items: params.items,
 				});
-				// reset replaces the whole list; report first item as the next delta.
-				const first = state.todos[0];
-				changedId = first?.id;
-				changedTitle = first?.title;
-				changedStatus = first?.status;
+				// reset replaces the whole list; label the delta as a reset. todoDeltaText
+				// reports the first item and the next item under the reset label.
+				deltaMutation = "reset";
 			}
 
 			if (params.action === "add") {
@@ -253,7 +272,7 @@ export function registerTodoTool(
 			if (overlay) overlay.update(state.todos);
 
 			return {
-				content: [{ type: "text", text: todoDeltaText(state, { changedId, changedTitle, changedStatus, isAdd: deltaIsAdd }) }],
+				content: [{ type: "text", text: todoDeltaText(state, { changedId, changedTitle, changedStatus, isAdd: deltaIsAdd, mutation: deltaMutation }) }],
 				details: { todos: state.todos },
 			};
 		},
@@ -320,7 +339,7 @@ export function registerUpdatePlanTool(
 			}
 
 			return {
-				content: [{ type: "text", text: todoDeltaText(state) }],
+				content: [{ type: "text", text: todoDeltaText(state, { mutation: "replaced" }) }],
 				details: { todos: state.todos },
 			};
 		},
@@ -368,13 +387,25 @@ export function registerPlanReadTool(
 				};
 			}
 
-			const text = readPlan(ctx.cwd, state.planPath);
+			const trimmed = readPlanTrimmed(ctx.cwd, state.planPath);
+			if (!trimmed) {
+				return {
+					isError: true,
+					content: [
+						{
+							type: "text",
+							text: `Active plan is missing or empty: ${state.planPath}. Re-enter /plan and save a plan first.`,
+						},
+					],
+					details: { state, planMissing: true, planPath: state.planPath },
+				};
+			}
 
 			return {
 				content: [
 					{
 						type: "text",
-						text: `Plan path: ${state.planPath}\n\n${text}`,
+						text: `Plan path: ${state.planPath}\n\n${trimmed}`,
 					},
 				],
 				details: { state },
@@ -410,8 +441,12 @@ export function registerPlanSaveTool(
 				);
 			}
 
-			if (!markdown) {
-				throw new Error("workflow_plan_save requires markdown.");
+			// Reject blank/whitespace-only plans so an empty save cannot become the
+			// active plan that later flows into review/approve/handoff.
+			if (!markdown || !markdown.trim()) {
+				throw new Error(
+					"workflow_plan_save requires non-blank markdown. Provide the complete plan text.",
+				);
 			}
 
 			// Distinguish first save (new plan) vs revision save (update existing plan)
@@ -429,7 +464,6 @@ export function registerPlanSaveTool(
 			}
 
 			state.todos = [];
-			state.hiddenDoneIds = [];
 			state.grillTurns = [];
 			saveState(ctx.cwd, sessionKey, state);
 
@@ -491,6 +525,11 @@ export function registerPlanApproveTool(
 				throw new Error("No active plan. Save a plan first.");
 			}
 
+			// Approval requires a valid Final Plan. A missing or blank plan file
+			// must not produce a journal/handoff — surface an explicit error so the
+			// user re-enters /plan instead of starting an empty Work run.
+			const planMarkdown = requirePlanMarkdown(ctx.cwd, state.planPath);
+
 			const workRunId = crypto.randomUUID();
 			let worktreePath: string | undefined;
 			let worktreeBranch: string | undefined;
@@ -543,7 +582,6 @@ export function registerPlanApproveTool(
 
 			// Build the immutable handoff snapshot BEFORE transition so the
 			// approval journal captures the exact plan content at approval time.
-			const planMarkdown = readPlan(ctx.cwd, state.planPath);
 			const handoffBody = buildWorkHandoffBody(nextState, planMarkdown);
 
 			if (Buffer.byteLength(handoffBody, "utf8") > 65536) {
@@ -651,7 +689,6 @@ export function registerPlanClearTool(
 				workflowExplicitlyDisabled: state.workflowExplicitlyDisabled,
 				mode: "idle",
 				todos: [],
-				hiddenDoneIds: [],
 				grillTurns: [],
 			};
 
@@ -838,13 +875,19 @@ export function registerPlanReviewTool(
 
 			const sessionKey = getSessionKey(ctx.sessionManager);
 			const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
-			const planMarkdown = state.planPath
-				? readPlan(ctx.cwd, state.planPath)
-				: params.task;
+			// Prefer the saved plan; fall back to the provided task text only when no
+			// plan file is active. Reject blank content so review never runs on an
+			// empty plan.
+			let planMarkdown: string;
+			if (state.planPath) {
+				planMarkdown = requirePlanMarkdown(ctx.cwd, state.planPath);
+			} else {
+				planMarkdown = (params.task as string | undefined) ?? "";
+			}
 
-			if (!planMarkdown) {
+			if (!planMarkdown.trim()) {
 				throw new Error(
-					"No plan content to review. Save a plan first or provide task text.",
+					"No plan content to review. Save a plan first or provide non-empty task text.",
 				);
 			}
 
@@ -1009,10 +1052,12 @@ export function registerCodeReviewTool(
 				} catch (parseErr) {
 					// parseOcrReviewJson wraps all errors in OcrParseError carrying the
 					// saved raw file path plus the real cause. Surface both so the model
-					// can inspect the original output.
+					// can inspect the original output. Mark as an explicit tool error so
+					// the review loop does not treat this as a successful review.
 					const rawPath = parseErr instanceof OcrParseError ? parseErr.rawPath : "";
 					const errMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
 					return {
+						isError: true,
 						content: [
 							{
 								type: "text",
@@ -1028,6 +1073,7 @@ export function registerCodeReviewTool(
 							parseError: true,
 							rawPath,
 							error: errMsg,
+							command: scopeSummary,
 						},
 					};
 				}

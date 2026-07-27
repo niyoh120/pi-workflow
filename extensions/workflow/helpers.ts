@@ -1,5 +1,30 @@
-import type { Mode, TodoItem, TodoStatus, WorkflowState } from "./types.js";
+import type { Mode, TodoItem, TodoStatus, WorkflowConfig, WorkflowState } from "./types.js";
 import { promptForMode } from "./prompts.js";
+
+// ── Workflow-active predicate ───────────────────────────────────────────────
+
+/**
+ * Single source of truth for whether workflow commands/tools are active for a
+ * session. Workflow is active when either the session flag is on or config
+ * autoEnter is on, AND the user has not explicitly disabled workflow this
+ * session. `workflowExplicitlyDisabled` is the highest-priority session veto
+ * and overrides autoEnter.
+ *
+ * Callers that already hold a loaded state + resolved config should call this
+ * directly; callers that need to read both from disk should use the
+ * ctx-aware wrappers in tools/commands (which surface load failures as
+ * explicit errors for workflow-owned tools, or pass-through for plain Pi
+ * tools).
+ */
+export function isWorkflowActive(
+	state: Pick<WorkflowState, "workflowEnabled" | "workflowExplicitlyDisabled">,
+	config: Pick<WorkflowConfig, "workflow">,
+): boolean {
+	return (
+		(state.workflowEnabled || config.workflow.autoEnter) &&
+		!state.workflowExplicitlyDisabled
+	);
+}
 
 // ── Work handoff ─────────────────────────────────────────────────────────────
 
@@ -94,17 +119,31 @@ export function todoLine(item: TodoItem): string {
 }
 
 /**
- * Compact delta result for a todo modification: the changed/added/next item and a
- * minimal status count. Full todos stay in `details.todos` for overlay and
- * state recovery. Use `todoSnapshotText` for explicit reads.
+ * Compact delta result for a todo modification: the mutation label, the
+ * changed/added/next item, and a minimal status count. Full todos stay in
+ * `details.todos` for overlay and state recovery. Use `todoSnapshotText`
+ * for explicit reads.
+ *
+ * `mutation` overrides the per-item label for whole-list replacements
+ * ("reset" / "replaced"); when set, the first item is reported under that
+ * label and no per-item changed/added diff is emitted. `isAdd` labels a
+ * single-item add as "added".
  */
 export function todoDeltaText(
 	s: WorkflowState,
-	opts: { changedId?: string; changedTitle?: string; changedStatus?: TodoStatus; isAdd?: boolean } = {},
+	opts: { changedId?: string; changedTitle?: string; changedStatus?: TodoStatus; isAdd?: boolean; mutation?: "reset" | "replaced" } = {},
 ): string {
 	const counts = todoStatusCounts(s.todos);
 	const parts: string[] = ["[todo delta]"];
-	if (opts.isAdd && opts.changedId) {
+	if (opts.mutation) {
+		// Whole-list replacement: report the first item under the mutation label.
+		const first = s.todos[0];
+		if (first) {
+			parts.push(`${opts.mutation}: ${todoLine(first)}`);
+		} else {
+			parts.push(`${opts.mutation}: (empty list)`);
+		}
+	} else if (opts.isAdd && opts.changedId) {
 		// Explicit add: the item now exists in state, but label it "added".
 		const item = s.todos.find((t) => t.id === opts.changedId);
 		if (item) {

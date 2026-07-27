@@ -57,6 +57,17 @@ function workRunIdPrefix(workRunId: string): string {
 }
 
 /**
+ * Whether a branch belongs to the given work run. Accepts both the legacy
+ * `wf/<8hex>` form and the semantic `<slug>@wf-<8hex>` form. Pure helper
+ * shared by state normalization and worktree validation so the matching rule
+ * stays in one place.
+ */
+export function branchMatchesWorkRun(branch: string, workRunId: string): boolean {
+	const prefix = workRunIdPrefix(workRunId);
+	return branch === `wf/${prefix}` || branch.endsWith(`@wf-${prefix}`);
+}
+
+/**
  * Build the full workflow branch name: `<semantic>@wf-<8hex>`.
  * Falls back to a workflow-only name when no semantic part is provided.
  */

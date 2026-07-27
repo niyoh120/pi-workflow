@@ -13,6 +13,7 @@ import {
 import {
 	buildModeMessageBody,
 	currentStatusText,
+	isWorkflowActive,
 	WORK_HANDOFF_CUSTOM_TYPE,
 } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
@@ -150,9 +151,7 @@ export function registerBeforeAgentStart(
 			console.error(`[workflow] before_agent_start failed to load state/config: ${e instanceof Error ? e.message : e}`);
 			return { systemPrompt: event.systemPrompt };
 		}
-		const workflowActive =
-			(state.workflowEnabled || config.workflow.autoEnter) &&
-			!state.workflowExplicitlyDisabled;
+		const workflowActive = isWorkflowActive(state, config);
 
 		// Hide done items at the start of each new turn.
 		const overlay = getWorkflowOverlay();
@@ -215,9 +214,7 @@ export function registerWorkflowContextInjection(
 			const sessionKey = ctxSessionKey(ctx);
 			const state = loadState(ctx.cwd, sessionKey);
 			const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
-			const workflowActive =
-				(state.workflowEnabled || config.workflow.autoEnter) &&
-				!state.workflowExplicitlyDisabled;
+			const workflowActive = isWorkflowActive(state, config);
 
 			// Step 1: Clean legacy workflow-mode messages from all modes.
 			let messages = event.messages.filter((message) => {
@@ -402,9 +399,7 @@ export async function runPendingWorkDispatcher(
 			// Locked section: reload everything and recheck.
 			const state = loadState(ctx.cwd, sessionKey);
 			const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
-			const workflowActive =
-				(state.workflowEnabled || config.workflow.autoEnter) &&
-				!state.workflowExplicitlyDisabled;
+			const workflowActive = isWorkflowActive(state, config);
 			if (!workflowActive) return;
 
 			// Recheck idle/pending under lock.
@@ -498,9 +493,7 @@ export function registerToolCallGuard(
 			console.error(`[workflow] tool_call guard failed to load state/config: ${e instanceof Error ? e.message : e}`);
 			return; // pass-through: don't block on internal error
 		}
-		const workflowActive =
-			(state.workflowEnabled || config.workflow.autoEnter) &&
-			!state.workflowExplicitlyDisabled;
+		const workflowActive = isWorkflowActive(state, config);
 
 		// Use per-turn effective guard mode; fall back to state mode.
 		const effectiveMode = getCurrentTurnGuardMode(sessionKey) ?? state.mode;
@@ -534,6 +527,23 @@ export function registerToolCallGuard(
 				};
 			}
 			return;
+		}
+
+		// ── Workflow data protection: block direct read to .pi/workflow/ in all modes ──
+		// Workflow data is only accessible via workflow tools (plan save/read,
+		// approval journal, /wf-status). This read guard is mode-independent so Work
+		// and Commit also cannot bypass it with direct read calls. write/edit
+		// protection lives in the dedicated block below.
+		if (event.toolName === "read") {
+			const filePath: string | undefined =
+				(event.input as any)?.path ?? (event.input as any)?.filePath;
+			if (filePath && isWorkflowDataPath(filePath, ctx.cwd)) {
+				return {
+					block: true,
+					reason:
+						"Workflow data files (.pi/workflow/) must be read via workflow tools, not directly.",
+				};
+			}
 		}
 
 		// ── Plan directory protection: block write/edit to .pi/workflow/plan/ in all modes ──
@@ -629,20 +639,6 @@ export function registerToolCallGuard(
 
 		// Read-only modes: block local file mutations.
 		if (isReadonlyMode(effectiveMode)) {
-			if (event.toolName === "read") {
-				const filePath: string | undefined =
-					(event.input as any)?.path ?? (event.input as any)?.filePath;
-
-				if (filePath && isWorkflowDataPath(filePath, ctx.cwd)) {
-					return {
-						block: true,
-						reason:
-							"Workflow data files (.pi/workflow/) must be read via workflow tools, not directly.",
-					};
-				}
-				return;
-			}
-
 			if (event.toolName === "write" || event.toolName === "edit") {
 				if (effectiveMode === "plan" || effectiveMode === "explore") {
 					const targetPath: string | undefined =

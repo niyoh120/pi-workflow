@@ -238,10 +238,10 @@ console.log("\n=== Test 2: update_plan Paseo contract (source-level) ===");
 	assert(upStart >= 0 && upEnd > upStart, "tools.ts: update_plan block anchors exist");
 	const upBlock = toolsSrc.slice(upStart, upEnd);
 	assert(
-		upBlock.includes("todoSnapshotText(state)") &&
-			upBlock.includes("todoDeltaText(state)") &&
+		upBlock.includes('todoSnapshotText(state)') &&
+			upBlock.includes('todoDeltaText(state, { mutation: "replaced" })') &&
 			/details: \{ todos: state\.todos \}/.test(upBlock),
-		"update_plan: read returns snapshot, replace returns delta, details.todos kept full",
+		'update_plan: read returns snapshot, replace returns replaced-mutation delta, details.todos kept full',
 	);
 	// applyTodoAction replace still maps Paseo steps into internal todos.
 	assert(
@@ -250,6 +250,19 @@ console.log("\n=== Test 2: update_plan Paseo contract (source-level) ===");
 			compatSrc.includes('fromPaseoStatus(entry.step'),
 		"todo-compat: replace action + Paseo-to-internal status mapping retained",
 	);
+
+	// workflow_todo reset passes mutation=reset; four-state count stays in delta.
+	const todoToolStart = toolsSrc.indexOf("export function registerTodoTool");
+	const todoToolEnd = toolsSrc.indexOf("export function registerUpdatePlanTool", todoToolStart);
+	assert(todoToolStart >= 0 && todoToolEnd > todoToolStart, "tools.ts: workflow_todo block anchors exist");
+	const todoBlock = toolsSrc.slice(todoToolStart, todoToolEnd);
+	assert(/deltaMutation = "reset"/.test(todoBlock), "workflow_todo: reset sets deltaMutation=reset");
+	assert(/mutation: deltaMutation/.test(todoBlock), "workflow_todo: delta passes mutation flag");
+	// four-state count stays in delta (helpers.ts owns the format).
+	const helpersSrc = fs.readFileSync(path.join(REPO, "extensions/workflow/helpers.ts"), "utf8");
+	assert(/done=\$\{counts\.done\}, in_progress=\$\{counts\.in_progress\}, pending=\$\{counts\.pending\}, blocked=\$\{counts\.blocked\}/.test(helpersSrc), "helpers.ts: todo delta keeps four-state count");
+	// Legacy grilling replay still accepted (single-field shape).
+	assert(/question: Type\.Optional\(Type\.String\(\)\)/.test(toolsSrc) && /recommendedAnswer: Type\.Optional\(Type\.String\(\)\)/.test(toolsSrc), "workflow_grill_record: legacy single-field params retained for replay");
 }
 
 console.log(`\n${runs - failures}/${runs} checks passed.`);

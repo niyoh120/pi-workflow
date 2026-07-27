@@ -51,6 +51,7 @@ import {
 } from "./config.js";
 import { getSessionKey, loadState, saveState } from "./state.js";
 import { applyModeRuntime } from "./mode.js";
+import { isWorkflowActive } from "./helpers.js";
 import type { WorkflowConfig } from "./types.js";
 
 // ── Scopes ────────────────────────────────────────────────────────────────
@@ -1098,9 +1099,7 @@ export function registerWfSettingsCommand(
 			// sessions (workflowEnabled still false) also get the new model.
 			const state = loadState(cwd, sessionKey);
 			const effective = loadConfigForContext(cwd, agentDir, sessionKey, ctx);
-			const workflowActive =
-				(state.workflowEnabled || effective.workflow.autoEnter) &&
-				!state.workflowExplicitlyDisabled;
+			const workflowActive = isWorkflowActive(state, effective);
 			let runtimeApplied = true;
 			if (workflowActive && state.mode !== "idle") {
 				runtimeApplied = await applyModeRuntime(
@@ -1258,9 +1257,7 @@ async function runRpcSettingsWizard(
 	// Apply model/thinking changes to the running session immediately.
 	const state = loadState(cwd, sessionKey);
 	const effective = loadConfigForContext(cwd, agentDir, sessionKey, ctx);
-	const workflowActive =
-		(state.workflowEnabled || effective.workflow.autoEnter) &&
-		!state.workflowExplicitlyDisabled;
+	const workflowActive = isWorkflowActive(state, effective);
 	let runtimeApplied = true;
 	if (workflowActive && state.mode !== "idle") {
 		runtimeApplied = await applyModeRuntime(pi, ctx, state.mode, getAgentDir);

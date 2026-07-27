@@ -8,6 +8,7 @@ import {
 	planDir,
 	generatePlanFilename,
 } from "./paths.js";
+import { branchMatchesWorkRun } from "./worktree.js";
 
 /** Minimal session manager interface needed to derive the session key. */
 export interface SessionKeySource {
@@ -37,12 +38,7 @@ export function normalizeState(raw: unknown): WorkflowState {
 		typeof obj.workRunId === "string"
 			? obj.workRunId.match(/^[a-fA-F0-9]{8}/)?.[0]
 			: undefined;
-
-	// Branch belongs to this work run if it is the legacy `wf/<prefix>` form
-	// or the semantic `<slug>@wf-<prefix>` form.
-	const branchMatchesRun = (branch: string): boolean =>
-		branch === `wf/${worktreePrefix}` ||
-		branch.endsWith(`@wf-${worktreePrefix}`);
+	const workRunIdStr = typeof obj.workRunId === "string" ? obj.workRunId : "";
 
 	return {
 		workflowEnabled:
@@ -74,13 +70,13 @@ export function normalizeState(raw: unknown): WorkflowState {
 			obj.worktreePath.trim() &&
 			path.isAbsolute(obj.worktreePath.trim()) &&
 			path.basename(obj.worktreePath.trim()).endsWith(`-wf-${worktreePrefix}`) &&
-			branchMatchesRun(obj.worktreeBranch.trim())
+			branchMatchesWorkRun(obj.worktreeBranch.trim(), workRunIdStr)
 				? obj.worktreePath.trim()
 				: undefined,
 		worktreeBranch:
 			worktreePrefix &&
 			typeof obj.worktreeBranch === "string" &&
-			branchMatchesRun(obj.worktreeBranch.trim())
+			branchMatchesWorkRun(obj.worktreeBranch.trim(), workRunIdStr)
 				? obj.worktreeBranch.trim()
 				: undefined,
 		worktreeBaseBranch:
@@ -102,11 +98,6 @@ export function normalizeState(raw: unknown): WorkflowState {
 						status: t.status ?? "pending",
 						notes: t.notes,
 					}))
-			: [],
-		hiddenDoneIds: Array.isArray(obj.hiddenDoneIds)
-			? (obj.hiddenDoneIds as string[]).filter(
-					(id: any) => typeof id === "string",
-				)
 			: [],
 		grillTurns: Array.isArray(obj.grillTurns)
 			? (obj.grillTurns as Array<WorkflowState["grillTurns"][number]>)
@@ -296,6 +287,8 @@ function isPidAlive(pid: number): boolean {
  */
 export function writeNewPlan(cwd: string, content: string): string {
 	const dir = planDir(cwd);
+	// planDir() is now a pure path getter; create the directory at write time.
+	fs.mkdirSync(dir, { recursive: true });
 	const planFile = generatePlanFilename();
 	const planAbs = path.join(dir, planFile);
 	fs.writeFileSync(planAbs, content, "utf8");
@@ -333,4 +326,25 @@ export function readPlan(cwd: string, planPath: string): string {
 		return fs.readFileSync(file, "utf8");
 	}
 	return "";
+}
+
+/** Read the plan and return its trimmed text, or undefined when the file is
+ *  missing or contains only whitespace. Used by callers that need to
+ *  distinguish "no usable plan" from a valid plan body. */
+export function readPlanTrimmed(cwd: string, planPath: string): string | undefined {
+	const text = readPlan(cwd, planPath).trim();
+	return text ? text : undefined;
+}
+
+/** Read the plan or throw an explicit error when it is missing or blank.
+ *  Used by plan read/review/approve paths that must surface a clear error
+ *  instead of silently proceeding with an empty plan. */
+export function requirePlanMarkdown(cwd: string, planPath: string): string {
+	const text = readPlanTrimmed(cwd, planPath);
+	if (!text) {
+		throw new Error(
+			`Active plan is missing or empty: ${planPath}. Re-enter /plan and save a plan first.`,
+		);
+	}
+	return text;
 }

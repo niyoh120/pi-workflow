@@ -17,6 +17,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadState, getSessionKey } from "./state.js";
 import { loadConfigForContext } from "./config.js";
 import { applyModeRuntime, setWorkflowStatus, transitionWorkflowMode } from "./mode.js";
+import { isWorkflowActive } from "./helpers.js";
 import type { WorkflowState } from "./types.js";
 import { WorkflowTodoOverlay, setWorkflowOverlay, getWorkflowOverlay } from "./todo-overlay.js";
 
@@ -80,9 +81,7 @@ function registerWorkflowSessionStart(
 			const cwd = (ctx as any).cwd;
 			const state: WorkflowState = loadState(cwd, sessionKey);
 			const config = loadConfigForContext(cwd, getAgentDir(), sessionKey, ctx as any);
-			const workflowActive =
-				(state.workflowEnabled || config.workflow.autoEnter) &&
-				!state.workflowExplicitlyDisabled;
+			const workflowActive = isWorkflowActive(state, config);
 
 			if (!workflowActive) {
 				setWorkflowStatus(ctx, "idle");

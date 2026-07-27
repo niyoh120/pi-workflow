@@ -6,6 +6,7 @@
  */
 
 import { execFileSync, execFile } from "node:child_process";
+import { stripTerminalControl } from "./terminal-text.js";
 
 // ── OCR availability ────────────────────────────────────────────────────────
 
@@ -59,18 +60,11 @@ export function buildReviewArgv(
 /** Human-readable summary of the review command for confirmation UI. */
 export function ocrCommandSummary(binary: string, argv: string[]): string {
   function quoteArg(arg: string): string {
-    const safeArg = stripTerminalControlChars(arg);
+    const safeArg = stripTerminalControl(arg);
     if (/^[A-Za-z0-9_\/:\-=@%+.,~]+$/.test(safeArg)) return safeArg;
     return `'${safeArg.replace(/'/g, `'\\''`)}'`;
   }
   return [binary, ...argv].map(quoteArg).join(" ");
-}
-
-/** Strip ANSI escape sequences and C0/C1 control characters. */
-function stripTerminalControlChars(s: string): string {
-  return s
-    .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\)|P[^\x1B]*(?:\x1B\\)|[\^_][^\x1B]*(?:\x1B\\))/g, "")
-    .replace(/[\x00-\x1F\x7F-\x9F]/g, "");
 }
 
 // ── Execution ───────────────────────────────────────────────────────────────

@@ -12,22 +12,21 @@ export function ensureWorkflowDir(cwd: string): void {
 }
 
 /** Directory for all plan documents (shared across sessions, randomized filenames).
- *  Creates the plan directory only when called (for plan saving). */
+ *  Pure path function — callers that write a new plan must create the
+ *  directory (see writeNewPlan). Readers/cleaners must tolerate a missing dir. */
 export function planDir(cwd: string): string {
-  const dir = path.join(workflowDir(cwd), "plan");
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
+  return path.join(workflowDir(cwd), "plan");
 }
 
 export function configPath(cwd: string): string {
   return path.join(workflowDir(cwd), "config.json");
 }
 
-/** Global config path: ~/.pi/agent/workflow/config.json */
+/** Global config path: ~/.pi/agent/workflow/config.json
+ *  Pure path function — callers that write must create the parent directory
+ *  (see writeRawJsonAtomic, which already mkdirs). Readers tolerate a missing file. */
 export function globalConfigPath(agentDir: string): string {
-  const dir = path.join(agentDir, "workflow");
-  fs.mkdirSync(dir, { recursive: true });
-  return path.join(dir, "config.json");
+  return path.join(agentDir, "workflow", "config.json");
 }
 
 // ── Session-scoped paths ──────────────────────

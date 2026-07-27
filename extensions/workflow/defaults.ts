@@ -44,6 +44,5 @@ export const DEFAULT_STATE: WorkflowState = {
 	workflowExplicitlyDisabled: false,
 	mode: "idle",
 	todos: [],
-	hiddenDoneIds: [],
 	grillTurns: [],
 };

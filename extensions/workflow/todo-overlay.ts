@@ -7,6 +7,12 @@
  * Done items are briefly visible after completion, then hidden when the next
  * agent turn starts — matching the rpiv-todo overlay UX without copying its
  * implementation or depending on it as a package.
+ *
+ * The done/hidden bookkeeping below is intentionally session-local and lives
+ * only in this in-memory overlay instance. It is NOT persisted to WorkflowState
+ * (the persisted `hiddenDoneIds` field was removed): the overlay's turn/session
+ * lifecycle is the sole owner, so a new plan, /wf-reset, or dispose clears it
+ * via clearBookkeeping() without any state-sync burden.
  */
 
 import type { ExtensionUIContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";

@@ -133,8 +133,6 @@ export interface WorkflowState {
 	worktreeBaseBranch?: string;
 	/** Todo items tracking work progress. */
 	todos: TodoItem[];
-	/** IDs of completed todos that have been hidden from the overlay. */
-	hiddenDoneIds: string[];
 	/** Plan Mode grilling 阶段记录的设计决策拷问序列。 */
 	grillTurns: GrillTurn[];
 	/**
