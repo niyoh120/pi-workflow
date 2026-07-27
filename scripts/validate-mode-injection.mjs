@@ -484,5 +484,155 @@ console.log("\n=== T1: workflow data read guard (all modes) ===");
 	assert(/requirePlanMarkdown\(ctx.cwd, state.planPath\)/.test(tools), "tools.ts: approve reaches plan via requirePlanMarkdown");
 }
 
+// ── T4: restore vs apply mode runtime split ───────────────────────────────
+console.log("\n=== T4: restore vs apply mode runtime split ===");
+{
+	// mode.ts exports restoreModeRuntime and keeps applyModeRuntime as the
+	// forced role-switch entry. Both must exist as distinct exports.
+	assert(
+		/export\s+async\s+function\s+restoreModeRuntime\s*\(/.test(mode),
+		"mode.ts exports restoreModeRuntime (restore path)",
+	);
+	assert(
+		/export\s+async\s+function\s+applyModeRuntime\s*\(/.test(mode),
+		"mode.ts still exports applyModeRuntime (forced role path)",
+	);
+
+	// restoreModeRuntime only calls setRole when ctx.model is absent; it never
+	// forces a role switch on every call.
+	const restoreStart = mode.indexOf("export async function restoreModeRuntime");
+	assert(restoreStart >= 0, "T4: mode.ts marker 'restoreModeRuntime' found");
+	const restoreEnd = mode.indexOf("\nexport ", restoreStart + 1);
+	const restoreBlock = mode.slice(
+		restoreStart,
+		restoreEnd > 0 ? restoreEnd : mode.length,
+	);
+	assert(
+		/if\s*\(\s*!ctx\?\.model\s*\)[\s\S]*?await\s+setRole\(/.test(restoreBlock),
+		"restoreModeRuntime gates setRole on !ctx?.model (only falls back when no active model)",
+	);
+	// activateWorkflowToolsIfAllowed must run unconditionally after the
+	// !ctx?.model branch closes, not nested inside it, so tool reconcile still
+	// happens when the fallback setRole fails (no-model + role-unavailable).
+	// Comments may sit between the closing brace and the call, so allow them.
+	// Built via new RegExp so the comment-marker `//` does not terminate the
+	// regex literal.
+	// NOTE: the non-greedy \{[\s\S]*?\} stops at the first `}` and cannot count
+	// brace depth. This works because restoreModeRuntime's !ctx?.model block
+	// currently has no nested braces. If a nested block is ever added inside that
+	// branch, switch to a brace-depth-aware extractor to avoid false positives.
+	const reconcileOutsideFallback = new RegExp(
+		"if\\s*\\(\\s*!ctx\\?\\.model\\s*\\)\\s*\\{[\\s\\S]*?\\}\\s*(?://[^\\n]*\\n\\s*)*activateWorkflowToolsIfAllowed\\(",
+	);
+	assert(
+		reconcileOutsideFallback.test(restoreBlock),
+		"restoreModeRuntime reconciles workflow tools unconditionally (outside the !ctx?.model fallback)",
+	);
+	// applyModeRuntime unconditionally calls setRole(modeRole(mode)). Use a
+	// token-sequence match (not exact whitespace) so cosmetic reformatting does
+	// not break the assertion without a real behavioral regression.
+	const applyStart = mode.indexOf("export async function applyModeRuntime");
+	assert(applyStart >= 0, "T4: mode.ts marker 'applyModeRuntime' found");
+	const applyEnd = mode.indexOf("\nexport ", applyStart + 1);
+	const applyBlock = mode.slice(applyStart, applyEnd > 0 ? applyEnd : mode.length);
+	assert(
+		/modeRole\(mode\)[\s\S]*?setRole[\s\S]*?getAgentDir/.test(applyBlock),
+		"applyModeRuntime always applies modeRole via setRole (forced role)",
+	);
+
+	// before_agent_start uses the restore path, not the forced role path.
+	const basStart = commands.indexOf("export function registerBeforeAgentStart");
+	assert(basStart >= 0, "T4: commands.ts marker 'registerBeforeAgentStart' found");
+	const basEnd = commands.indexOf(
+		"export function registerWorkflowContextInjection",
+		basStart,
+	);
+	const basBlock = commands.slice(basStart, basEnd > 0 ? basEnd : commands.length);
+	assert(
+		/await\s+restoreModeRuntime\(pi,\s+ctx,\s*state\.mode,\s*getAgentDir\)/.test(
+			basBlock,
+		),
+		"before_agent_start uses restoreModeRuntime (preserves manual selection)",
+	);
+	assert(
+		!/await\s+setRole\(pi,\s+ctx,\s*modeRole\(state\.mode\)/.test(basBlock),
+		"before_agent_start no longer calls setRole(modeRole(state.mode)) directly",
+	);
+
+	// Non-idle session_start uses the restore path; idle→explore still uses the
+	// forced transition (transitionWorkflowMode → applyModeRuntime).
+	assert(
+		/await\s+restoreModeRuntime\([\s\S]*?state\.mode[\s\S]*?getAgentDir\)/.test(index),
+		"index.ts session_start uses restoreModeRuntime for non-idle restore",
+	);
+	assert(
+		/transitionWorkflowMode\(\s*[\s\S]*?nextState:\s*\{[\s\S]*?mode:\s*"explore"\s*\}/.test(
+			index,
+		),
+		"index.ts idle→explore promotion still uses transitionWorkflowMode (forced role)",
+	);
+	assert(
+		!/await\s+applyModeRuntime\(\s*pi,\s+ctx,\s*state\.mode/.test(index),
+		"index.ts no longer calls applyModeRuntime(state.mode) directly",
+	);
+
+	// /wf applies Explore runtime before reload: setRole(explore) + status +
+	// guard mode set, then reconcile, with a fallback warning on failure.
+	const wfStart = commands.indexOf("export function registerWfCommand");
+	assert(wfStart >= 0, "T4: commands.ts marker 'registerWfCommand' found");
+	const wfEnd = commands.indexOf(
+		"// ── Command registrations",
+		wfStart,
+	);
+	const wfBlock = commands.slice(wfStart, wfEnd > 0 ? wfEnd : commands.length);
+	assert(
+		/setWorkflowStatus\(ctx,\s*"explore"\)/.test(wfBlock) &&
+			/setCurrentTurnGuardMode\(sessionKey,\s*"explore"\)/.test(wfBlock),
+		"/wf sets explore status and guard mode before reload",
+	);
+	assert(
+		/setRole[\s\S]*?"explore"[\s\S]*?getAgentDir/.test(wfBlock),
+		"/wf applies explore role via setRole before reload",
+	);
+	assert(
+		/activateWorkflowToolsIfAllowed\(pi,\s+ctx\.cwd,\s*getAgentDir,\s*"explore",\s*ctx\)/.test(
+			wfBlock,
+		),
+		"/wf reconciles workflow tools for explore before reload",
+	);
+	assert(
+		/explore role runtime failed to apply/.test(wfBlock),
+		"/wf logs a warning when explore runtime fails and continues with reload",
+	);
+	assert(
+		/await\s+ctx\.reload\(\)/.test(wfBlock),
+		"/wf still reloads after applying Explore runtime",
+	);
+
+	// /wf-status shows both active runtime and configured role model/thinking.
+	const wfStatusStart = commands.indexOf("export function registerWfStatusCommand");
+	assert(wfStatusStart >= 0, "T4: commands.ts marker 'registerWfStatusCommand' found");
+	const wfStatusEnd = commands.indexOf(
+		"export function registerWfExitCommand",
+		wfStatusStart,
+	);
+	const wfStatusBlock = commands.slice(
+		wfStatusStart,
+		wfStatusEnd > 0 ? wfStatusEnd : commands.length,
+	);
+	assert(
+		/active runtime model:/.test(wfStatusBlock) &&
+			/activeModel\s*\?\s*`\$\{activeModel\.provider\}\/\$\{activeModel\.id\}`\s*:\s*"\(none/.test(wfStatusBlock) &&
+			/configured role model:/.test(wfStatusBlock),
+		"/wf-status displays active runtime model (ctx.model) with safe ternary access alongside configured role model",
+	);
+	assert(
+		/active runtime thinking:/.test(wfStatusBlock) &&
+			/pi\.getThinkingLevel\(\)/.test(wfStatusBlock) &&
+			/configured role thinking:/.test(wfStatusBlock),
+		"/wf-status displays active runtime thinking (pi.getThinkingLevel) alongside configured role thinking",
+	);
+}
+
 console.log(`\n${runs - failures}/${runs} checks passed.`);
 if (failures > 0) process.exit(1);

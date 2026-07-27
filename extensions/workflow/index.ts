@@ -16,7 +16,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadState, getSessionKey } from "./state.js";
 import { loadConfigForContext } from "./config.js";
-import { applyModeRuntime, setWorkflowStatus, transitionWorkflowMode } from "./mode.js";
+import { restoreModeRuntime, setWorkflowStatus, transitionWorkflowMode } from "./mode.js";
 import { isWorkflowActive } from "./helpers.js";
 import type { WorkflowState } from "./types.js";
 import { WorkflowTodoOverlay, setWorkflowOverlay, getWorkflowOverlay } from "./todo-overlay.js";
@@ -123,7 +123,11 @@ function registerWorkflowSessionStart(
 					);
 				}
 			} else {
-				const runtimeOk = await applyModeRuntime(
+				// Restore the persisted mode runtime without forcing a role switch
+				// so Pi's session model/thinking (from /model, Ctrl+P, Shift+Tab,
+				// or the /reload or /resume restore) survives. Falls back to the role
+				// config only when ctx.model is absent. Workflow tools are reconciled.
+				const runtimeOk = await restoreModeRuntime(
 					pi,
 					ctx,
 					state.mode,
@@ -131,10 +135,10 @@ function registerWorkflowSessionStart(
 				);
 				if (!runtimeOk) {
 					console.error(
-						`[workflow] session_start runtime apply failed for mode: ${state.mode}`,
+						`[workflow] session_start runtime restore failed for mode: ${state.mode}`,
 					);
 				}
-				// applyModeRuntime does not touch the status line; mirror it here.
+				// restoreModeRuntime does not touch the status line; mirror it here.
 				setWorkflowStatus(ctx, state.mode);
 
 				// Resume pending work kickoff after successful runtime restore.

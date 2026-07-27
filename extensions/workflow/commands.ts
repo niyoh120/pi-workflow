@@ -25,11 +25,13 @@ import { PASEO_VERIFIED_VERSION } from "./todo-compat.js";
 import {
 	setRole,
 	modeRole,
+	restoreModeRuntime,
 	activateWorkflowToolsIfAllowed,
 	setCurrentTurnGuardMode,
 	getCurrentTurnGuardMode,
 	clearCurrentTurnGuardMode,
 	deactivateWorkflowTools,
+	setWorkflowStatus,
 	transitionWorkflowMode,
 	isWorkflowToolMode,
 	workflowManagedToolNames,
@@ -172,21 +174,22 @@ export function registerBeforeAgentStart(
 			overlay.update(state.todos);
 		}
 
-		// Reapply the configured model/thinking role for the current mode, and
-		// reconcile workflow tools as a safety net in case session_start failed
-		// or a transition was skipped. Reconciliation short-circuits when the
-		// active set already matches, so this is cheap on the steady-state path.
+		// Restore workflow tools for the current mode without forcing a role
+		// switch, so manual /model, Ctrl+P, and Shift+Tab selections made in
+		// the current workflow mode survive across turns. When Pi has no
+		// active model (ctx.model undefined), restoreModeRuntime falls back to
+		// the role config. Reconciliation short-circuits when the active set
+		// already matches, so this is cheap on the steady-state path.
 		if (state.mode === "idle") {
 			// session_start normally promotes idle→explore; reaching here in idle
-		// means the transition failed. Log so the degradation is observable —
-		// buildModeMessageBody returns undefined for idle, so the context handler
-		// will inject no mode prompt this turn.
+			// means the transition failed. Log so the degradation is observable —
+			// buildModeMessageBody returns undefined for idle, so the context handler
+			// will inject no mode prompt this turn.
 			console.warn(
 				"[workflow] before_agent_start: mode is idle despite workflow being active; session_start transition may have failed",
 			);
 		}
-		await setRole(pi, ctx, modeRole(state.mode), getAgentDir);
-		activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir, state.mode, ctx);
+		await restoreModeRuntime(pi, ctx, state.mode, getAgentDir);
 
 		// Build stable system prompt: COMMON + Mode Prompt + worktree notice.
 		// No dynamic state (todos, run IDs) — those come from tool results.
@@ -702,7 +705,7 @@ export function registerAgentEnd(
 
 export function registerWfCommand(
 	pi: ExtensionAPI,
-	_getAgentDir: () => string,
+	getAgentDir: () => string,
 ): void {
 	pi.registerCommand("wf", {
 		description: "进入 workflow 模式，启用 /plan /work /review /commit 等命令",
@@ -723,6 +726,25 @@ export function registerWfCommand(
 
 			// Set session name for easier identification in /resume
 			pi.setSessionName("workflow: explore");
+
+			// Apply Explore runtime before reload so the first entry uses the
+			// explore role config. workflow tools may not be registered yet at this
+			// point; setActiveTools ignores unregistered names, and session_start
+			// reconciles the tool set once registration completes after reload.
+			setWorkflowStatus(ctx, "explore");
+			setCurrentTurnGuardMode(sessionKey, "explore");
+			const runtimeOk = await setRole(pi, ctx, "explore", getAgentDir);
+			if (runtimeOk) {
+				activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir, "explore", ctx);
+			} else {
+				// Unlike restoreModeRuntime, do not best-effort reconcile tools here
+				// when setRole fails: workflow tools may not be registered yet at
+				// this point, and session_start (post-reload) reconciles them
+				// unconditionally via restoreModeRuntime once registration completes.
+				console.warn(
+					"[workflow] /wf: explore role runtime failed to apply; continuing with reload to register workflow commands/tools",
+				);
+			}
 
 			ctx.ui.notify("已进入 Workflow 模式（Explore）。正在重载扩展...", "info");
 			await ctx.reload();
@@ -1250,11 +1272,20 @@ export function registerWfStatusCommand(
 			const role = state.mode ? modeRole(state.mode) : "explore";
 			const eff = report.effective;
 			const roleSpec = eff.models[role as keyof typeof eff.models];
+			// Active Pi session runtime: the model/thinking Pi currently has loaded
+			// (chosen via /model, Ctrl+P, Shift+Tab, or restored on /reload or /resume).
+			// Differs from the configured role when the user manually switched within
+			// the current workflow mode; workflow only re-applies the role config on
+			// explicit transitions and /wf-settings saves.
+			const activeModel = ctx.model;
+			const activeThinking = pi.getThinkingLevel();
 			msg += `\n\n# Effective Config`;
 			msg += `\nprojectConfig: ${report.projectSkipped ? "skipped (untrusted)" : "active"}`;
 			msg += `\nrole: ${role}`;
-			msg += `\nmodel: ${roleSpec ? `${roleSpec.provider}/${roleSpec.model}` : "(none)"}`;
-			msg += `\nthinking: ${roleSpec?.thinking ?? "(none)"}`;
+			msg += `\nactive runtime model: ${activeModel ? `${activeModel.provider}/${activeModel.id}` : "(none — role config applies)"}`;
+			msg += `\nactive runtime thinking: ${activeThinking}`;
+			msg += `\nconfigured role model: ${roleSpec ? `${roleSpec.provider}/${roleSpec.model}` : "(none)"}`;
+			msg += `\nconfigured role thinking: ${roleSpec?.thinking ?? "(none)"}`;
 			msg += `\nworkflow.autoEnter: ${eff.workflow.autoEnter} (source: ${report.sources["workflow.autoEnter"]})`;
 			msg += `\nplanReview.enabled: ${eff.planReview.enabled} (source: ${report.sources["planReview.enabled"]})`;
 			msg += `\ncodeReview.enabled: ${eff.codeReview.enabled} (source: ${report.sources["codeReview.enabled"]})`;

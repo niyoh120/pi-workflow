@@ -30,7 +30,7 @@ idle → explore → plan → work → /review loop → commit → idle
 ```
 
 - **Tool ownership**: pi-workflow manages only its own `workflow_*` tools. Built-in tools and other extension tools preserve their active/inactive state across mode changes; mode permissions apply to every active tool through prompts and stable path guards. There is no special auto-activation of `ask_user_question`.
-- **Mode runtime**: model role and workflow tools are synchronized in one ordered `session_start` handler (registration before runtime), and re-applied on each mode transition. `before_agent_start` only recalibrates the model role and appends stable `COMMON_PROMPT` to the system prompt.
+- **Mode runtime**: workflow applies the configured model role only on explicit mode transitions (slash commands, `/wf` first entry, `idle→explore` promotion) and `/wf-settings` saves. Session restore (`/reload`, `/resume`) and per-turn startup preserve Pi's active session model/thinking (chosen via `/model`, Ctrl+P, or Shift+Tab), so manual selections survive within the current workflow mode; only workflow tools and the status line are reconciled. `before_agent_start` appends the stable `COMMON_PROMPT` to the system prompt and only falls back to the role config when no active model is present.
 - **Mode context**: the current mode prompt and worktree notice are injected into the stable system prompt (via `before_agent_start`), and the Approved-Plan Work handoff is isolated via a canonical marker so Plan→Work transitions within the same agent run always see the latest mode. Dynamic state (todos, run IDs) comes from tool results, not the system prompt.
 - **Explore Mode**: Default landing after `/wf`. Read-only codebase exploration and Q&A (same permissions as Plan Mode). Explore exposes no workflow tools; a preserved plan is read in Plan Mode. Use `/plan` when ready to design.
 - **Plan Review**: Optional, model-initiated `workflow_plan_review` tool call — the plan agent may invoke it after saving a plan. Same-turn `provider.streamSimple(...).result()` sidecall with curated context (plan text + auto-extracted key file snippets + tool inventory). Not a separate mode; runs within Plan Mode.
@@ -193,7 +193,11 @@ layer, letting lower layers take over.
 
 - **Model / thinking** changes apply immediately to the current and later turns
   (the active mode's model is re-applied when the menu closes). These are
-  editable in all three scopes.
+  editable in all three scopes. Note: inside a workflow mode, manual model
+  or thinking switches made via `/model`, Ctrl+P, or Shift+Tab are preserved
+  across turns, `/reload`, and `/resume` — workflow only re-applies the role
+  config on explicit mode transitions and `/wf-settings` saves. Use `/wf-status`
+  to compare the active runtime model/thinking against the configured role.
 - **`workflow.autoEnter`, `planReview.enabled`, `codeReview.enabled`** gate
   command/tool registration, which happens at extension load time using the
   Project/Global layers. They are editable only in **Project** and **Global**
@@ -243,7 +247,7 @@ This prevents wasting tokens when the user still wants to refine the design.
 | `/work [task]` | Skip Plan Mode, go straight to implementation |
 | `/review` | TUI scope selector for code review — runs the workflow_code_review loop |
 | `/commit [notes]` | Generate commit message and commit |
-| `/wf-status` | Show current workflow state (includes plan path and run IDs) |
+| `/wf-status` | Show current workflow state (mode, active runtime model/thinking vs configured role, plan path, run IDs) |
 | `/wf-exit` | Exit workflow mode |
 | `/wf-reset` | Clear workflow state and plan directory |
 | `/wf-init` | Initialize agent workspace: ensure git repo, enter scoped Init Mode that audits/generates AGENTS.md via evidence-based grilling, then restore prior mode |

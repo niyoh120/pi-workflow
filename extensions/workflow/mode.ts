@@ -235,9 +235,17 @@ export function activateWorkflowToolsIfAllowed(
 }
 
 /**
- * Apply runtime (model / thinking / tools / status) for a mode.
- * Does NOT write workflow state or update current-turn guard state.
- * Prefer transitionWorkflowMode() for workflow mode transitions.
+ * Force-apply runtime (model / thinking / tools) for a mode.
+ *
+ * Always switches the model and thinking to the role configured for `mode`,
+ * then reconciles workflow tools. Use this for explicit mode transitions
+ * (slash commands, /wf first entry, idle→explore promotion) and /wf-settings
+ * saves where the target role config must take effect. Does NOT write
+ * workflow state or update the status line; prefer transitionWorkflowMode()
+ * for workflow mode transitions.
+ *
+ * To preserve a user's manual /model, Ctrl+P, or Shift+Tab selection across
+ * turns, /reload, and /resume, use restoreModeRuntime() instead.
  */
 export async function applyModeRuntime(
 	pi: ExtensionAPI,
@@ -250,6 +258,47 @@ export async function applyModeRuntime(
 		if (!(await setRole(pi, ctx, role, getAgentDir))) return false;
 		activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir, mode, ctx);
 		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Restore runtime for the current mode without forcing a role switch.
+ *
+ * Preserves Pi's active session model/thinking (chosen via /model, Ctrl+P, or
+ * Shift+Tab and restored by Pi on /reload and /resume) when `ctx.model` is
+ * present. Falls back to the current mode's role config only when no active
+ * model is available, keeping the no-model path usable. Always reconciles
+ * workflow tools for the current mode.
+ *
+ * Use this for session restore (non-idle session_start) and per-turn startup
+ * (before_agent_start) so manual model/thinking selections survive across
+ * turns and reloads within the same workflow mode. For explicit mode
+ * transitions and /wf-settings saves, use applyModeRuntime() to force the
+ * target role's model/thinking.
+ *
+ * Does NOT write workflow state or update the status line.
+ */
+export async function restoreModeRuntime(
+	pi: ExtensionAPI,
+	ctx: any,
+	mode: Mode,
+	getAgentDir: () => string,
+): Promise<boolean> {
+	try {
+		// Keep Pi's active session model/thinking when present; only fall back to
+		// the role config when Pi could not restore a model for this session.
+		let modelOk = true;
+		if (!ctx?.model) {
+			modelOk = await setRole(pi, ctx, modeRole(mode), getAgentDir);
+		}
+		// Best-effort tool reconcile even when the role model could not be
+		// applied, so the no-model path keeps workflow tools usable (matches the
+		// original before_agent_start, which activated tools regardless of
+		// setRole's outcome). The return value only reflects model-apply success.
+		activateWorkflowToolsIfAllowed(pi, ctx.cwd, getAgentDir, mode, ctx);
+		return modelOk;
 	} catch {
 		return false;
 	}
