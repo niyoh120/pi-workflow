@@ -1518,8 +1518,41 @@ function validateWorktreeIntegrationStatic() {
 			tools.includes("registerBashOverrideTool") &&
 			tools.includes("createBashTool") &&
 			tools.includes('name: "bash"') &&
-			tools.includes("effectiveCwd = state.worktreePath"),
-		"bash override replaces shell parser and runs from worktree cwd",
+			tools.includes("function resolveEffectiveCwd") &&
+			tools.includes("resolveEffectiveCwd(ctx.cwd, state)") &&
+			tools.includes("createBashTool(effectiveCwd)") &&
+			tools.includes("return state.worktreePath;"),
+		"bash override routes external commands through the shared worktree-aware cwd resolver",
+	);
+
+	// workflow_code_review resolves the same worktree-aware cwd and passes it
+	// to runOcrReview so workspace/range/commit reviews run against the active
+	// worktree's working tree and branch.
+	const crStart = tools.indexOf("export function registerCodeReviewTool");
+	const crEnd = tools.indexOf("// ── Bulk registration", crStart);
+	assert(
+		crStart >= 0 && crEnd > crStart,
+		"tools.ts: code review block anchors exist for cwd assertion",
+	);
+	const crBlock = tools.slice(crStart, crEnd > 0 ? crEnd : tools.length);
+	assert(
+		crBlock.includes("getSessionKey(ctx.sessionManager)") &&
+			crBlock.includes("loadState(ctx.cwd, sessionKey)"),
+		"workflow_code_review reads session state before running OCR",
+	);
+	assert(
+		crBlock.includes("resolveEffectiveCwd(ctx.cwd, state)"),
+		"workflow_code_review resolves worktree-aware cwd via the shared helper",
+	);
+	assert(
+		/runOcrReview\(\s*OCR_BINARY,\s*reviewCwd,/.test(crBlock),
+		"workflow_code_review passes the resolved reviewCwd to runOcrReview (ctx.cwd replaced)",
+	);
+	assert(
+		crBlock.includes(
+			"all scopes run against that worktree's working tree and branch",
+		),
+		"workflow_code_review description documents active-worktree execution",
 	);
 	assert(
 		commands.includes("Branch was not deleted") &&

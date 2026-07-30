@@ -69,6 +69,26 @@ function cleanupCreatedWorktree(cwd: string, worktreePath: string, branch: strin
 	}
 }
 
+/**
+ * Resolve the effective execution cwd for an external process spawned by a
+ * workflow-owned tool (bash override, code review). An active worktree in
+ * session state is validated via the shared worktree validator and its
+ * absolute path is returned; a plain checkout session returns ctx.cwd.
+ *
+ * Throws on an invalid worktree with a recovery hint so both callers share
+ * one worktree semantics and error message.
+ */
+function resolveEffectiveCwd(cwd: string, state: WorkflowState): string {
+	if (!state.worktreePath) return cwd;
+	const validation = validateWorktreeState(cwd, state);
+	if (!validation.ok) {
+		throw new Error(
+			`Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
+		);
+	}
+	return state.worktreePath;
+}
+
 export function registerBashOverrideTool(pi: ExtensionAPI, _getAgentDir: () => string, cwd: string): void {
 	const baseBashTool = createBashTool(cwd);
 	pi.registerTool({
@@ -80,18 +100,7 @@ export function registerBashOverrideTool(pi: ExtensionAPI, _getAgentDir: () => s
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const sessionKey = getSessionKey(ctx.sessionManager);
 			const state = loadState(ctx.cwd, sessionKey);
-			let effectiveCwd = ctx.cwd;
-
-			if (state.worktreePath) {
-				const validation = validateWorktreeState(ctx.cwd, state);
-				if (!validation.ok) {
-					throw new Error(
-						`Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
-					);
-				}
-				effectiveCwd = state.worktreePath;
-			}
-
+			const effectiveCwd = resolveEffectiveCwd(ctx.cwd, state);
 			const bashTool = createBashTool(effectiveCwd);
 			return bashTool.execute(toolCallId, params, signal, onUpdate);
 		},
@@ -948,7 +957,7 @@ export function registerCodeReviewTool(
 		name: "workflow_code_review",
 		label: "Workflow Code Review",
 		description:
-			"Run OCR code review on the current workspace or a Git ref range/commit. Work Mode only, triggered by /review. Provide a background string describing the task context, changes, constraints, and risk areas. Default scope is workspace (staged + unstaged + untracked changes).",
+			"Run OCR code review on the current workspace or a Git ref range/commit. Work Mode only, triggered by /review. Provide a background string describing the task context, changes, constraints, and risk areas. Default scope is workspace (staged + unstaged + untracked changes). When an active workflow worktree exists, all scopes run against that worktree's working tree and branch.",
 		parameters: Type.Object({
 			scope: Type.Optional(ReviewScopeKindSchema),
 			background: Type.String({
@@ -1004,6 +1013,16 @@ export function registerCodeReviewTool(
 				throw new Error("scope=commit requires a commit hash.");
 			}
 
+			// Resolve the execution cwd before the OCR run: an active workflow
+			// worktree takes precedence so workspace, range, and commit reviews
+			// all run against the implementation branch's working tree. Kept
+			// outside the runOcrReview try block so the worktree-recovery error
+			// surfaces directly. The generic ocr-failure handler does not mask
+			// the /wf-status or /wf-reset hint.
+			const sessionKey = getSessionKey(ctx.sessionManager);
+			const state = loadState(ctx.cwd, sessionKey);
+			const reviewCwd = resolveEffectiveCwd(ctx.cwd, state);
+
 			// Build argv and execute
 			const argv = buildReviewArgv(
 				background.trim(),
@@ -1021,7 +1040,7 @@ export function registerCodeReviewTool(
 			try {
 				const rawOutput = await runOcrReview(
 					OCR_BINARY,
-					ctx.cwd,
+					reviewCwd,
 					argv,
 					OCR_TIMEOUT_MS,
 					_signal,
