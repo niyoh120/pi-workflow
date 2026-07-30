@@ -89,8 +89,6 @@ export const PLAN_PROMPT = `
 ## Test Plan
 
 ## Risks / Rollback
-
-## Waiting for Approval
 `;
 
 export const WORK_PROMPT = `

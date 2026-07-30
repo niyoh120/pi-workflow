@@ -52,33 +52,28 @@ export interface WorkApprovalData {
 
 /**
  * Build the static Approved-Plan Work handoff body at approval time.
- * Contains only immutable content: run metadata and the Final Plan snapshot.
- * No worktree notice (injected into the stable system prompt by
- * buildModeMessageBody), no todo snapshot, no dynamic state, no timestamps.
- * The full execution priority lives in WORK_PROMPT (system prompt).
+ *
+ * LLM-visible content is the Final Plan snapshot only. Run metadata
+ * (planPath, workRunId) is carried in the marker's `details`, not here —
+ * embedding planPath in content would hand the model the plan file location
+ * and invite direct reads, defeating Plan→Work isolation.
+ *
+ * `state` is kept in the signature for a stable export surface; it is not
+ * read here because its fields are either persisted in WorkflowState or
+ * injected via the marker details by the dispatcher.
  */
 export function buildWorkHandoffBody(
-	state: WorkflowState,
+	_state: WorkflowState,
 	planMarkdown: string,
 ): string {
-	const header = [
-		"# Approved-Plan Work Handoff",
-		`planPath: ${state.planPath ?? "none"}`,
-		`workRunId: ${state.workRunId ?? "none"}`,
-	]
-		.filter(Boolean)
-		.join("\n");
-
 	return [
-		header,
+		"# Approved-Plan Work Handoff",
 		"",
 		"以下为本次 Work 的 approved 计划契约与隔离边界。",
 		"",
 		"# Final Plan",
 		planMarkdown.trim() || "(空)",
-	]
-		.filter(Boolean)
-		.join("\n");
+	].join("\n");
 }
 
 /**
