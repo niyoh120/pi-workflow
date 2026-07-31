@@ -32,7 +32,9 @@ import {
 	toolFingerprint,
 } from "./todo-compat.js";
 import type { TodoStatus, WorkflowState } from "./types.js";
-import { executePlanReviewSidecall } from "./sidecall.js";
+import {
+	runPlanReviewAgent,
+} from "./plan-review-agent.js";
 import { transitionWorkflowMode } from "./mode.js";
 import {
 	WORK_APPROVAL_CUSTOM_TYPE,
@@ -472,6 +474,17 @@ export function registerPlanSaveTool(
 				state.planRunId = crypto.randomUUID();
 			}
 
+			// Snapshot confirmed grilling decisions into planReviewDecisions so a
+			// revised plan still carries earlier confirmed decisions to the
+			// independent reviewer. grillTurns accumulates only decisions recorded
+			// since the previous save (it is cleared below), so appending is
+			// duplicate-safe across revisions.
+			if (state.grillTurns.length) {
+				state.planReviewDecisions = [
+					...(state.planReviewDecisions ?? []),
+					...state.grillTurns,
+				];
+			}
 			state.todos = [];
 			state.grillTurns = [];
 			saveState(ctx.cwd, sessionKey, state);
@@ -587,6 +600,10 @@ export function registerPlanApproveTool(
 				worktreeBranch,
 				worktreeBaseBranch,
 				pendingWorkKickoff: workRunId,
+				// Plan-lifecycle review-context fields are no longer relevant once the
+				// plan is approved; drop them so they cannot leak into a later Plan run.
+				planStartEntryId: undefined,
+				planReviewDecisions: [],
 			};
 
 			// Build the immutable handoff snapshot BEFORE transition so the
@@ -699,6 +716,7 @@ export function registerPlanClearTool(
 				mode: "idle",
 				todos: [],
 				grillTurns: [],
+				planReviewDecisions: [],
 			};
 
 			const result = await transitionWorkflowMode({
@@ -851,7 +869,25 @@ export function registerGrillRecordTool(
 	});
 }
 
-// ── workflow_plan_review tool (sidecall-based) ──────────────
+// ── workflow_plan_review tool (independent reviewer agent) ──────────
+
+/** Normalize legacy sidecall arguments carried in resumed sessions.
+ *
+ *  The tool is now zero-argument: the reviewer task is assembled from
+ *  authoritative state (requirements, decisions, saved plan). Older sessions
+ *  may still replay `task` / `context` / `instructions` fields; accept and
+ *  discard them so resumed tool calls do not fail validation. */
+function preparePlanReviewArguments(
+	args: unknown,
+): object {
+	// Intentionally discards legacy fields. Kept explicit so future arg
+	// additions are deliberate.
+	const a = (args ?? {}) as Record<string, unknown>;
+	void a.task;
+	void a.context;
+	void a.instructions;
+	return {};
+}
 
 export function registerPlanReviewTool(
 	pi: ExtensionAPI,
@@ -861,58 +897,93 @@ export function registerPlanReviewTool(
 		name: "workflow_plan_review",
 		label: "Workflow Plan Review",
 		description:
-			"Request an independent plan review from a separately-configured reviewer model via a single LLM side-call. Plan Mode only. The reviewer receives the full plan text plus auto-extracted key file snippets, conversation summary, and tool inventory. Returns structured feedback with Critical/Important/Minor severity ratings.",
-		parameters: Type.Object({
-			task: Type.String({
-				description:
-					"Description of what to review (plan content or brief summary).",
-			}),
-			context: Type.Optional(Type.String()),
-			instructions: Type.Optional(Type.String()),
-		}),
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			"Launch an independent reviewer agent that re-validates the saved Final Plan against the authoritative user requirements and confirmed decisions, using its own exploration of the repository and active information tools. Plan Mode only. Zero-argument: the reviewer task is assembled from workflow state. Returns structured feedback (Critical/Important/Minor/Summary) with concrete repository evidence.",
+		parameters: Type.Object({}),
+		prepareArguments: preparePlanReviewArguments,
+		async execute(_toolCallId, _params, signal, onUpdate, ctx) {
 			const denied = checkWorkflowEnabled(ctx, getAgentDir);
 			if (denied) return denied;
 
-			// Read the active plan from file if available
-			const state = loadState(ctx.cwd, getSessionKey(ctx.sessionManager));
+			// Legacy sidecall fields (task/context/instructions) from resumed
+			// sessions are already stripped by the prepareArguments hook before
+			// execute is invoked; no further action needed here.
+
+			const sessionKey = getSessionKey(ctx.sessionManager);
+			const state = loadState(ctx.cwd, sessionKey);
 			if (state.mode !== "plan") {
 				throw new Error(
 					`workflow_plan_review only allowed in Plan Mode (current: ${state.mode}).`,
 				);
 			}
 
-			const sessionKey = getSessionKey(ctx.sessionManager);
-			const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
-			// Prefer the saved plan; fall back to the provided task text only when no
-			// plan file is active. Reject blank content so review never runs on an
-			// empty plan.
-			let planMarkdown: string;
-			if (state.planPath) {
-				planMarkdown = requirePlanMarkdown(ctx.cwd, state.planPath);
-			} else {
-				planMarkdown = (params.task as string | undefined) ?? "";
-			}
-
-			if (!planMarkdown.trim()) {
+			if (!state.planPath) {
 				throw new Error(
-					"No plan content to review. Save a plan first or provide non-empty task text.",
+					"No active plan to review. Save a plan first via workflow_plan_save.",
 				);
 			}
 
-			const extraContext = [
-				(params.context as string | undefined) ?? "",
-				(params.instructions as string | undefined) ?? "",
-			]
-				.filter(Boolean)
-				.join("\n\n");
+			const planMarkdown = requirePlanMarkdown(ctx.cwd, state.planPath);
+			const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
 
-			return executePlanReviewSidecall(ctx, pi, {
-				planMarkdown,
-				extraContext: extraContext || undefined,
+			// Active session branch powers authoritative requirement extraction,
+			// scoped to the current Plan lifecycle via planStartEntryId.
+			const branch = ctx.sessionManager?.getBranch?.();
+
+			const result = await runPlanReviewAgent({
+				ctx,
+				pi,
 				modelSpec: config.models.planReview,
-				signal,
+				planMarkdown,
+				decisions: state.planReviewDecisions ?? [],
+				branch,
+				planStartEntryId: state.planStartEntryId,
+				parentSignal: signal,
+				onProgress: (text) => {
+					onUpdate?.({
+						content: [{ type: "text", text }],
+						details: {},
+					});
+				},
 			});
+
+			const elapsedSec = Math.round(result.elapsedMs / 1000);
+			const ops: string[] = [
+				`reviewer: ${result.reviewerModel}${result.thinking ? ` / ${result.thinking}` : ""}`,
+				`elapsed: ${elapsedSec}s`,
+				`turns: ${result.turns}`,
+				`tool calls: ${result.toolCalls}`,
+			];
+			if (result.unavailableTools.length) {
+				ops.push(`unavailable tools: ${result.unavailableTools.join(", ")}`);
+			}
+			if (result.stopReason && result.stopReason !== "stop") {
+				ops.push(`stopReason: ${result.stopReason}`);
+			}
+			if (result.errorMessage) {
+				ops.push(`error: ${result.errorMessage}`);
+			}
+
+			return {
+				content: [
+					{
+						type: "text",
+						text: `${result.text}\n\n---\n${ops.join(" | ")}`,
+					},
+				],
+				details: {
+					reviewerModel: result.reviewerModel,
+					thinking: result.thinking,
+					elapsedMs: result.elapsedMs,
+					turns: result.turns,
+					toolCalls: result.toolCalls,
+					requestedTools: result.requestedTools,
+					activeTools: result.activeTools,
+					unavailableTools: result.unavailableTools,
+					stopReason: result.stopReason,
+					errorMessage: result.errorMessage,
+				},
+				usage: result.usage,
+			};
 		},
 	});
 }

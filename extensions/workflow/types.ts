@@ -59,7 +59,7 @@ export interface WorkflowConfig {
 	workflow: {
 		autoEnter: boolean;
 	};
-	/** Plan review via sidecall — optional, controlled by enabled flag. */
+	/** Plan review via an independent reviewer agent — optional, controlled by enabled flag. */
 	planReview: {
 		enabled: boolean;
 	};
@@ -135,6 +135,21 @@ export interface WorkflowState {
 	todos: TodoItem[];
 	/** Plan Mode grilling 阶段记录的设计决策拷问序列。 */
 	grillTurns: GrillTurn[];
+	/**
+	 * Session leaf entry id captured when `/plan` starts. Scopes authoritative
+	 * requirement extraction to the current Plan lifecycle so the independent
+	 * reviewer only sees user messages from this plan discussion. Undefined
+	 * outside Plan Mode and on older sessions (extraction falls back to the
+	 * whole active branch).
+	 */
+	planStartEntryId?: string;
+	/**
+	 * Confirmed grilling decisions snapshotted across the Plan lifecycle. Each
+	 * plan save merges the current `grillTurns` here before clearing them, so a
+	 * revised plan still carries earlier confirmed decisions to the reviewer.
+	 * Cleared on approval/clear.
+	 */
+	planReviewDecisions: GrillTurn[];
 	/**
 	 * Mode to restore after Init Mode ends. Undefined when not in init.
 	 * `idle` and `init` are excluded as return targets (workflow auto-promotes

@@ -836,11 +836,17 @@ export function registerPlanCommand(
 			const sessionKey = ctxSessionKey(ctx);
 
 			const current = loadState(ctx.cwd, sessionKey);
+			// Capture the current session leaf so requirement extraction can scope
+			// to this Plan lifecycle (user messages from this discussion only).
+			const planStartEntryId =
+				(ctx as { sessionManager?: { getLeafId?: () => string | undefined } })
+					.sessionManager?.getLeafId?.() ?? undefined;
 			const state: WorkflowState = {
 				...DEFAULT_STATE,
 				workflowEnabled: current.workflowEnabled,
 				mode: "plan",
 				planRunId: crypto.randomUUID(),
+				planStartEntryId,
 			};
 
 			const overlay = getWorkflowOverlay();

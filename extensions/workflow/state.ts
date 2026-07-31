@@ -25,6 +25,31 @@ export function getSessionKey(ctx: any): string {
 	return deriveSessionKey(sm ?? {});
 }
 
+/** Normalize a raw GrillTurn[] array. Shared by grillTurns and
+ *  planReviewDecisions so both review-context fields stay in sync. */
+function normalizeGrillTurns(raw: unknown): WorkflowState["grillTurns"] {
+	return Array.isArray(raw)
+		? (raw as Array<WorkflowState["grillTurns"][number]>)
+				.filter((t: any) => t && typeof t === "object")
+				.map((t: any) => ({
+					question: typeof t.question === "string" ? t.question : "",
+					recommendedAnswer:
+						typeof t.recommendedAnswer === "string"
+							? t.recommendedAnswer
+							: "",
+					userAnswer:
+						typeof t.userAnswer === "string" ? t.userAnswer : undefined,
+					decisionStatus:
+						t.decisionStatus === "resolved" ||
+						t.decisionStatus === "open" ||
+						t.decisionStatus === "needs-codebase-check"
+							? t.decisionStatus
+							: "open",
+					notes: typeof t.notes === "string" ? t.notes : undefined,
+				}))
+		: [];
+}
+
 /**
  * Normalize a raw JSON object into a strict WorkflowState shape.
  * Drops unknown/removed keys and fills missing fields from DEFAULT_STATE.
@@ -99,26 +124,14 @@ export function normalizeState(raw: unknown): WorkflowState {
 						notes: t.notes,
 					}))
 			: [],
-		grillTurns: Array.isArray(obj.grillTurns)
-			? (obj.grillTurns as Array<WorkflowState["grillTurns"][number]>)
-					.filter((t: any) => t && typeof t === "object")
-					.map((t: any) => ({
-						question: typeof t.question === "string" ? t.question : "",
-						recommendedAnswer:
-							typeof t.recommendedAnswer === "string"
-								? t.recommendedAnswer
-								: "",
-						userAnswer:
-							typeof t.userAnswer === "string" ? t.userAnswer : undefined,
-						decisionStatus:
-							t.decisionStatus === "resolved" ||
-							t.decisionStatus === "open" ||
-							t.decisionStatus === "needs-codebase-check"
-								? t.decisionStatus
-								: "open",
-						notes: typeof t.notes === "string" ? t.notes : undefined,
-					}))
-			: [],
+		grillTurns: normalizeGrillTurns(obj.grillTurns),
+		planStartEntryId:
+			typeof obj.planStartEntryId === "string" && obj.planStartEntryId.trim()
+				? obj.planStartEntryId.trim()
+				: undefined,
+		// planReviewDecisions reuses the same GrillTurn shape as grillTurns;
+		// normalize through the shared pure helper to avoid drift.
+		planReviewDecisions: normalizeGrillTurns(obj.planReviewDecisions),
 		// Init Mode lifecycle fields. Only honored when mode === "init" and
 		// the shape matches; everything else normalizes to undefined so stale
 		// values from a previous run cannot leak into another mode.

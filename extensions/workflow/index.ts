@@ -4,7 +4,8 @@
  * A lightweight software development workflow with simplified mode flow:
  * idle → plan → work → commit.
  *
- * Plan review uses completeSimple sidecall (no subprocess).
+ * Plan review runs an independent reviewer AgentSession (fresh, in-memory,
+ * multi-turn) that inherits the parent Plan information-tool surface.
  * Code review uses alibaba/open-code-review CLI.
  * No external extension dependency required.
  *

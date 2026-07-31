@@ -61,8 +61,9 @@ export const PLAN_PROMPT = `
 如果 workflow_plan_review 工具可用，你可以在保存计划后自主决定是否调用它进行独立审查。建议在计划复杂、涉及多个模块/文件、用户明确要求、或你对方案有不确定时调用。
 
 调用规则：
-- 调用 workflow_plan_review(task="计划内容摘要", context="额外背景或约束", instructions="审查重点")。reviewer 使用独立模型（models.planReview），在同 turn 内返回结果。
-- 收到 review 结果后，逐条技术评估 reviewer 提出的每个问题。对合理的问题修订计划并重新 workflow_plan_save；对不成立的问题（误判、超出范围、与技术事实不符）给出技术推理说明。
+- 调用 workflow_plan_review()，无参数。reviewer 是一个独立的 agent，使用独立配置的模型（models.planReview），在隔离的会话中自行探索仓库与可用信息工具（内置 read/grep/find/ls/bash、以及继承自当前 Plan 会话的扩展/MCP/Web 工具）重新验证计划。它只收到权威输入：本轮计划生命周期内的用户需求、已确认决策、以及你保存的 Final Plan；你的推理、思考与工具结果不会被转发。
+- reviewer 有一条总时限（默认 30 分钟），由其自行决定探索路径与工具调用次数。
+- 收到 review 结果后，逐条技术评估 reviewer 提出的每个问题，结合你自己的仓库证据。对合理的问题修订计划并重新 workflow_plan_save；对不成立的问题（误判、超出范围、与技术事实不符）给出技术推理说明。
 - Critical/Important 问题导致方案发生实质修改时重新调用 workflow_plan_review 审查修订版。
 - 明确误判可记录理由后结束；真实分歧无法靠讨论解决时，将分歧摘要呈现给用户裁决。
 - 如果 reviewer 只有 Minor 问题，可以接受并继续推进。

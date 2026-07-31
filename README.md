@@ -1,8 +1,8 @@
 # pi-workflow
 
-Lightweight software development workflow extension for pi-coding-agent: plan, built-in plan review (sidecall), implementation, code review via alibaba/open-code-review CLI, and commit orchestration.
+Lightweight software development workflow extension for pi-coding-agent: plan, independent plan-review agent, implementation, code review via alibaba/open-code-review CLI, and commit orchestration.
 
-**Zero external Pi extension dependencies.** Plan review uses `provider.streamSimple(...).result()` — a same-turn LLM sidecall with no subprocess. Code review runs via the standalone `ocr review` CLI. No `@tintinweb/pi-subagents` required.
+**Zero external Pi extension dependencies.** Plan review runs as a fresh, in-memory child AgentSession that independently re-validates the saved plan. Code review runs via the standalone `ocr review` CLI. No `@tintinweb/pi-subagents` required.
 
 ## Installation
 
@@ -33,7 +33,7 @@ idle → explore → plan → work → /review loop → commit → idle
 - **Mode runtime**: workflow applies the configured model role only on explicit mode transitions (slash commands, `/wf` first entry, `idle→explore` promotion) and `/wf-settings` saves. Session restore (`/reload`, `/resume`) and per-turn startup preserve Pi's active session model/thinking (chosen via `/model`, Ctrl+P, or Shift+Tab), so manual selections survive within the current workflow mode; only workflow tools and the status line are reconciled. `before_agent_start` appends the stable `COMMON_PROMPT` to the system prompt and only falls back to the role config when no active model is present.
 - **Mode context**: the current mode prompt and worktree notice are injected into the stable system prompt (via `before_agent_start`), and the Approved-Plan Work handoff is isolated via a canonical marker so Plan→Work transitions within the same agent run always see the latest mode. Dynamic state (todos, run IDs) comes from tool results, not the system prompt.
 - **Explore Mode**: Default landing after `/wf`. Read-only codebase exploration and Q&A (same permissions as Plan Mode). Explore exposes no workflow tools; a preserved plan is read in Plan Mode. Use `/plan` when ready to design.
-- **Plan Review**: Optional, model-initiated `workflow_plan_review` tool call — the plan agent may invoke it after saving a plan. Same-turn `provider.streamSimple(...).result()` sidecall with curated context (plan text + auto-extracted key file snippets + tool inventory). Not a separate mode; runs within Plan Mode.
+- **Plan Review**: Optional, model-initiated `workflow_plan_review` tool call — the plan agent may invoke it after saving a plan. Spawns a fresh, isolated in-memory AgentSession that inherits the parent Plan session's information-tool surface (minus workflow tools), independently explores the repository and active external tools, and returns structured Critical/Important/Minor/Summary findings grounded in repository evidence. Not a separate mode; runs within Plan Mode under a single 30-minute total timeout.
 - **Code Review**: `/review` selects scope, prompts the model to invoke `workflow_code_review`, and runs the review/fix/re-review loop. Work Mode points users to `/review` after implementation.
 
 ## Modes
@@ -123,13 +123,21 @@ See `config.json.example` for the canonical config template.
 
 Plan review is an **optional** feature — when `planReview.enabled` is `true`, the `workflow_plan_review` tool becomes available. The plan agent decides whether to call it based on plan complexity and risk.
 
-The reviewer uses `provider.streamSimple(...).result()` — a single LLM API call with no tools and no subprocess — receiving:
+The reviewer is a **fresh, independent AgentSession** (no subprocess, no RPC): `SessionManager.inMemory(...)` gives it isolated, non-persistent conversation state. It runs the configured `models.planReview` model and thinking level, and receives only authoritative inputs:
 
-- The full plan text
-- Auto-extracted file snippets from paths referenced in the plan
-- The executor's tool inventory
+- The original user requirements from the current Plan lifecycle (captured via the `/plan` session-leaf marker)
+- The confirmed grilling decisions (snapshotted into `planReviewDecisions` at plan-save time)
+- The saved Final Plan
 
-**Configuration** needs the model spec (`models.planReview`) and `planReview.enabled: true`. When `thinking` is `"off"`, the reasoning parameter is omitted entirely.
+The planner's reasoning, thinking, tool results, and prior review output are **excluded by construction** — the reviewer re-derives its own view by exploring the repository.
+
+**Inherited tool surface (best-effort).** At review time the parent's active tools are snapshotted, every workflow-owned tool is removed, and the remainder is reconstructed in the child: built-in tools (`read`/`bash`/`edit`/`write`/`grep`/`find`/`ls`) are rebuilt by `createAgentSession`; active extension/MCP/Web/remote/memory tools are rebuilt from their owning extension source paths via `DefaultResourceLoader({ noExtensions: true, additionalExtensionPaths })`. pi-workflow itself is never loaded into the child (its bash override is treated as builtin, so its path is never collected). Tool reconstruction differences never block review and surface only as `requestedTools`/`activeTools`/`unavailableTools` diagnostics.
+
+**Read-only safety boundary.** An inline child extension reuses the existing pure path guards: direct reads of `.pi/workflow/` are blocked, and `write`/`edit` are confined to the Plan scratch root (`/tmp/pi-workflow-plan-scratch/`). Bash mutation is governed by the reviewer system prompt (read-only + scratch probes only).
+
+**Runtime budget.** A single 30-minute total timeout (`1_800_000ms`) bounds the whole run, combined with the parent turn's AbortSignal. There is no turn or tool-call limit — the reviewer controls its own exploration. The child session is always disposed in `finally`; timeout or user cancellation aborts the active AgentSession and returns an explicit tool error.
+
+**Result.** The tool is zero-argument; legacy `task`/`context`/`instructions` fields from resumed sessions are accepted and discarded via `prepareArguments`. The final text keeps the `Critical / Important / Minor / Summary` structure with concrete repository evidence, and the result carries aggregated nested usage on its top-level `usage` field plus operational metadata (reviewer model/thinking, elapsed time, turns, tool-call count, requested/active/unavailable tools, stop reason/error).
 
 ### Code review (optional tool)
 
@@ -252,15 +260,16 @@ This prevents wasting tokens when the user still wants to refine the design.
 | `/wf-reset` | Clear workflow state and plan directory |
 | `/wf-init` | Initialize agent workspace: ensure git repo, enter scoped Init Mode that audits/generates AGENTS.md via evidence-based grilling, then restore prior mode |
 
-## Plan Review (Sidecall)
+## Plan Review (Independent Agent)
 
-Plan review runs as an **optional, model-initiated** `provider.streamSimple(...).result()` sidecall — no subprocess, no agent containers, no RPC. The plan agent calls `workflow_plan_review` when the plan is complex or the user requests it.
+Plan review runs an **optional, model-initiated** independent reviewer — no subprocess, no RPC, no Quick fallback. The plan agent calls `workflow_plan_review` (zero-argument) when the plan is complex or the user requests it.
 
-- **Curated context** — the reviewer sees the plan text, auto-extracted file snippets, and executor tool inventory.
-- **Fast & reliable** — single LLM API call, no subprocess communication risk.
-- **Zero config** — just set `models.planReview` in your config.
-- **Structured output** — the prompt asks the reviewer to produce Critical/Important/Minor severity classification.
-- **No marker validation** — the full review text is passed back for the plan agent to evaluate. No strict format requirement.
+- **Independent** — a fresh in-memory AgentSession re-validates the saved plan through its own repository and external-tool exploration. It never sees the planner's reasoning; only the authoritative requirements, confirmed decisions, and the Final Plan.
+- **Inherits the parent tool surface** — active information tools (extension/MCP/Web/remote/memory) are reconstructed from their source paths; workflow tools stay absent; built-in read-only inspection tools are rebuilt.
+- **Read-only** — `.pi/workflow/` reads are blocked and project writes are confined to the Plan scratch root.
+- **Bounded** — one 30-minute total timeout; the reviewer chooses its own tool sequence and turn count within it.
+- **Structured output** — Critical/Important/Minor/Summary with concrete repository evidence; nested usage is returned on the tool result.
+- **Zero config** — just set `models.planReview` and `planReview.enabled: true` in your config.
 
 ## Code Review (OCR CLI)
 
@@ -332,17 +341,14 @@ Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) ar
 | `workflow_plan_approve` | Approve the active plan and hand off to Work Mode |
 | `workflow_plan_clear` | Clear workflow state and return to idle mode |
 | `workflow_grill_record` | Record grilling decisions (batch `decisions[]`; legacy single fields accepted) |
-| `workflow_plan_review` | Run an optional plan review sidecall via provider stream |
+| `workflow_plan_review` | Launch the independent reviewer agent (zero-argument) |
 | `workflow_code_review` | Run OCR code review on workspace or git ref range |
 
 ### workflow_plan_review
 
-Run a same-turn plan review via `provider.streamSimple(...).result()` sidecall (only available when `planReview.enabled: true`). The reviewer receives curated context (plan + file snippets + tool inventory) and returns structured feedback.
+Launch the independent reviewer agent (only available when `planReview.enabled: true`). Zero-argument: the reviewer task is assembled from workflow state — the current Plan lifecycle's user requirements, the snapshotted confirmed decisions, and the saved Final Plan. Returns structured Critical/Important/Minor/Summary feedback with repository evidence; aggregated nested usage is returned on the top-level `usage` field, and operational metadata (reviewer model/thinking, elapsed time, turns, tool-call count, requested/active/unavailable tools, stop reason/error) is in `details`.
 
-**Parameters:**
-- `task` (required): the plan content or a brief task description
-- `context` (optional): extra background (user constraints, discussion points)
-- `instructions` (optional): review preferences (depth, focus areas)
+Legacy `task` / `context` / `instructions` fields carried by resumed sessions are accepted and discarded by `prepareArguments`.
 
 ### workflow_code_review
 

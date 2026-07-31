@@ -16,6 +16,7 @@ npx tsc --noEmit
 node scripts/validate-todo-regression.mjs
 node scripts/validate-mode-injection.mjs
 node scripts/validate-rpc-mode.mjs
+node scripts/validate-plan-review-agent.mjs
 ```
 
 本地安装与重载：
@@ -34,7 +35,7 @@ pi install .
 - `mode.ts` / `prompts.ts` / `helpers.ts`：模式工具可见性、模式提示词、运行时消息。
 - `state.ts` / `paths.ts` / `config.ts` / `defaults.ts` / `types.ts`：状态、路径、配置合并、默认值和共享类型。
 - `settings.ts`：`/wf-settings` 的 session/project/global 三层配置 TUI。
-- `sidecall.ts`：Plan Review 的 `provider.streamSimple(...).result()` 同 turn 侧调用。
+- `plan-review-agent.ts`：Plan Review 的独立 reviewer AgentSession 运行器——父会话活动工具面重建（排除 workflow 工具，内置工具由 `createAgentSession` 重建，外部扩展/MCP/Web 工具从 sourceInfo.path 重建，pi-workflow 自身不加载）、权威任务构建（用户需求 + `planReviewDecisions` + Final Plan）、子运行时安全扩展（复用 `guards.ts` 的纯路径守卫拦截 `.pi/workflow/` 读与项目写）、reviewer 模型/auth 复制、隔离 in-memory AgentSession、总时限中断与 `finally` 清理、进度与嵌套用量聚合。
 - `ocr-helpers.ts` / `review-tui.ts`：OCR 参数与执行、`/review` 范围选择 UI。
 - `ocr-result.ts`：OCR JSON 解析、归一化、去重与 compact 结果；复用 `terminal-text.ts`。
 - `terminal-text.ts`：无状态 ANSI/控制字符清理，提供保留换行与移除全部控制字符两种语义。
@@ -57,7 +58,7 @@ pi install .
 
 - Workflow 默认 opt-in；`/wf-settings` 始终可用，其他工作流命令由 `/wf` 或 `workflow.autoEnter` 开启。
 - Explore/Plan 是只读模式；Plan 文件通过 `workflow_plan_save` 写入，Work 使用 `workflow_todo` 跟踪任务。
-- Plan Mode 在最终保存前执行 grilling 并持久化 `grillTurns`。Plan Review 是启用后由模型按复杂度选择发起的可选 sidecall；它属于 Plan Mode 内工具调用。
+- Plan Mode 在最终保存前执行 grilling 并持久化 `grillTurns`；`workflow_plan_save` 同时将已确认决策快照到 `planReviewDecisions`。Plan Review 是启用后由模型按复杂度选择发起的可选独立 agent：它在隔离的 in-memory AgentSession 中继承当前 Plan 会话的信息工具面（排除 workflow 工具），自行探索仓库与外部信息工具重新验证计划，只收到权威输入（本轮计划生命周期内的用户需求 + `planReviewDecisions` + 保存的 Final Plan）；它属于 Plan Mode 内工具调用，受一条 30 分钟总时限约束。
 - `/review` 复用 Work runtime，驱动 OCR review/fix/re-review 循环。`ocr` 二进制名固定，参数使用 argv 数组执行，避免 shell 插值。
 - 新计划开始时清理 todo overlay bookkeeping，防止已隐藏 done 项跨计划泄漏；该 bookkeeping 是 session-local 的 overlay 内部状态，不持久化到 `WorkflowState`。
 

@@ -464,8 +464,51 @@ console.log("\n=== Check 6: Source structure verification ===");
 	);
 	nsBody = nsBody.replace(/:\s*NonNullable<[^>]*>/g, "");
 	const nsFnStr = "function normalizeState(raw) {" + nsBody + "\n}";
+	// normalizeState now delegates grillTurns / planReviewDecisions
+	// normalization to the module-level normalizeGrillTurns helper; extract and
+	// strip it too so the isolated eval has it in scope.
+	const ngFnDeclStart = stateTs.indexOf("function normalizeGrillTurns(raw");
+	let ngFnStr = "";
+	if (ngFnDeclStart >= 0) {
+		const ngBodyStart = stateTs.indexOf("{", ngFnDeclStart);
+		let ngDepth = 0,
+			ngFnEnd = ngBodyStart;
+		for (let i = ngBodyStart; i < stateTs.length; i++) {
+			if (stateTs[i] === "{") ngDepth++;
+			else if (stateTs[i] === "}") {
+				ngDepth--;
+				if (ngDepth === 0) {
+					ngFnEnd = i;
+					break;
+				}
+			}
+		}
+		let ngBody = stateTs.slice(ngBodyStart + 1, ngFnEnd);
+		const ngStrips = [
+			[/\bas\s+Record<[^>]*>/g, ""],
+			[/\bas\s+WorkflowState\["[a-z]+"\]\[number\]/g, ""],
+			[/\bas\s+any\b/g, ""],
+			[/\bas\s+Array<[^>]*>/g, ""],
+			[/\bas\s+string\[\]/g, ""],
+			[/\(t:\s*any\)/g, "(t)"],
+			[/:\s*(WorkflowState|string|number|boolean|unknown)\b/g, ""],
+		];
+		for (const [re, repl] of ngStrips) ngBody = ngBody.replace(re, repl);
+		ngFnStr = "function normalizeGrillTurns(raw) {" + ngBody + "\n}";
+	}
+	// Guard against a silent ReferenceError: normalizeState calls
+	// normalizeGrillTurns unconditionally, so a missing extraction must surface
+	// as a clear assertion failure rather than a cryptic eval error.
+	assert(
+		ngFnDeclStart >= 0 && ngFnStr.length > 0,
+		"normalizeGrillTurns function found and extracted from state.ts",
+	);
 	const normalizeState = eval(
-		"(function(DEFAULT_STATE) { return " + nsFnStr + "; })(DEFAULT_STATE)",
+		"(function(DEFAULT_STATE) { " +
+			ngFnStr +
+			" return " +
+			nsFnStr +
+			"; })(DEFAULT_STATE)",
 	);
 
 	assert(
@@ -900,55 +943,91 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"prompts.ts: no workflow_status (removed)",
 	);
 
-	// Sidecall: auth resolution + error surfacing
-	const sidecallTs = fs.readFileSync(
-		path.join(CWD, "extensions/workflow/sidecall.ts"),
+	// Plan review: sidecall removed, independent reviewer agent in place.
+	assert(
+		!fs.existsSync(path.join(CWD, "extensions/workflow/sidecall.ts")),
+		"sidecall.ts removed",
+	);
+	assert(
+		!toolsTs.includes("sidecall.js"),
+		"tools.ts no longer imports sidecall",
+	);
+	const planReviewAgentTs = fs.readFileSync(
+		path.join(CWD, "extensions/workflow/plan-review-agent.ts"),
 		"utf8",
 	);
-	assertNotContains(
-		sidecallTs,
-		"[pi-workflow-plan-review/v1]",
-		"sidecall.ts: no identity marker requirement",
-	);
-	assertNotContains(
-		sidecallTs,
-		"identity_marker_missing",
-		"sidecall.ts: no identity_marker_missing error",
-	);
-	assertNotContains(
-		sidecallTs,
-		"identity marker",
-		"sidecall.ts: no identity marker validation",
-	);
-	// Auth: sidecall must resolve request auth via modelRegistry, not rely on env keys.
 	assert(
-		sidecallTs.includes("getApiKeyAndHeaders"),
-		"sidecall.ts: resolves auth via getApiKeyAndHeaders",
+		planReviewAgentTs.includes("export async function runPlanReviewAgent"),
+		"plan-review-agent.ts: exports runPlanReviewAgent",
 	);
 	assert(
-		/if\s*\(\s*!auth\.ok\s*\)\s*\{\s*throw new Error/.test(sidecallTs),
-		"sidecall.ts: checks auth.ok and throws on failure",
+		planReviewAgentTs.includes("SessionManager.inMemory"),
+		"plan-review-agent.ts: uses an in-memory child SessionManager",
 	);
 	assert(
-		sidecallTs.includes("apiKey: auth.apiKey") &&
-			sidecallTs.includes("headers: auth.headers") &&
-			sidecallTs.includes("env: auth.env"),
-		"sidecall.ts: forwards apiKey, headers, and env to provider streamSimple",
+		planReviewAgentTs.includes("createAgentSession"),
+		"plan-review-agent.ts: builds a fresh child AgentSession",
 	);
 	assert(
-		/await\s+provider\.streamSimple\([\s\S]*?\)\.result\(\)/.test(sidecallTs),
-		"sidecall.ts: chains provider.streamSimple(...).result() at a real call site",
-	);
-	// Error surfacing: detect stopReason === "error" or errorMessage and throw.
-	assert(
-		/stopReason\s*===\s*"error"/.test(sidecallTs),
-		"sidecall.ts: detects stopReason === 'error'",
+		planReviewAgentTs.includes("noExtensions: true"),
+		"plan-review-agent.ts: ResourceLoader disables auto extension discovery",
 	);
 	assert(
-		/if\s*\(\s*response\.stopReason\s*===\s*"error"\s*\|\|\s*response\.errorMessage\s*\)\s*\{\s*throw new Error/.test(
-			sidecallTs,
-		),
-		"sidecall.ts: throws on errorMessage or stopReason error",
+		planReviewAgentTs.includes("workflowManagedToolNames(pi)"),
+		"plan-review-agent.ts: strips workflow-managed tools from the child allowlist",
+	);
+	assert(
+		planReviewAgentTs.includes("PLAN_REVIEW_TOTAL_TIMEOUT_MS = 1_800_000"),
+		"plan-review-agent.ts: 30-minute total timeout constant",
+	);
+	assert(
+		/controller\.signal\.addEventListener\("abort"/.test(planReviewAgentTs),
+		"plan-review-agent.ts: aborts the child session on timeout/cancel",
+	);
+	assert(
+		/finally\b[\s\S]*?session\.dispose\(\)/.test(planReviewAgentTs),
+		"plan-review-agent.ts: disposes the child session in finally",
+	);
+	assert(
+		planReviewAgentTs.includes("usage") &&
+			planReviewAgentTs.includes("requestedTools") &&
+			planReviewAgentTs.includes("unavailableTools"),
+		"plan-review-agent.ts: returns usage + tool diagnostics",
+	);
+	// The tool is now zero-argument and discards legacy sidecall fields.
+	const planReviewToolStart = toolsTs.indexOf(
+		"// ── workflow_plan_review tool (independent reviewer agent)",
+	);
+	const planReviewToolEnd = toolsTs.indexOf(
+		"// ── Internal OCR constants",
+		planReviewToolStart,
+	);
+	assert(
+		planReviewToolStart >= 0 && planReviewToolEnd > planReviewToolStart,
+		"tools.ts: plan review tool block anchors exist",
+	);
+	const planReviewToolBlock = toolsTs.slice(planReviewToolStart, planReviewToolEnd);
+	assert(
+		/parameters:\s*Type\.Object\(\{\s*\}\)/.test(planReviewToolBlock),
+		"tools.ts: workflow_plan_review is zero-argument",
+	);
+	assert(
+		planReviewToolBlock.includes("prepareArguments: preparePlanReviewArguments"),
+		"tools.ts: workflow_plan_review declares prepareArguments",
+	);
+	assert(
+		planReviewToolBlock.includes("void a.task") &&
+			planReviewToolBlock.includes("void a.context") &&
+			planReviewToolBlock.includes("void a.instructions"),
+		"tools.ts: preparePlanReviewArguments discards legacy task/context/instructions",
+	);
+	assert(
+		planReviewToolBlock.includes("runPlanReviewAgent("),
+		"tools.ts: workflow_plan_review invokes the independent reviewer",
+	);
+	assert(
+		planReviewToolBlock.includes("usage: result.usage"),
+		"tools.ts: workflow_plan_review propagates nested usage on the result",
 	);
 
 	// Approve kickoff — scope to approve tool, check immediate runtime handoff behavior.
