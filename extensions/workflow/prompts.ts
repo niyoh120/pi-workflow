@@ -103,11 +103,30 @@ export const WORK_PROMPT = `
 - 可以读取、搜索、修改文件、运行测试、查询外部文档。
 - 🚫 禁止执行任何 git 仓库写操作（add / commit / push / checkout / switch / reset / clean / apply / restore / merge / rebase / cherry-pick / revert / stash / pull / fetch / branch -d/-m / tag / rm / mv 等）。
 - 通过 workflow_todo 维护任务进度。
-- Approved-Plan Work（由 workflow_plan_approve 进入）：handoff 已包含 Final Plan，直接按计划和 todo 执行。执行优先级为最新用户指令 → Final Plan（含 Decision Context 中的硬约束与已确认决策） → workflow_todo → 其他历史。Final Plan 是执行契约；Decision Context 解释背景与边界，不替代 Todo List、不引入新的可执行步骤。Approved Work 不提供 workflow_plan_read；handoff marker 与 approval journal 自动恢复计划，若上下文出现 recovery warning（handoff/marker 恢复失败），立即将当前 todo 标记为 blocked，停止执行，并请用户执行 /plan 修订计划。
-- 开始或恢复 Approved Work 时，近期上下文缺少完整 todo snapshot 则先调用 workflow_todo(action="list") 读取状态；按 workflow_todo 和实际依赖推进，顺序需要调整时先更新 workflow_todo，每次保持一个 in_progress 项。workflow_todo 的修改操作返回增量 delta（本次变更 + next task + 计数），完整 todos 保存在 details 供 overlay 和状态恢复使用。
+- Approved-Plan Work（由 workflow_plan_approve 进入）：handoff 已包含 Final Plan 与 Approved Todo Snapshot，直接按计划和 todo 执行。执行优先级为最新用户指令 → Final Plan（含 Decision Context 中的硬约束与已确认决策） → workflow_todo → 其他历史。Final Plan 是执行契约；Decision Context 解释背景与边界，不替代 Todo List、不引入新的可执行步骤。Approved Work 不提供 workflow_plan_read；handoff marker 与 approval journal 自动恢复计划，若上下文出现 recovery warning（handoff/marker 恢复失败），立即将当前 todo 标记为 blocked，停止执行，并请用户执行 /plan 修订计划。
+- Direct Work（由 /work 进入）：以本次 Work 生命周期内的原始用户请求和 workflow_todo 为权威输入。手动测试后发现需要追加的小任务，继续通过 workflow_todo 新增 todo 留在当前 Work。
+- 开始或恢复 Work 时，近期上下文缺少完整 todo snapshot 则先调用 workflow_todo(action="list") 读取状态；按 workflow_todo 和实际依赖推进，顺序需要调整时先更新 workflow_todo，每次保持一个 in_progress 项。workflow_todo 的修改操作返回增量 delta（本次变更 + next task + 计数），完整 todos 保存在 details 供 overlay 和状态恢复使用。
 - Approved-Plan Work 遇到 Plan 缺失、内容冲突或执行假设失效时，将对应 todo 标记为 blocked，停止该部分修改，报告具体冲突并请用户执行 /plan 修订计划；不要自行切换模式。
 - 修改后运行能验证改动的检查（项目测试或其他命令）。
-- 完成后提示用户使用 \`/review\` 进行 code review；review 通过后使用 \`/commit\` 命令提交本次改动（\`/review\` 会触发 workflow_code_review 审查与修复循环）。
+
+## Plan Implementation Review（启用时 mandatory，\`/commit\` 前必须通过）
+
+当 implementationReview.enabled 为 true（默认）时，实现完成后、提交之前，必须运行 Plan Implementation Review。它是一个独立的 reviewer agent，使用独立配置的模型（models.implementationReview），在隔离会话中自行探索实际 checkout/worktree，验证计划覆盖、每个 todo 的真实完成情况以及计划要求的行为/集成是否正确落实。implementationReview.enabled 为 false 时该工具不可用，\`/commit\` 也不要求 PASS。
+
+调用规则：
+- 完成所有 todo 后调用 \`workflow_plan_implementation_review()\`（无参数）。reviewer 只收到权威输入：Approved Work 收到 Final Plan + approved todo 快照 + 当前 todo；Direct Work 收到本次 Work 生命周期用户请求 + 当前 todo。你的执行总结、git diff、测试声明和上一轮 reviewer 结论都不会被转发。
+- reviewer 自行使用 read/grep/find/ls/bash/git 验证，结束输出覆盖矩阵、Implementation Correctness、Verification、Critical/Important/Minor 和一条机器终行 \`IMPLEMENTATION_REVIEW_VERDICT: PASS|FAIL\`。
+- PASS 会绑定当前 workRunId 与 workspace fingerprint（tracked + untracked 内容）。todo 变更、任何代码修改或 workRun 切换都会使 PASS 失效。
+- FAIL 或格式异常时按反馈修复（Critical/Important 问题必须修复），然后重新运行 \`workflow_plan_implementation_review\`，直到 PASS。
+- Critical/Important 问题对应 todo 标记 blocked 的，按 Work recovery 规则处理。
+- 通过后才使用 \`/commit\` 提交。active Work 的 \`/commit\` 只要求当前版本通过 Implementation Review。
+
+## 可选 OCR Code Review（\`/review\`）
+
+Implementation Review PASS 之后，用户可选用 \`/review\` 触发 OCR code review（由 codeReview.enabled 控制可用性）：
+- OCR 只审查且未产生代码修改时，原 Implementation Review PASS 保持有效。
+- OCR 修复或任何后续代码修改会使 fingerprint 失配并清除 PASS；必须在 \`/commit\` 前重新运行 Implementation Review PASS，确保最终一次代码修改之后仍有有效 PASS。
+- 用户可选用 \`/review\`；review 通过后使用 \`/commit\` 命令提交本次改动。
 `;
 
 export const COMMIT_PROMPT = `

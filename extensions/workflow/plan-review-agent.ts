@@ -55,7 +55,7 @@ import { isAllowedPlanScratchPath, isWorkflowDataPath } from "./guards.js";
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /** Single internal total timeout for the whole reviewer run. */
-export const PLAN_REVIEW_TOTAL_TIMEOUT_MS = 1_800_000; // 30 minutes
+export const REVIEWER_TOTAL_TIMEOUT_MS = 1_800_000; // 30 minutes
 
 /**
  * Built-in tool names that createAgentSession reconstructs from its own
@@ -332,16 +332,28 @@ interface ToolCallLike {
 }
 
 /**
+ * Roots the reviewer safety extension must protect. For an Implementation
+ * Review running in an active worktree, `primaryCwd` is the main checkout and
+ * `reviewCwd` is the worktree path; for a Plan Review both are the same cwd.
+ * Reads under `.pi/workflow/` in EITHER root are blocked so a worktree
+ * reviewer cannot read the main checkout's workflow data and vice versa.
+ */
+export interface ReviewerSafetyRoots {
+	primaryCwd: string;
+	reviewCwd: string;
+}
+
+/**
  * Build the inline child-runtime safety extension. It reuses the existing pure
  * path guards to enforce the Plan-equivalent read/write boundary inside the
  * reviewer runtime:
- *  - read: block any path under .pi/workflow/
+ *  - read: block any path under .pi/workflow/ in EITHER the primary or review cwd
  *  - write/edit: allow only the Plan scratch root
  * Workflow tools are already absent from the child allowlist; bash mutation is
  * governed by the reviewer system prompt (matching the parent guard policy of
  * not scanning shell commands).
  */
-export function createReviewerSafetyExtension(cwd: string): InlineExtension {
+export function createReviewerSafetyExtension(roots: ReviewerSafetyRoots): InlineExtension {
 	return {
 		name: "plan-review-safety",
 		factory: (pi: ExtensionAPI) => {
@@ -362,7 +374,11 @@ export function createReviewerSafetyExtension(cwd: string): InlineExtension {
 					(typeof input.outputPath === "string" && input.outputPath) ||
 					undefined;
 				if (e.toolName === "read") {
-					if (target && isWorkflowDataPath(target, cwd)) {
+					if (
+						target &&
+						(isWorkflowDataPath(target, roots.primaryCwd) ||
+							isWorkflowDataPath(target, roots.reviewCwd))
+					) {
 						return {
 							block: true,
 							reason:
@@ -379,7 +395,7 @@ export function createReviewerSafetyExtension(cwd: string): InlineExtension {
 								"Reviewer write/edit requires an absolute path under the Plan scratch root.",
 						};
 					}
-					const denial = isAllowedPlanScratchPath(cwd, target);
+					const denial = isAllowedPlanScratchPath(roots.reviewCwd, target);
 					if (denial) {
 						return { block: true, reason: `Reviewer: ${denial}` };
 					}
@@ -506,28 +522,61 @@ export interface RunPlanReviewAgentOptions {
 	onProgress?: (text: string) => void;
 }
 
+// ── Shared independent reviewer runner ──────────────────────────────────────
+
 /**
- * Run the independent reviewer. Creates a fresh in-memory AgentSession, drives
- * one prompt to completion (the reviewer's full multi-turn exploration), and
- * returns the final review text plus operational metadata.
- *
- * Always disposes the child session. Timeout or parent cancellation aborts the
- * active AgentSession before throwing an explicit error.
+ * Options for the shared independent reviewer runner. Both Plan Review and
+ * Implementation Review call this with their own authoritative task, system
+ * prompt, and review cwd. The caller computes any post-run artifacts (e.g. the
+ * Implementation Review workspace fingerprint) AFTER this returns — the child
+ * session is fully disposed by then.
  */
-export async function runPlanReviewAgent(
-	opts: RunPlanReviewAgentOptions,
+export interface RunIndependentReviewerOptions {
+	ctx: ExtensionContext;
+	pi: ExtensionAPI;
+	modelSpec: ModelSpec;
+	/** Fully-assembled authoritative task (requirements + plan/decisions or
+	 *  lifecycle requirements + todos). The runner passes it verbatim. */
+	task: string;
+	/** Behavioral mandate appended to the child system prompt. */
+	systemPrompt: string;
+	/** Cwd the reviewer runs in: active worktree path for Implementation
+	 *  Review, ctx.cwd for Plan Review. */
+	reviewCwd: string;
+	/** Roots the safety extension must protect (primary + review cwd). */
+	safetyRoots: ReviewerSafetyRoots;
+	/** Parent tool AbortSignal (user cancellation / turn abort). */
+	parentSignal?: AbortSignal;
+	/** Streaming progress callback. */
+	onProgress?: (text: string) => void;
+	/** Label for timeout/abort messages, e.g. "Plan review" / "Implementation review". */
+	progressLabel: string;
+}
+
+/**
+ * Run an independent reviewer in a fresh in-memory AgentSession. Creates the
+ * child runtime, drives one prompt to completion (the reviewer's full
+ * multi-turn exploration), and returns the final text plus operational
+ * metadata.
+ *
+ * The child session is ALWAYS fully disposed (abort + unsubscribe + dispose)
+ * before this returns, so the caller can safely compute post-run artifacts
+ * (workspace fingerprint) without racing reviewer I/O.
+ *
+ * Timeout or parent cancellation aborts the active AgentSession before
+ * throwing an explicit error.
+ */
+export async function runIndependentReviewer(
+	opts: RunIndependentReviewerOptions,
 ): Promise<PlanReviewAgentResult> {
-	const { ctx, pi, modelSpec, planMarkdown, decisions, branch, planStartEntryId } =
+	const { ctx, pi, modelSpec, task, systemPrompt, reviewCwd, safetyRoots, progressLabel } =
 		opts;
 	const reviewerLabel = `${modelSpec.provider}/${modelSpec.model}`;
+	const labelSlug = progressLabel.toLowerCase().replace(/\s+/g, "-");
 	const startedAt = Date.now();
 
 	// ── Tool surface reconstruction ──
 	const { requestedTools, extensionPaths } = reconstructReviewerToolSurface(pi);
-
-	// ── Authoritative task ──
-	const requirements = extractUserRequirements(branch, planStartEntryId);
-	const task = buildReviewerTask({ requirements, decisions, planMarkdown });
 
 	// ── Model / auth ──
 	const agentDir = getAgentDir();
@@ -537,7 +586,7 @@ export async function runPlanReviewAgent(
 		childRuntime.getModel(modelSpec.provider, modelSpec.model) ??
 		ctx.modelRegistry.find(modelSpec.provider, modelSpec.model);
 	if (!model) {
-		throw new Error(`Plan review model not found: ${reviewerLabel}`);
+		throw new Error(`${progressLabel} model not found: ${reviewerLabel}`);
 	}
 
 	// Thinking level: pass the configured level; "off" disables reasoning.
@@ -547,24 +596,26 @@ export async function runPlanReviewAgent(
 			: undefined;
 
 	// ── Resource loader: project context + skills + active extensions only ──
+	// Use reviewCwd so the reviewer sees the worktree's project context when
+	// running inside an active worktree.
 	let settingsManager: SettingsManager;
 	try {
-		settingsManager = SettingsManager.create(ctx.cwd, agentDir);
+		settingsManager = SettingsManager.create(reviewCwd, agentDir);
 	} catch {
 		settingsManager = SettingsManager.inMemory();
 	}
 	const resourceLoader = new DefaultResourceLoader({
-		cwd: ctx.cwd,
+		cwd: reviewCwd,
 		agentDir,
 		settingsManager,
 		noExtensions: true,
 		additionalExtensionPaths: extensionPaths,
-		extensionFactories: [createReviewerSafetyExtension(ctx.cwd)],
+		extensionFactories: [createReviewerSafetyExtension(safetyRoots)],
 		// Inject the reviewer behavioral mandate (read-only constraint, output
 		// format, evidence-grounding, scratch-write policy) into the child
 		// session's system prompt. Appended after the project context (AGENTS.md
 		// + default) so the reviewer sees project rules AND its review mandate.
-		appendSystemPrompt: [REVIEWER_SYSTEM_PROMPT],
+		appendSystemPrompt: [systemPrompt],
 	});
 	await resourceLoader.reload({
 		// Align child project-trust resolution with the parent session.
@@ -573,14 +624,14 @@ export async function runPlanReviewAgent(
 
 	// ── Child AgentSession ──
 	const { session } = await createAgentSession({
-		cwd: ctx.cwd,
+		cwd: reviewCwd,
 		agentDir,
 		modelRuntime: childRuntime,
 		model,
 		thinkingLevel,
 		tools: requestedTools,
 		resourceLoader,
-		sessionManager: SessionManager.inMemory(ctx.cwd),
+		sessionManager: SessionManager.inMemory(reviewCwd),
 		sessionStartEvent: { type: "session_start", reason: "new" },
 	});
 
@@ -626,7 +677,7 @@ export async function runPlanReviewAgent(
 	const controller = new AbortController();
 	const timer = setTimeout(
 		() => controller.abort(),
-		PLAN_REVIEW_TOTAL_TIMEOUT_MS,
+		REVIEWER_TOTAL_TIMEOUT_MS,
 	);
 	const onParentAbort = () => controller.abort();
 	if (opts.parentSignal) {
@@ -660,14 +711,14 @@ export async function runPlanReviewAgent(
 			await session.bindExtensions({
 				mode: "json",
 				onError: (err) => {
-					console.error("[plan-review] child extension error:", err);
+					console.error(`[${labelSlug}] child extension error:`, err);
 				},
 			});
 		} catch (bindErr) {
 			// bindExtensions failure (e.g. an extension assuming UI) must not abort
 			// the review; builtin tools still work and external tools surface
 			// normal tool errors if selected.
-			console.error("[plan-review] bindExtensions failed:", bindErr);
+			console.error(`[${labelSlug}] bindExtensions failed:`, bindErr);
 		}
 
 		await session.prompt(task);
@@ -718,8 +769,8 @@ export async function runPlanReviewAgent(
 
 	if (aborted) {
 		const reason = timedOut()
-			? `Plan review timed out after ${PLAN_REVIEW_TOTAL_TIMEOUT_MS}ms`
-			: "Plan review aborted";
+			? `${progressLabel} timed out after ${REVIEWER_TOTAL_TIMEOUT_MS}ms`
+			: `${progressLabel} aborted`;
 		throw new Error(
 			`${reason} (model: ${reviewerLabel}, turns: ${turns}, tools: ${toolCalls}).`,
 		);
@@ -727,7 +778,7 @@ export async function runPlanReviewAgent(
 
 	if (!text) {
 		throw new Error(
-			`Plan review produced no final text (model: ${reviewerLabel}, stopReason: ${stopReason ?? "unknown"}${errorMessage ? `, error: ${errorMessage}` : ""}).`,
+			`${progressLabel} produced no final text (model: ${reviewerLabel}, stopReason: ${stopReason ?? "unknown"}${errorMessage ? `, error: ${errorMessage}` : ""}).`,
 		);
 	}
 
@@ -745,4 +796,36 @@ export async function runPlanReviewAgent(
 		activeTools,
 		unavailableTools,
 	};
+}
+
+/**
+ * Run the Plan Review reviewer. Assembles the authoritative plan-review task
+ * (requirements + confirmed decisions + candidate plan) and delegates to the
+ * shared independent reviewer runner running in the parent session cwd.
+ *
+ * Always disposes the child session. Timeout or parent cancellation aborts the
+ * active AgentSession before throwing an explicit error.
+ */
+export async function runPlanReviewAgent(
+	opts: RunPlanReviewAgentOptions,
+): Promise<PlanReviewAgentResult> {
+	const { ctx, modelSpec, planMarkdown, decisions, branch, planStartEntryId } =
+		opts;
+
+	// ── Authoritative task ──
+	const requirements = extractUserRequirements(branch, planStartEntryId);
+	const task = buildReviewerTask({ requirements, decisions, planMarkdown });
+
+	return runIndependentReviewer({
+		ctx,
+		pi: opts.pi,
+		modelSpec,
+		task,
+		systemPrompt: REVIEWER_SYSTEM_PROMPT,
+		reviewCwd: ctx.cwd,
+		safetyRoots: { primaryCwd: ctx.cwd, reviewCwd: ctx.cwd },
+		parentSignal: opts.parentSignal,
+		onProgress: opts.onProgress,
+		progressLabel: "Plan review",
+	});
 }

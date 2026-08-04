@@ -18,6 +18,11 @@
       "model": "gpt-5.1",
       "thinking": "high"
     },
+    "implementationReview": {
+      "provider": "openai",
+      "model": "gpt-5.1",
+      "thinking": "high"
+    },
     "work": {
       "provider": "anthropic",
       "model": "claude-sonnet-4-5",
@@ -30,6 +35,9 @@
     }
   },
   "planReview": {
+    "enabled": true
+  },
+  "implementationReview": {
     "enabled": true
   },
   "codeReview": {

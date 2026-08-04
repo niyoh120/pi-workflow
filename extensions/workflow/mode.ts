@@ -16,6 +16,7 @@ export const WORKFLOW_GATED_TOOLS = [
 	"workflow_grill_record",
 	"workflow_plan_review",
 	"workflow_code_review",
+	"workflow_plan_implementation_review",
 	"workflow_init_complete",
 ] as const;
 
@@ -41,7 +42,9 @@ const PLAN_WORKFLOW_TOOL_NAMES = [
 	"workflow_grill_record",
 ];
 
-const WORK_WORKFLOW_TOOL_NAMES = ["workflow_todo"];
+const WORK_WORKFLOW_TOOL_NAMES = [
+	"workflow_todo",
+];
 
 const EXPLORE_WORKFLOW_TOOL_NAMES: string[] = [];
 
@@ -85,6 +88,8 @@ export function computeWorkflowToolNames(
 		}
 		case "work": {
 			const names = withTodoToolName([...WORK_WORKFLOW_TOOL_NAMES], todoToolName);
+			if (config.implementationReview.enabled)
+				names.push("workflow_plan_implementation_review");
 			if (config.codeReview.enabled) names.push("workflow_code_review");
 			return names;
 		}

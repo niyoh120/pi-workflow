@@ -53,19 +53,24 @@ export interface WorkApprovalData {
 /**
  * Build the static Approved-Plan Work handoff body at approval time.
  *
- * LLM-visible content is the Final Plan snapshot only. Run metadata
- * (planPath, workRunId) is carried in the marker's `details`, not here —
- * embedding planPath in content would hand the model the plan file location
- * and invite direct reads, defeating Plan→Work isolation.
- *
- * `state` is kept in the signature for a stable export surface; it is not
- * read here because its fields are either persisted in WorkflowState or
- * injected via the marker details by the dispatcher.
+ * LLM-visible content includes the Final Plan snapshot and the immutable
+ * approved todo snapshot. Run metadata (planPath, workRunId) is carried in
+ * the marker's `details`, not here — embedding planPath in content would
+ * hand the model the plan file location and invite direct reads, defeating
+ * Plan→Work isolation.
  */
 export function buildWorkHandoffBody(
-	_state: WorkflowState,
+	state: WorkflowState,
 	planMarkdown: string,
 ): string {
+	// Use the immutable approvedTodos snapshot captured at approval time, not
+	// the mutable live state.todos, so the reviewer and Work see the exact
+	// task list the user approved.
+	const approvedTodos = state.approvedTodos;
+	const todoBlock =
+		approvedTodos && approvedTodos.length > 0
+			? formatApprovedTodosForHandoff(approvedTodos)
+			: "(approved todo snapshot missing — coverage gap should be assessed during Implementation Review)";
 	return [
 		"# Approved-Plan Work Handoff",
 		"",
@@ -73,7 +78,45 @@ export function buildWorkHandoffBody(
 		"",
 		"# Final Plan",
 		planMarkdown.trim() || "(空)",
+		"",
+		"# Approved Todo Snapshot",
+		"",
+		todoBlock,
 	].join("\n");
+}
+
+/** Format the immutable approved todo snapshot for the handoff body. */
+export function formatApprovedTodosForHandoff(todos: TodoItem[]): string {
+	if (todos.length === 0) return "(empty)";
+	return todos
+		.map((item) => {
+			const notes = item.notes
+				? ` — ${item.notes.replace(/\r\n|\n|\r/g, " ")}`
+				: "";
+			return `- [${item.status}] ${item.id}: ${item.title}${notes}`;
+		})
+		.join("\n");
+}
+
+/**
+ * Clear any recorded Implementation Review PASS from a state object.
+ * Called by the agent_end stale-PASS check when a fingerprint mismatch is
+ * detected.
+ *
+ * Note: todo mutation paths (workflow_todo, update_plan) clear the PASS
+ * directly via `delete state.implementationReview;` because they already
+ * hold a mutable state reference; this pure helper is for read-then-replace
+ * sites that cannot mutate in place.
+ *
+ * Pure: returns a new state object with implementationReview removed,
+ * leaving all other fields intact.
+ */
+export function invalidateImplementationReview(
+	state: WorkflowState,
+): WorkflowState {
+	if (!state.implementationReview) return state;
+	const { implementationReview: _drop, ...rest } = state;
+	return rest as WorkflowState;
 }
 
 /**

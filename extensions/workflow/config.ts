@@ -184,8 +184,9 @@ export function resolveConfigSources(
 	const leafPaths = [
 		"workflow.autoEnter",
 		"planReview.enabled",
+		"implementationReview.enabled",
 		"codeReview.enabled",
-		...(["explore", "plan", "planReview", "work", "commit"] as const).flatMap(
+		...(["explore", "plan", "planReview", "implementationReview", "work", "commit"] as const).flatMap(
 			(role) => [
 				`models.${role}.provider`,
 				`models.${role}.model`,
@@ -246,6 +247,11 @@ function normalizeConfig(cfg: any): WorkflowConfig {
 		cfg.planReview = { enabled: !!cfg.planReview.enabled };
 	}
 
+	// Strip unknown implementationReview fields — only enabled is supported.
+	if (cfg.implementationReview && typeof cfg.implementationReview === "object") {
+		cfg.implementationReview = { enabled: !!cfg.implementationReview.enabled };
+	}
+
 	// Strip unknown codeReview fields — only enabled is supported.
 	if (cfg.codeReview && typeof cfg.codeReview === "object") {
 		cfg.codeReview = { enabled: !!cfg.codeReview.enabled };
@@ -259,6 +265,7 @@ function normalizeConfig(cfg: any): WorkflowConfig {
 		"planReview",
 		"work",
 		"commit",
+		"implementationReview",
 	]);
 	if (cfg.models && typeof cfg.models === "object") {
 		const cleaned: any = {};

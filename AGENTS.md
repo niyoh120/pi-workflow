@@ -35,7 +35,8 @@ pi install .
 - `mode.ts` / `prompts.ts` / `helpers.ts`：模式工具可见性、模式提示词、运行时消息。
 - `state.ts` / `paths.ts` / `config.ts` / `defaults.ts` / `types.ts`：状态、路径、配置合并、默认值和共享类型。
 - `settings.ts`：`/wf-settings` 的 session/project/global 三层配置 TUI。
-- `plan-review-agent.ts`：Plan Review 的独立 reviewer AgentSession 运行器——父会话活动工具面重建（排除 workflow 工具，内置工具由 `createAgentSession` 重建，外部扩展/MCP/Web 工具从 sourceInfo.path 重建，pi-workflow 自身不加载）、权威任务构建（用户需求 + `planReviewDecisions` + Final Plan）、子运行时安全扩展（复用 `guards.ts` 的纯路径守卫拦截 `.pi/workflow/` 读与项目写）、reviewer 模型/auth 复制、隔离 in-memory AgentSession、总时限中断与 `finally` 清理、进度与嵌套用量聚合。
+- `plan-review-agent.ts`：独立 reviewer 的共享 runner 与 Plan Review 入口——`runIndependentReviewer`（参数化 review cwd、`{ primaryCwd, reviewCwd }` 双 workflow-root 安全扩展、system prompt、authoritative task、进度标签；父会话活动工具面重建排除 workflow 工具，内置工具由 `createAgentSession` 重建，外部扩展/MCP/Web 工具从 sourceInfo.path 重建，pi-workflow 自身不加载）、reviewer 模型/auth 复制、隔离 in-memory AgentSession、总时限中断与 `finally` 清理（child 完整 idle/abort/dispose 后才返回）、进度与嵌套用量聚合。`runPlanReviewAgent` 组装 Plan Review 权威任务（用户需求 + `planReviewDecisions` + Final Plan）并委托共享 runner。
+- `implementation-review-agent.ts`：强制 Plan Implementation Reviewer——独立 system prompt（验证计划覆盖、todo 真实完成、跨模块接入、验收与错误路径，禁 edit/write/git mutation/依赖安装/后台进程，结束前检查 `git status`）、Approved/Direct task builder（仅权威输入，排除父 Work 总结/diff/测试声明）、`parseImplementationVerdict` 严格 fail-closed 终行解析、`runImplementationReviewAgent` 在 validated review cwd 委托共享 runner 并追踪 `madeRepoToolCall`（零仓库工具调用的 PASS 被拒绝）。
 - `ocr-helpers.ts` / `review-tui.ts`：OCR 参数与执行、`/review` 范围选择 UI。
 - `ocr-result.ts`：OCR JSON 解析、归一化、去重与 compact 结果；复用 `terminal-text.ts`。
 - `terminal-text.ts`：无状态 ANSI/控制字符清理，提供保留换行与移除全部控制字符两种语义。
@@ -48,10 +49,10 @@ pi install .
 
 - 运行时状态只能通过 `loadState()` / `saveState()` 访问；`saveState()` 负责建目录和规范化。业务代码不得直接写 session state 文件。
 - session 状态位于 `.pi/workflow/sessions/<safeSessionKey>/state.json`；session key 由 session 标识哈希生成。计划文件共享存放在 `.pi/workflow/plan/`，文件名随机化。
-- 配置优先级固定为 `DEFAULT_CONFIG ← global ← project ← session`。模型角色闭集为 `explore | plan | planReview | work | commit`；load-time gate 变更需要 `/reload`。
+- 配置优先级固定为 `DEFAULT_CONFIG ← global ← project ← session`。模型角色闭集为 `explore | plan | planReview | implementationReview | work | commit`；load-time gate（`workflow.autoEnter`、`planReview.enabled`、`implementationReview.enabled`、`codeReview.enabled`）变更需要 `/reload`。
 - `Mode` 是闭集。新增模式时同步更新 `types.ts`、`prompts.ts`、`helpers.ts`、`mode.ts` 的 exhaustive switch，并保留 `assertNever()` 保护。
 - 状态变更后立即 `saveState()`；模式切换走现有 transition/runtime helper，保持持久化状态、工具可见性和当前模型同步。
-- `workflow_plan_approve` 可选择创建独立 worktree。active worktree 存在时，文件工具只能写其绝对路径；bash cwd 由扩展重定向到 worktree。
+- `workflow_plan_approve` 要求当前 todo 非空，深拷贝为不可变 `approvedTodos`，清理旧 Implementation Review PASS；可选择创建独立 worktree。active worktree 存在时，文件工具只能写其绝对路径；bash cwd 由扩展重定向到 worktree。`implementationReview` PASS 绑定 `workRunId` 与 workspace fingerprint（tracked diff 字节 + 排序后非 ignored untracked 内容的 SHA-256），todo 变更、代码变化或 workRun 切换使其失效；active Work 的 `/commit` 只要求当前版本通过 Implementation Review，不要求 OCR。
 - Init Mode 仅允许写记录在 `initTargetPath` 的单个 `AGENTS.md`；完成、跳过或取消均通过 `workflow_init_complete` 恢复原模式。
 
 ## 工作流特有行为
@@ -60,6 +61,9 @@ pi install .
 - Explore/Plan 是只读模式；Plan 文件通过 `workflow_plan_save` 写入，Work 使用 `workflow_todo` 跟踪任务。
 - Plan Mode 在最终保存前执行 grilling 并持久化 `grillTurns`；`workflow_plan_save` 同时将已确认决策快照到 `planReviewDecisions`。Plan Review 是启用后由模型按复杂度选择发起的可选独立 agent：它在隔离的 in-memory AgentSession 中继承当前 Plan 会话的信息工具面（排除 workflow 工具），自行探索仓库与外部信息工具重新验证计划，只收到权威输入（本轮计划生命周期内的用户需求 + `planReviewDecisions` + 保存的 Final Plan）；它属于 Plan Mode 内工具调用，受一条 30 分钟总时限约束。
 - `/review` 复用 Work runtime，驱动 OCR review/fix/re-review 循环。`ocr` 二进制名固定，参数使用 argv 数组执行，避免 shell 插值。
+- 三个独立的审查概念：(1) 可选 Plan Review（`workflow_plan_review`，Plan Mode 内模型按复杂度发起，`planReview.enabled` 控制）；(2) Plan Implementation Review（`workflow_plan_implementation_review`，默认开启，`implementationReview.enabled` 控制；开启时 Work Mode `/commit` 前必须 PASS，关闭即放行）；(3) 可选 OCR Code Review（`workflow_code_review`，由 `codeReview.enabled` 控制并由用户决定是否 `/review`）。
+- 两条最终提交流程：无 OCR 时 Implementation Review PASS → `/commit`；有 OCR 时 Implementation Review PASS → `/review` → 若 OCR 修复产生代码变化则重新 Implementation Review PASS → `/commit`。
+- Plan save 后必须写入完整 todos 才能 approve（`workflow_plan_approve` 拒绝空 todo，并把当前 todos 深拷贝为不可变 `approvedTodos`）；Implementation Reviewer 的 bash mutation 属于 prompt-governed 限制（文件工具与主/worktree 两个 `.pi/workflow/` 根受硬 guard）。
 - 新计划开始时清理 todo overlay bookkeeping，防止已隐藏 done 项跨计划泄漏；该 bookkeeping 是 session-local 的 overlay 内部状态，不持久化到 `WorkflowState`。
 
 ## 工作流启用判定
@@ -80,4 +84,4 @@ pi install .
 
 ## 已知仓库偏差
 
-- 无。`config.json.example` 与五个模型角色闭集一致。
+- 无。`config.json.example` 与六个模型角色闭集（含 `implementationReview`）一致。

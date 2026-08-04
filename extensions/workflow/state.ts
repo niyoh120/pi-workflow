@@ -25,6 +25,27 @@ export function getSessionKey(ctx: any): string {
 	return deriveSessionKey(sm ?? {});
 }
 
+/** Normalize a raw TodoItem[] array. Shared by todos and approvedTodos so
+ *  both todo fields stay in sync and reject malformed shapes consistently. */
+function normalizeTodos(raw: unknown): WorkflowState["todos"] {
+	return Array.isArray(raw)
+		? (raw as Array<WorkflowState["todos"][number]>)
+				.filter((t: any) => t && typeof t === "object")
+				.map((t: any) => ({
+					id: t.id ?? "",
+					title: t.title ?? "",
+					status:
+						t.status === "pending" ||
+						t.status === "in_progress" ||
+						t.status === "done" ||
+						t.status === "blocked"
+							? t.status
+							: "pending",
+					notes: typeof t.notes === "string" ? t.notes : undefined,
+				}))
+		: [];
+}
+
 /** Normalize a raw GrillTurn[] array. Shared by grillTurns and
  *  planReviewDecisions so both review-context fields stay in sync. */
 function normalizeGrillTurns(raw: unknown): WorkflowState["grillTurns"] {
@@ -48,6 +69,23 @@ function normalizeGrillTurns(raw: unknown): WorkflowState["grillTurns"] {
 					notes: typeof t.notes === "string" ? t.notes : undefined,
 				}))
 		: [];
+}
+
+/** Normalize an implementationReview PASS record. Returns undefined when
+ *  the shape is invalid so stale/corrupt PASS metadata cannot survive
+ *  normalization. */
+function normalizeImplementationReview(
+	raw: unknown,
+): WorkflowState["implementationReview"] {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const r = raw as Record<string, unknown>;
+	const workRunId = typeof r.workRunId === "string" ? r.workRunId.trim() : "";
+	const workspaceFingerprint =
+		typeof r.workspaceFingerprint === "string"
+			? r.workspaceFingerprint.trim()
+			: "";
+	if (!workRunId || !workspaceFingerprint) return undefined;
+	return { workRunId, workspaceFingerprint };
 }
 
 /**
@@ -114,16 +152,17 @@ export function normalizeState(raw: unknown): WorkflowState {
 			obj.pendingWorkKickoff.trim()
 				? obj.pendingWorkKickoff.trim()
 				: undefined,
-		todos: Array.isArray(obj.todos)
-			? (obj.todos as Array<WorkflowState["todos"][number]>)
-					.filter((t: any) => t && typeof t === "object")
-					.map((t: any) => ({
-						id: t.id ?? "",
-						title: t.title ?? "",
-						status: t.status ?? "pending",
-						notes: t.notes,
-					}))
-			: [],
+		todos: normalizeTodos(obj.todos),
+		approvedTodos:
+			Array.isArray(obj.approvedTodos) && obj.approvedTodos.length > 0
+				? normalizeTodos(obj.approvedTodos)
+				: undefined,
+		workStartEntryId:
+			typeof obj.workStartEntryId === "string" &&
+			obj.workStartEntryId.trim()
+				? obj.workStartEntryId.trim()
+				: undefined,
+		implementationReview: normalizeImplementationReview(obj.implementationReview),
 		grillTurns: normalizeGrillTurns(obj.grillTurns),
 		planStartEntryId:
 			typeof obj.planStartEntryId === "string" && obj.planStartEntryId.trim()

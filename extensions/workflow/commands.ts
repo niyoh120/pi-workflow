@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import { getSessionKey, loadState, saveState, acquireDispatcherLock, releaseDispatcherLock } from "./state.js";
 import { COMMON_PROMPT } from "./prompts.js";
+import { resolveEffectiveCwd } from "./tools.js";
 import {
 	isWorkflowDataPath,
 	isReadonlyMode,
@@ -14,6 +15,7 @@ import {
 	buildModeMessageBody,
 	currentStatusText,
 	isWorkflowActive,
+	invalidateImplementationReview,
 	WORK_HANDOFF_CUSTOM_TYPE,
 } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
@@ -45,6 +47,7 @@ import {
 	gitStatusInWorktree,
 	removeWorktree,
 	validateWorktreeState,
+	computeWorkspaceFingerprint,
 } from "./worktree.js";
 
 /** Read the session branch. Returns undefined on failure (fail-open). */
@@ -698,6 +701,27 @@ export function registerAgentEnd(
 		if (overlay && state.mode !== "idle") {
 			overlay.update(state.todos);
 		}
+
+		// Stale-PASS check: only when a PASS is already recorded AND we are in
+		// Work mode. Avoids adding git overhead to normal turns without a PASS.
+		// A mismatch (code changed, untracked content changed, or workRun
+		// switched) clears the PASS so /commit refuses to accept a stale result.
+		// Failures computing the fingerprint are logged but not fatal here —
+		// /commit performs its own authoritative check.
+		if (state.mode === "work" && state.implementationReview) {
+			try {
+				const effectiveCwd = resolveEffectiveCwd(ctx.cwd, state);
+				const currentFp = computeWorkspaceFingerprint(effectiveCwd);
+				if (currentFp !== state.implementationReview.workspaceFingerprint) {
+					const cleared = invalidateImplementationReview(state);
+					saveState(ctx.cwd, sessionKey, cleared);
+				}
+			} catch (err) {
+				console.error(
+					`[workflow] agent_end fingerprint check failed: ${err instanceof Error ? err.message : err}`,
+				);
+			}
+		}
 	});
 }
 
@@ -912,6 +936,15 @@ export function registerWorkCommand(
 				worktreePath: current.worktreePath,
 				worktreeBranch: current.worktreeBranch,
 				worktreeBaseBranch: current.worktreeBaseBranch,
+				// Capture the session leaf so the Implementation Reviewer can scope
+				// authoritative requirement extraction to this Direct Work lifecycle.
+				workStartEntryId:
+					(ctx as { sessionManager?: { getLeafId?: () => string | undefined } })
+						.sessionManager?.getLeafId?.() ?? undefined,
+				// Direct Work has no approved plan; clear any stale approved todos
+				// and Implementation Review PASS from a prior Approved Work run.
+				approvedTodos: undefined,
+				implementationReview: undefined,
 			};
 
 			const overlay = getWorkflowOverlay();
@@ -1164,7 +1197,8 @@ Review scope: ${scopeDescription}
 4. 修复后再次调用 workflow_code_review，让 reviewer 基于更新后的代码重新审查；持续 review → fix → re-review，直到没有新的 Critical/Important 问题。
 5. 如果你判断某个 reviewer 问题是误判、超出范围、投入产出比不合理或与项目约束冲突，在下一轮 background 中说明技术理由。
 6. 第一轮 review 已经没有 Critical/Important 问题时，可以结束循环。2-3 轮后仍存在分歧时，停止并交给用户裁决。
-7. Minor 问题按价值选择处理，不能阻塞 review 通过。`;
+7. Minor 问题按价值选择处理，不能阻塞 review 通过。
+8. ⚠️ OCR 修复（或任何其他代码修改）会使之前的 Plan Implementation Review PASS 失效。若本轮 OCR 产生了代码改动，结束前必须重新调用 workflow_plan_implementation_review() 获得 PASS，确保最终一次代码修改之后仍有有效 Implementation Review PASS，否则 /commit 会被拒绝。`;
 	ctx.ui.notify(`Starting code review loop: ${scopeDescription}.`, "info");
 	pi.setSessionName(`review: ${scope.scopeKind}`);
 	pi.sendUserMessage(promptText);
@@ -1204,6 +1238,62 @@ export function registerCommitCommand(
 				if (!validation.ok) {
 					ctx.ui.notify(
 						`Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
+						"error",
+					);
+					return;
+				}
+			}
+
+			// Active-Work commit gate: require a matching Implementation Review PASS
+			// when implementationReview is enabled. Only enforced when committing
+			// from an active Work run (mode === "work" with a workRunId). When
+			// implementationReview.enabled is false the gate is skipped entirely
+			// (the review is fully optional). OCR code review status does NOT
+			// participate — it remains user-optional.
+			const commitConfig = loadConfigForContext(
+				ctx.cwd,
+				getAgentDir(),
+				sessionKey,
+				ctx as { isProjectTrusted?: () => boolean },
+			);
+			if (
+				commitConfig.implementationReview.enabled &&
+				current.mode === "work" &&
+				current.workRunId
+			) {
+				const pass = current.implementationReview;
+				if (!pass) {
+					ctx.ui.notify(
+						"Active Work 没有通过 Plan Implementation Review。\n" +
+							"请先调用 workflow_plan_implementation_review() 完成 implementation review → fix → re-review 循环，\n" +
+							"PASS 后再使用 /commit。如果 OCR /review 修复产生了代码变化，需重新执行 Implementation Review PASS。",
+						"error",
+					);
+					return;
+				}
+				if (pass.workRunId !== current.workRunId) {
+					ctx.ui.notify(
+						"Implementation Review PASS 属于另一个 Work run。\n" +
+							"请重新调用 workflow_plan_implementation_review() 为当前 Work run 生成有效 PASS。",
+						"error",
+					);
+					return;
+				}
+				try {
+					const effectiveCwd = resolveEffectiveCwd(ctx.cwd, current);
+					const currentFp = computeWorkspaceFingerprint(effectiveCwd);
+					if (currentFp !== pass.workspaceFingerprint) {
+						ctx.ui.notify(
+							"Workspace 指纹与 Implementation Review PASS 不匹配——代码或 untracked 内容在 PASS 之后发生了变化。\n" +
+								"请重新调用 workflow_plan_implementation_review() 验证最新代码后再 /commit。",
+							"error",
+						);
+						return;
+					}
+				} catch (err) {
+					ctx.ui.notify(
+						`无法计算 workspace 指纹：${err instanceof Error ? err.message : err}\n` +
+							"请确认 git 可用后重新调用 workflow_plan_implementation_review() 再 /commit。",
 						"error",
 					);
 					return;

@@ -75,6 +75,7 @@ function inlineComputeWorkflowToolNames(mode, config) {
 		}
 		case "work": {
 			const names = ["workflow_todo"];
+			if (config.implementationReview && config.implementationReview.enabled) names.push("workflow_plan_implementation_review");
 			if (config.codeReview.enabled) names.push("workflow_code_review");
 			return names;
 		}
@@ -464,51 +465,48 @@ console.log("\n=== Check 6: Source structure verification ===");
 	);
 	nsBody = nsBody.replace(/:\s*NonNullable<[^>]*>/g, "");
 	const nsFnStr = "function normalizeState(raw) {" + nsBody + "\n}";
-	// normalizeState now delegates grillTurns / planReviewDecisions
-	// normalization to the module-level normalizeGrillTurns helper; extract and
-	// strip it too so the isolated eval has it in scope.
-	const ngFnDeclStart = stateTs.indexOf("function normalizeGrillTurns(raw");
-	let ngFnStr = "";
-	if (ngFnDeclStart >= 0) {
-		const ngBodyStart = stateTs.indexOf("{", ngFnDeclStart);
-		let ngDepth = 0,
-			ngFnEnd = ngBodyStart;
-		for (let i = ngBodyStart; i < stateTs.length; i++) {
-			if (stateTs[i] === "{") ngDepth++;
+	// normalizeState now delegates todos / approvedTodos / grillTurns /
+	// planReviewDecisions / implementationReview normalization to module-level
+	// helpers; extract and strip each so the isolated eval has them in scope.
+	const helperStrips = [
+		[/\bas\s+Record<[^>]*>/g, ""],
+		[/\bas\s+WorkflowState\["[a-z]+"\]\[number\]/g, ""],
+		[/\bas\s+any\b/g, ""],
+		[/\bas\s+Array<[^>]*>/g, ""],
+		[/\bas\s+string\[\]/g, ""],
+		[/\(t:\s*any\)/g, "(t)"],
+		[/:\s*(WorkflowState|string|number|boolean|unknown)\b/g, ""],
+	];
+	function extractFnBody(fnName) {
+		const decl = stateTs.indexOf("function " + fnName + "(");
+		if (decl < 0) return "";
+		const bodyStart = stateTs.indexOf("{", decl);
+		let depth = 0, end = bodyStart;
+		for (let i = bodyStart; i < stateTs.length; i++) {
+			if (stateTs[i] === "{") depth++;
 			else if (stateTs[i] === "}") {
-				ngDepth--;
-				if (ngDepth === 0) {
-					ngFnEnd = i;
-					break;
-				}
+				depth--;
+				if (depth === 0) { end = i; break; }
 			}
 		}
-		let ngBody = stateTs.slice(ngBodyStart + 1, ngFnEnd);
-		const ngStrips = [
-			[/\bas\s+Record<[^>]*>/g, ""],
-			[/\bas\s+WorkflowState\["[a-z]+"\]\[number\]/g, ""],
-			[/\bas\s+any\b/g, ""],
-			[/\bas\s+Array<[^>]*>/g, ""],
-			[/\bas\s+string\[\]/g, ""],
-			[/\(t:\s*any\)/g, "(t)"],
-			[/:\s*(WorkflowState|string|number|boolean|unknown)\b/g, ""],
-		];
-		for (const [re, repl] of ngStrips) ngBody = ngBody.replace(re, repl);
-		ngFnStr = "function normalizeGrillTurns(raw) {" + ngBody + "\n}";
+		let body = stateTs.slice(bodyStart + 1, end);
+		for (const [re, repl] of helperStrips) body = body.replace(re, repl);
+		return body;
 	}
-	// Guard against a silent ReferenceError: normalizeState calls
-	// normalizeGrillTurns unconditionally, so a missing extraction must surface
-	// as a clear assertion failure rather than a cryptic eval error.
-	assert(
-		ngFnDeclStart >= 0 && ngFnStr.length > 0,
-		"normalizeGrillTurns function found and extracted from state.ts",
-	);
+	const ngBody = extractFnBody("normalizeGrillTurns");
+	const ntBody = extractFnBody("normalizeTodos");
+	const nirBody = extractFnBody("normalizeImplementationReview");
+	const ngFnStr = "function normalizeGrillTurns(raw) {" + ngBody + "\n}";
+	const ntFnStr = "function normalizeTodos(raw) {" + ntBody + "\n}";
+	const nirFnStr = "function normalizeImplementationReview(raw) {" + nirBody + "\n}";
+	// Guards against silent ReferenceErrors.
+	assert(ngBody.length > 0, "normalizeGrillTurns function found and extracted from state.ts");
+	assert(ntBody.length > 0, "normalizeTodos function found and extracted from state.ts");
+	assert(nirBody.length > 0, "normalizeImplementationReview function found and extracted from state.ts");
 	const normalizeState = eval(
 		"(function(DEFAULT_STATE) { " +
-			ngFnStr +
-			" return " +
-			nsFnStr +
-			"; })(DEFAULT_STATE)",
+			ngFnStr + ntFnStr + nirFnStr +
+			" return " + nsFnStr + "; })(DEFAULT_STATE)",
 	);
 
 	assert(
@@ -925,8 +923,8 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"prompts.ts: work prompt does not tell model to auto-review",
 	);
 	assert(
-		promptsTs.includes("workflow_code_review"),
-		"prompts.ts: mentions workflow_code_review",
+		promptsTs.includes("workflow_plan_implementation_review"),
+		"prompts.ts: mentions workflow_plan_implementation_review (mandatory Work gate)",
 	);
 	assert(
 		promptsTs.includes("workflow_plan_review"),
@@ -977,7 +975,7 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"plan-review-agent.ts: strips workflow-managed tools from the child allowlist",
 	);
 	assert(
-		planReviewAgentTs.includes("PLAN_REVIEW_TOTAL_TIMEOUT_MS = 1_800_000"),
+		planReviewAgentTs.includes("REVIEWER_TOTAL_TIMEOUT_MS = 1_800_000"),
 		"plan-review-agent.ts: 30-minute total timeout constant",
 	);
 	assert(
@@ -1347,10 +1345,12 @@ console.log("\n=== Check 14: Explore mode ===");
 	// mode.ts: workflow tool gating hides workflow tools in explore/idle.
 	const cfgAllReviewTools = {
 		planReview: { enabled: true },
+		implementationReview: { enabled: true },
 		codeReview: { enabled: true },
 	};
 	const cfgNoReviewTools = {
 		planReview: { enabled: false },
+		implementationReview: { enabled: false },
 		codeReview: { enabled: false },
 	};
 	assert(
@@ -1362,7 +1362,7 @@ console.log("\n=== Check 14: Explore mode ===");
 		inlineComputeWorkflowToolNames("plan", cfgAllReviewTools).join(",") ===
 			"workflow_todo,workflow_plan_read,workflow_plan_save,workflow_plan_approve,workflow_plan_clear,workflow_plan_review" &&
 			inlineComputeWorkflowToolNames("work", cfgAllReviewTools).join(",") ===
-				"workflow_todo,workflow_code_review" &&
+				"workflow_todo,workflow_plan_implementation_review,workflow_code_review" &&
 			inlineComputeWorkflowToolNames("work", cfgNoReviewTools).join(",") ===
 				"workflow_todo" &&
 			inlineComputeWorkflowToolNames("commit", cfgAllReviewTools).length === 0,

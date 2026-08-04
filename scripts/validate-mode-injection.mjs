@@ -304,9 +304,35 @@ assert(
 	/const EXPLORE_WORKFLOW_TOOL_NAMES: string\[\] = \[\];/.test(mode),
 	"mode.ts: Explore workflow tool set is empty (plan_read removed from Explore)",
 );
+// WORK_WORKFLOW_TOOL_NAMES base set is todo-only; implementation review is
+// conditionally pushed in computeWorkflowToolNames on implementationReview.enabled.
+// Scope the regex to the array literal so it cannot match the push site.
+const workBaseMatch = mode.match(/const WORK_WORKFLOW_TOOL_NAMES = (\[[\s\S]*?\]);/);
+assert(workBaseMatch !== null, "mode.ts: WORK_WORKFLOW_TOOL_NAMES array found");
 assert(
-	/const WORK_WORKFLOW_TOOL_NAMES = \["workflow_todo"\];/.test(mode),
-	"mode.ts: Work base tool set is todo only (plan_read removed from Work)",
+	workBaseMatch !== null &&
+		/"workflow_todo"/.test(workBaseMatch[1]) &&
+		!/workflow_plan_implementation_review/.test(workBaseMatch[1]),
+	"mode.ts: WORK_WORKFLOW_TOOL_NAMES base set is todo-only (implementation review is conditional)",
+);
+assert(
+	/config\.implementationReview\.enabled[\s\S]*?names\.push\("workflow_plan_implementation_review"\)/.test(mode),
+	"mode.ts: computeWorkflowToolNames conditionally adds implementation review on implementationReview.enabled",
+);
+assert(
+	mode.includes('"workflow_plan_implementation_review"'),
+	"mode.ts: WORKFLOW_GATED_TOOLS includes workflow_plan_implementation_review",
+);
+// Implementation Review is always enabled in Work; OCR code review stays
+// conditional on codeReview.enabled.
+const workComputeBlock = mode.slice(
+	mode.indexOf("case \"work\": {"),
+	mode.indexOf("case \"explore\":", mode.indexOf("case \"work\": {")),
+);
+assert(
+	workComputeBlock.includes("WORK_WORKFLOW_TOOL_NAMES") &&
+		workComputeBlock.includes("workflow_code_review"),
+	"mode.ts: computeWorkflowToolNames work branch spreads WORK base set then conditionally adds implementation review and code review",
 );
 assert(
 	/sameMembers/.test(mode),

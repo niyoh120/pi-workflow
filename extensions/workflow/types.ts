@@ -3,7 +3,13 @@ import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 export type Thinking = ModelThinkingLevel;
 
 /** Workflow roles — only the ones we actively configure models for. */
-export type Role = "explore" | "plan" | "planReview" | "work" | "commit";
+export type Role =
+	| "explore"
+	| "plan"
+	| "planReview"
+	| "work"
+	| "commit"
+	| "implementationReview";
 
 /**
  * Simplified mode: idle plus explore/init/plan/work/commit workflow states.
@@ -50,6 +56,7 @@ export interface WorkflowConfigOverride {
 	models?: Partial<Record<Role, Partial<ModelSpec>>>;
 	workflow?: Partial<WorkflowConfig["workflow"]>;
 	planReview?: Partial<WorkflowConfig["planReview"]>;
+	implementationReview?: Partial<WorkflowConfig["implementationReview"]>;
 	codeReview?: Partial<WorkflowConfig["codeReview"]>;
 }
 
@@ -61,6 +68,16 @@ export interface WorkflowConfig {
 	};
 	/** Plan review via an independent reviewer agent — optional, controlled by enabled flag. */
 	planReview: {
+		enabled: boolean;
+	};
+	/**
+	 * Plan Implementation Review — a mandatory Work Mode gate that verifies
+	 * the implementation satisfies the approved plan before /commit. When
+	 * enabled (default), the workflow_plan_implementation_review tool is exposed
+	 * and /commit requires a matching PASS. When disabled, the tool is hidden
+	 * and /commit skips the gate (the review becomes fully optional).
+	 */
+	implementationReview: {
 		enabled: boolean;
 	};
 	/** Code review via alibaba/open-code-review CLI — optional, controlled by enabled flag. */
@@ -150,6 +167,31 @@ export interface WorkflowState {
 	 * Cleared on approval/clear.
 	 */
 	planReviewDecisions: GrillTurn[];
+	/**
+	 * Immutable snapshot of the approved todo list, captured at plan
+	 * approval time. Deep-copied so later todo mutations do not alter the
+	 * snapshot the reviewer compares against. Undefined in Direct Work and
+	 * on older sessions; the reviewer flags the gap rather than silently
+	 * passing.
+	 */
+	approvedTodos?: TodoItem[];
+	/**
+	 * Session leaf entry id captured when `/work` starts a Direct Work run.
+	 * Scopes authoritative requirement extraction to this Work lifecycle so the
+	 * implementation reviewer only sees user messages from this work session.
+	 * Undefined in Approved Work (which uses the Final Plan instead).
+	 */
+	workStartEntryId?: string;
+	/**
+	 * Implementation Review PASS metadata. Records the workRunId and workspace
+	 * fingerprint at the time the reviewer returned PASS. Cleared by todo
+	 * mutations, code changes, or a workRun switch. `/commit` requires a
+	 * matching PASS before accepting a commit in active Work.
+	 */
+	implementationReview?: {
+		workRunId: string;
+		workspaceFingerprint: string;
+	};
 	/**
 	 * Mode to restore after Init Mode ends. Undefined when not in init.
 	 * `idle` and `init` are excluded as return targets (workflow auto-promotes

@@ -118,7 +118,7 @@ interface SettingDescriptor {
 	reloadSensitive?: boolean;
 }
 
-const ROLES = ["explore", "plan", "planReview", "work", "commit"] as const;
+const ROLES = ["explore", "plan", "planReview", "implementationReview", "work", "commit"] as const;
 
 const THINKING_VALUES = [
 	"off",
@@ -134,6 +134,7 @@ const THINKING_VALUES = [
 const RELOAD_SENSITIVE_IDS = new Set([
 	"workflow.autoEnter",
 	"planReview.enabled",
+	"implementationReview.enabled",
 	"codeReview.enabled",
 ]);
 
@@ -155,6 +156,15 @@ function buildDescriptors(): SettingDescriptor[] {
 				"Expose the workflow_plan_review tool (requires /reload to register/unregister).",
 			kind: "boolean",
 			path: ["planReview", "enabled"],
+			reloadSensitive: true,
+		},
+		{
+			id: "implementationReview.enabled",
+			label: "implementationReview · enabled",
+			description:
+				"Expose workflow_plan_implementation_review and require a PASS before /commit in Work Mode (requires /reload to register/unregister).",
+			kind: "boolean",
+			path: ["implementationReview", "enabled"],
 			reloadSensitive: true,
 		},
 		{
@@ -755,7 +765,7 @@ export function registerWfSettingsCommand(
 
 	pi.registerCommand("wf-settings", {
 		description:
-			"配置 workflow 选项（models / autoEnter / planReview / codeReview），支持 session / project / global 三层作用域",
+			"配置 workflow 选项（models / autoEnter / planReview / implementationReview / codeReview），支持 session / project / global 三层作用域",
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 			const cwd = ctx.cwd;
@@ -1117,7 +1127,7 @@ export function registerWfSettingsCommand(
 
 			if (!runtimeApplied) {
 				const suffix = reloadNeeded
-					? " Changes to autoEnter / planReview.enabled / codeReview.enabled also need /reload."
+					? " Changes to autoEnter / planReview.enabled / implementationReview.enabled / codeReview.enabled also need /reload."
 					: "";
 				ctx.ui.notify(
 					`Workflow settings saved (${scopes}), but the runtime failed to switch model/thinking. Check provider/model names and API key.${suffix}`,
@@ -1125,7 +1135,7 @@ export function registerWfSettingsCommand(
 				);
 			} else if (reloadNeeded) {
 				ctx.ui.notify(
-					`Workflow settings saved (${scopes}). Changes to autoEnter / planReview.enabled / codeReview.enabled need /reload to take effect.`,
+					`Workflow settings saved (${scopes}). Changes to autoEnter / planReview.enabled / implementationReview.enabled / codeReview.enabled need /reload to take effect.`,
 					"warning",
 				);
 			} else {

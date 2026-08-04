@@ -20,6 +20,7 @@ import {
 	plannedWorktreeInfo,
 	removeWorktree,
 	validateWorktreeState,
+	computeWorkspaceFingerprint,
 } from "./worktree.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import {
@@ -35,6 +36,9 @@ import type { TodoStatus, WorkflowState } from "./types.js";
 import {
 	runPlanReviewAgent,
 } from "./plan-review-agent.js";
+import {
+	runImplementationReviewAgent,
+} from "./implementation-review-agent.js";
 import { transitionWorkflowMode } from "./mode.js";
 import {
 	WORK_APPROVAL_CUSTOM_TYPE,
@@ -73,14 +77,15 @@ function cleanupCreatedWorktree(cwd: string, worktreePath: string, branch: strin
 
 /**
  * Resolve the effective execution cwd for an external process spawned by a
- * workflow-owned tool (bash override, code review). An active worktree in
- * session state is validated via the shared worktree validator and its
- * absolute path is returned; a plain checkout session returns ctx.cwd.
+ * workflow-owned tool (bash override, code review, implementation reviewer).
+ * An active worktree in session state is validated via the shared worktree
+ * validator and its absolute path is returned; a plain checkout session
+ * returns ctx.cwd.
  *
- * Throws on an invalid worktree with a recovery hint so both callers share
+ * Throws on an invalid worktree with a recovery hint so all callers share
  * one worktree semantics and error message.
  */
-function resolveEffectiveCwd(cwd: string, state: WorkflowState): string {
+export function resolveEffectiveCwd(cwd: string, state: WorkflowState): string {
 	if (!state.worktreePath) return cwd;
 	const validation = validateWorktreeState(cwd, state);
 	if (!validation.ok) {
@@ -277,6 +282,10 @@ export function registerTodoTool(
 				changedId = params.id;
 			}
 
+			// Todo mutations invalidate any recorded Implementation Review PASS —
+			// the reviewer validated the prior task list, and changes mean the PASS
+			// no longer covers the current plan.
+			delete state.implementationReview;
 			saveState(ctx.cwd, sessionKey, state);
 
 			const overlay = getWorkflowOverlay();
@@ -337,6 +346,8 @@ export function registerUpdatePlanTool(
 					kind: "replace",
 					items: params.plan,
 				});
+				// Full-list replacement invalidates any Implementation Review PASS.
+				delete state.implementationReview;
 				saveState(ctx.cwd, sessionKey, state);
 
 				if (overlay) overlay.update(state.todos);
@@ -552,6 +563,16 @@ export function registerPlanApproveTool(
 			// user re-enters /plan instead of starting an empty Work run.
 			const planMarkdown = requirePlanMarkdown(ctx.cwd, state.planPath);
 
+			// Approval requires a non-empty todo list. The Plan prompt mandates
+			// save → write todos → approve; rejecting empty todos here enforces
+			// that the Work run starts with a concrete task list and the
+			// Implementation Reviewer has a plan coverage target to verify.
+			if (!state.todos || state.todos.length === 0) {
+				throw new Error(
+	`Cannot approve a plan with an empty todo list. After workflow_plan_save, write the full todo list via workflow_todo(action="reset", items=[...]) before calling workflow_plan_approve.`,
+				);
+			}
+
 			const workRunId = crypto.randomUUID();
 			let worktreePath: string | undefined;
 			let worktreeBranch: string | undefined;
@@ -600,6 +621,14 @@ export function registerPlanApproveTool(
 				worktreeBranch,
 				worktreeBaseBranch,
 				pendingWorkKickoff: workRunId,
+				// Deep-copy the current todo list as an immutable approved snapshot.
+				// The reviewer and handoff use this snapshot, not the mutable live
+				// state.todos, so later Work mutations don't alter what was approved.
+				approvedTodos: state.todos.map((t) => ({ ...t })),
+				// Clear any prior Implementation Review PASS — a new work run starts
+				// without a valid PASS; Work must run the Implementation Reviewer
+				// before /commit will accept a commit.
+				implementationReview: undefined,
 				// Plan-lifecycle review-context fields are no longer relevant once the
 				// plan is approved; drop them so they cannot leak into a later Plan run.
 				planStartEntryId: undefined,
@@ -1205,6 +1234,201 @@ export function registerCodeReviewTool(
 	});
 }
 
+// ── workflow_plan_implementation_review tool (mandatory Work gate) ──────
+
+export function registerPlanImplementationReviewTool(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.registerTool({
+		name: "workflow_plan_implementation_review",
+		label: "Workflow Plan Implementation Review",
+		description:
+			"Launch an independent reviewer that verifies the Work agent's implementation genuinely satisfies the approved plan (Approved Work) or current todos (Direct Work), using its own exploration of the actual repository. Work Mode only, mandatory before /commit. Zero-argument: the reviewer task is assembled from workflow state. Returns structured findings + a PASS/FAIL verdict.",
+		parameters: Type.Object({}),
+		async execute(_toolCallId, _params, signal, onUpdate, ctx) {
+			const denied = checkWorkflowEnabled(ctx, getAgentDir);
+			if (denied) return denied;
+
+			const sessionKey = getSessionKey(ctx.sessionManager);
+			const state = loadState(ctx.cwd, sessionKey);
+			if (state.mode !== "work") {
+				throw new Error(
+					`workflow_plan_implementation_review only allowed in Work Mode (current: ${state.mode}).`,
+				);
+			}
+			if (!state.workRunId) {
+				throw new Error(
+					"No active Work run. Enter Work Mode via /work or plan approval first.",
+				);
+			}
+
+			const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
+
+			// Resolve the validated review cwd (active worktree or main checkout).
+			const reviewCwd = resolveEffectiveCwd(ctx.cwd, state);
+			const primaryCwd = ctx.cwd;
+
+			// Approved Work: read the Final Plan + approved todos. Direct Work:
+			// no plan; the reviewer uses Work-lifecycle requirements + current todos.
+			const isApprovedWork = !!state.planPath;
+			let planMarkdown: string | undefined;
+			if (isApprovedWork) {
+				planMarkdown = requirePlanMarkdown(ctx.cwd, state.planPath!);
+			}
+
+			let result;
+			try {
+				result = await runImplementationReviewAgent({
+					ctx,
+					pi,
+					modelSpec: config.models.implementationReview,
+					branch: ctx.sessionManager?.getBranch?.(),
+					planStartEntryId: state.planStartEntryId,
+					workStartEntryId: state.workStartEntryId,
+					planMarkdown,
+					approvedTodos: state.approvedTodos,
+					currentTodos: state.todos,
+					reviewCwd,
+					primaryCwd,
+					parentSignal: signal,
+					onProgress: (text) => {
+						onUpdate?.({
+							content: [{ type: "text", text }],
+							details: {},
+						});
+					},
+				});
+			} catch (err) {
+				// Reviewer run failure (timeout/abort/model error) is fail-closed:
+				// clear any existing PASS and surface the error. No PASS is written.
+				const reloaded = loadState(ctx.cwd, sessionKey);
+				delete reloaded.implementationReview;
+				saveState(ctx.cwd, sessionKey, reloaded);
+				throw err;
+			}
+
+			// A PASS requires: verdict === PASS AND the reviewer actually inspected
+			// the repository. Zero repo tool calls → fail-closed FAIL.
+			const passed =
+				result.verdict === "PASS" && result.madeRepoToolCall;
+
+			if (passed) {
+				// Compute the workspace fingerprint AFTER the child session is fully
+				// disposed (the shared runner guarantees cleanup-before-return). The
+				// fingerprint binds this PASS to the exact code version reviewed.
+				let fingerprint: string;
+				try {
+					fingerprint = computeWorkspaceFingerprint(reviewCwd);
+				} catch (err) {
+					// Fingerprint computation failure → fail-closed: no PASS.
+					const errMsg = err instanceof Error ? err.message : String(err);
+					return {
+						isError: true,
+						content: [
+							{
+								type: "text",
+								text: `Implementation review returned PASS but the workspace fingerprint could not be computed: ${errMsg}. No PASS recorded. Resolve the git/file access issue and re-run.`,
+							},
+						],
+						details: {
+							verdict: result.verdict,
+							fingerprintError: true,
+							error: errMsg,
+						},
+					};
+				}
+
+				const reloaded = loadState(ctx.cwd, sessionKey);
+				// Guard against a stale work run: if Work Mode was exited/re-entered
+				// during the review, recording a PASS bound to the old workRunId
+				// would be misleading. /commit also checks workRunId match, but this
+				// defense-in-depth gives clearer feedback.
+				if (reloaded.mode !== "work" || reloaded.workRunId !== state.workRunId) {
+					return {
+						isError: true,
+						content: [
+							{
+								type: "text",
+								text: "Implementation review returned PASS but the Work run changed during the review (mode/workRunId mismatch). No PASS recorded. Re-run workflow_plan_implementation_review() in the current Work run.",
+							},
+						],
+						details: {
+							verdict: result.verdict,
+							staleWorkRun: true,
+						},
+					};
+				}
+				reloaded.implementationReview = {
+					workRunId: reloaded.workRunId!,
+					workspaceFingerprint: fingerprint,
+				};
+				saveState(ctx.cwd, sessionKey, reloaded);
+			} else {
+				// FAIL / format error / no repo tool calls → clear any stale PASS.
+				const reloaded = loadState(ctx.cwd, sessionKey);
+				delete reloaded.implementationReview;
+				saveState(ctx.cwd, sessionKey, reloaded);
+			}
+
+			const elapsedSec = Math.round(result.elapsedMs / 1000);
+			const ops: string[] = [
+				`reviewer: ${result.reviewerModel}${result.thinking ? ` / ${result.thinking}` : ""}`,
+				`elapsed: ${elapsedSec}s`,
+				`turns: ${result.turns}`,
+				`tool calls: ${result.toolCalls}`,
+				`repo tool used: ${result.madeRepoToolCall ? "yes" : "NO"}`,
+				`verdict: ${result.verdict}${result.verdictReason ? ` (${result.verdictReason})` : ""}`,
+				`PASS recorded: ${passed ? "yes" : "no"}`,
+			];
+			if (result.unavailableTools.length) {
+				ops.push(`unavailable tools: ${result.unavailableTools.join(", ")}`);
+			}
+			if (result.stopReason && result.stopReason !== "stop") {
+				ops.push(`stopReason: ${result.stopReason}`);
+			}
+			if (result.errorMessage) {
+				ops.push(`error: ${result.errorMessage}`);
+			}
+
+			let verdictNotice: string;
+			if (passed) {
+				verdictNotice = "\n\n✅ Implementation Review PASS recorded. Workspace fingerprint bound to this code version. Todo changes or any code change will invalidate it; /commit is now allowed.";
+			} else if (result.verdict === "PASS" && !result.madeRepoToolCall) {
+				verdictNotice = "\n\n❌ Verdict was PASS but the reviewer made no repository tool calls — treated as FAIL (no independent verification). Re-run after the reviewer inspects the repository.";
+			} else {
+				verdictNotice = "\n\n❌ Implementation Review did NOT pass. Fix the findings, then re-run workflow_plan_implementation_review(). /commit remains blocked until PASS.";
+			}
+
+			return {
+				content: [
+					{
+						type: "text",
+						text: `${result.text}${verdictNotice}\n\n---\n${ops.join(" | ")}`,
+					},
+				],
+				details: {
+					reviewerModel: result.reviewerModel,
+					thinking: result.thinking,
+					elapsedMs: result.elapsedMs,
+					turns: result.turns,
+					toolCalls: result.toolCalls,
+					requestedTools: result.requestedTools,
+					activeTools: result.activeTools,
+					unavailableTools: result.unavailableTools,
+					stopReason: result.stopReason,
+					errorMessage: result.errorMessage,
+					verdict: result.verdict,
+					verdictReason: result.verdictReason,
+					madeRepoToolCall: result.madeRepoToolCall,
+					passRecorded: passed,
+				},
+				usage: result.usage,
+			};
+		},
+	});
+}
+
 // ── Bulk registration / gating ──────────────────────────────────────
 
 const _workflowToolsRegistered = new WeakSet<ExtensionAPI>();
@@ -1338,6 +1562,7 @@ export function registerAllWorkflowTools(
 	// rechecks workflow/config gates with the real session context.
 	registerPlanReviewTool(pi, getAgentDir);
 	registerCodeReviewTool(pi, getAgentDir);
+	registerPlanImplementationReviewTool(pi, getAgentDir);
 	registerInitCompleteTool(pi, getAgentDir);
 
 	_workflowToolsRegistered.add(pi);
