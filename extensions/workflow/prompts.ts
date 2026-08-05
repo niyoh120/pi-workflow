@@ -109,24 +109,17 @@ export const WORK_PROMPT = `
 - Approved-Plan Work 遇到 Plan 缺失、内容冲突或执行假设失效时，将对应 todo 标记为 blocked，停止该部分修改，报告具体冲突并请用户执行 /plan 修订计划；不要自行切换模式。
 - 修改后运行能验证改动的检查（项目测试或其他命令）。
 
-## Plan Implementation Review（启用时 mandatory，\`/commit\` 前必须通过）
+## 按需统一 Review（\`/review\`）
 
-当 implementationReview.enabled 为 true（默认）时，实现完成后、提交之前，必须运行 Plan Implementation Review。它是一个独立的 reviewer agent，使用独立配置的模型（models.implementationReview），在隔离会话中自行探索实际 checkout/worktree，验证计划覆盖、每个 todo 的真实完成情况以及计划要求的行为/集成是否正确落实。implementationReview.enabled 为 false 时该工具不可用，\`/commit\` 也不要求 PASS。
+用户可在 Work Mode 内随时用 \`/review\` 触发统一 Review。\`review.enabled\` 控制 \`/review\` 与 \`workflow_review\` 工具的可用性；\`codeReview.enabled\` 只控制统一 Review 是否包含 workspace OCR。Review 结果是瞬时的工具输出，不写入 workflow 状态，也不参与 \`/commit\`。
 
 调用规则：
-- 完成所有 todo 后调用 \`workflow_plan_implementation_review()\`（无参数）。reviewer 只收到权威输入：Approved Work 收到 Final Plan + approved todo 快照 + 当前 todo；Direct Work 收到本次 Work 生命周期用户请求 + 当前 todo。你的执行总结、git diff、测试声明和上一轮 reviewer 结论都不会被转发。
-- reviewer 自行使用 read/grep/find/ls/bash/git 验证，结束输出覆盖矩阵、Implementation Correctness、Verification、Critical/Important/Minor 和一条机器终行 \`IMPLEMENTATION_REVIEW_VERDICT: PASS|FAIL\`。
-- PASS 会绑定当前 workRunId 与 workspace fingerprint（tracked + untracked 内容）。todo 变更、任何代码修改或 workRun 切换都会使 PASS 失效。
-- FAIL 或格式异常时按反馈修复（Critical/Important 问题必须修复），然后重新运行 \`workflow_plan_implementation_review\`，直到 PASS。
-- Critical/Important 问题对应 todo 标记 blocked 的，按 Work recovery 规则处理。
-- 通过后才使用 \`/commit\` 提交。active Work 的 \`/commit\` 只要求当前版本通过 Implementation Review。
-
-## 可选 OCR Code Review（\`/review\`）
-
-Implementation Review PASS 之后，用户可选用 \`/review\` 触发 OCR code review（由 codeReview.enabled 控制可用性）：
-- OCR 只审查且未产生代码修改时，原 Implementation Review PASS 保持有效。
-- OCR 修复或任何后续代码修改会使 fingerprint 失配并清除 PASS；必须在 \`/commit\` 前重新运行 Implementation Review PASS，确保最终一次代码修改之后仍有有效 PASS。
-- 用户可选用 \`/review\`；review 通过后使用 \`/commit\` 命令提交本次改动。
+- \`/review\` 会进入 Work runtime 并发送 review/fix/re-review prompt。调用 \`workflow_review()\`（无参数）。reviewer 是一个独立 agent，使用独立配置的模型（models.review），在隔离会话中自行探索实际 checkout/worktree，核实需求覆盖、每个 todo 的真实完成情况以及计划要求的行为/集成是否落实。
+- reviewer 只收到权威输入：Approved Work 收到 Final Plan + approved todo 快照 + 当前 todo；Direct Work 收到本次 Work 生命周期用户请求 + 当前 todo。你的执行总结、git diff、测试声明和上一轮 reviewer 结论都不会被转发。
+- 当 \`codeReview.enabled\` 为 true 时，统一 Review 先在当前 worktree/checkout 运行 workspace OCR，解析为结构化 findings，再连同权威输入交给 reviewer 逐条核实；为 false 时 reviewer 直接覆盖实现/测试/错误路径审查，task 中会明确记录 OCR disabled。
+- reviewer 输出覆盖矩阵、Implementation Correctness、Verification、OCR Findings Disposition（启用时）、Critical/Important/Minor 和一条机器终行 \`REVIEW_VERDICT: PASS|FAIL\`。PASS 只代表本次按需 review 循环可以结束，不会写入状态，也不门禁 \`/commit\`。
+- FAIL 或格式异常时按反馈修复（Critical/Important 问题必须修复），然后重新调用 \`workflow_review\`，直到 PASS 或分歧交由用户裁决。
+- \`/commit\` 始终直接可用，不要求 Review。
 `;
 
 export const COMMIT_PROMPT = `

@@ -99,27 +99,6 @@ export function formatApprovedTodosForHandoff(todos: TodoItem[]): string {
 }
 
 /**
- * Clear any recorded Implementation Review PASS from a state object.
- * Called by the agent_end stale-PASS check when a fingerprint mismatch is
- * detected.
- *
- * Note: todo mutation paths (workflow_todo, update_plan) clear the PASS
- * directly via `delete state.implementationReview;` because they already
- * hold a mutable state reference; this pure helper is for read-then-replace
- * sites that cannot mutate in place.
- *
- * Pure: returns a new state object with implementationReview removed,
- * leaving all other fields intact.
- */
-export function invalidateImplementationReview(
-	state: WorkflowState,
-): WorkflowState {
-	if (!state.implementationReview) return state;
-	const { implementationReview: _drop, ...rest } = state;
-	return rest as WorkflowState;
-}
-
-/**
  * Exhaustiveness check for closed unions (typically `Mode`).
  * Place at the `default` branch of a switch over a closed union so the
  * compiler flags any unhandled member when the union grows.

@@ -71,23 +71,6 @@ function normalizeGrillTurns(raw: unknown): WorkflowState["grillTurns"] {
 		: [];
 }
 
-/** Normalize an implementationReview PASS record. Returns undefined when
- *  the shape is invalid so stale/corrupt PASS metadata cannot survive
- *  normalization. */
-function normalizeImplementationReview(
-	raw: unknown,
-): WorkflowState["implementationReview"] {
-	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
-	const r = raw as Record<string, unknown>;
-	const workRunId = typeof r.workRunId === "string" ? r.workRunId.trim() : "";
-	const workspaceFingerprint =
-		typeof r.workspaceFingerprint === "string"
-			? r.workspaceFingerprint.trim()
-			: "";
-	if (!workRunId || !workspaceFingerprint) return undefined;
-	return { workRunId, workspaceFingerprint };
-}
-
 /**
  * Normalize a raw JSON object into a strict WorkflowState shape.
  * Drops unknown/removed keys and fills missing fields from DEFAULT_STATE.
@@ -162,7 +145,6 @@ export function normalizeState(raw: unknown): WorkflowState {
 			obj.workStartEntryId.trim()
 				? obj.workStartEntryId.trim()
 				: undefined,
-		implementationReview: normalizeImplementationReview(obj.implementationReview),
 		grillTurns: normalizeGrillTurns(obj.grillTurns),
 		planStartEntryId:
 			typeof obj.planStartEntryId === "string" && obj.planStartEntryId.trim()

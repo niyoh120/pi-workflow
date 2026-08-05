@@ -3,7 +3,6 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import { getSessionKey, loadState, saveState, acquireDispatcherLock, releaseDispatcherLock } from "./state.js";
 import { COMMON_PROMPT } from "./prompts.js";
-import { resolveEffectiveCwd } from "./tools.js";
 import {
 	isWorkflowDataPath,
 	isReadonlyMode,
@@ -15,7 +14,6 @@ import {
 	buildModeMessageBody,
 	currentStatusText,
 	isWorkflowActive,
-	invalidateImplementationReview,
 	WORK_HANDOFF_CUSTOM_TYPE,
 } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
@@ -47,7 +45,6 @@ import {
 	gitStatusInWorktree,
 	removeWorktree,
 	validateWorktreeState,
-	computeWorkspaceFingerprint,
 } from "./worktree.js";
 
 /** Read the session branch. Returns undefined on failure (fail-open). */
@@ -116,14 +113,6 @@ function isProjectEmpty(root: string, agentsFile: string | null): boolean {
 	const meaningful = entries.filter((e) => !ignore.has(e.name));
 	return meaningful.length === 0;
 }
-
-// ── OCR review helpers ───────────────────────────────────────────────────────
-
-import {
-	type ReviewScope,
-	scopeSelectorComponent,
-	scopeInputComponent,
-} from "./review-tui.js";
 
 // ── Session key helper ───────────────────────────────────────────────────────
 
@@ -701,27 +690,6 @@ export function registerAgentEnd(
 		if (overlay && state.mode !== "idle") {
 			overlay.update(state.todos);
 		}
-
-		// Stale-PASS check: only when a PASS is already recorded AND we are in
-		// Work mode. Avoids adding git overhead to normal turns without a PASS.
-		// A mismatch (code changed, untracked content changed, or workRun
-		// switched) clears the PASS so /commit refuses to accept a stale result.
-		// Failures computing the fingerprint are logged but not fatal here —
-		// /commit performs its own authoritative check.
-		if (state.mode === "work" && state.implementationReview) {
-			try {
-				const effectiveCwd = resolveEffectiveCwd(ctx.cwd, state);
-				const currentFp = computeWorkspaceFingerprint(effectiveCwd);
-				if (currentFp !== state.implementationReview.workspaceFingerprint) {
-					const cleared = invalidateImplementationReview(state);
-					saveState(ctx.cwd, sessionKey, cleared);
-				}
-			} catch (err) {
-				console.error(
-					`[workflow] agent_end fingerprint check failed: ${err instanceof Error ? err.message : err}`,
-				);
-			}
-		}
 	});
 }
 
@@ -942,9 +910,8 @@ export function registerWorkCommand(
 					(ctx as { sessionManager?: { getLeafId?: () => string | undefined } })
 						.sessionManager?.getLeafId?.() ?? undefined,
 				// Direct Work has no approved plan; clear any stale approved todos
-				// and Implementation Review PASS from a prior Approved Work run.
+				// from a prior Approved Work run.
 				approvedTodos: undefined,
-				implementationReview: undefined,
 			};
 
 			const overlay = getWorkflowOverlay();
@@ -981,23 +948,22 @@ export function registerWorkCommand(
 	});
 }
 
-// registerReviewCommand
-// (function signatures on L483 and L644)
+// registerReviewCommand — on-demand unified review of the current workspace.
 export function registerReviewCommand(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
 	pi.registerCommand("review", {
 		description:
-			"Select code review scope via TUI, then run the workflow_code_review loop",
+			"Run the unified on-demand review of the current workspace (incl. active worktree). OCR is included when codeReview.enabled is true.",
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 
 			const sessionKey = ctxSessionKey(ctx);
 			const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
-			if (!config.codeReview.enabled) {
+			if (!config.review.enabled) {
 				ctx.ui.notify(
-					"Code review is not enabled. Set codeReview.enabled: true in config.",
+					"Review is not enabled. Set review.enabled: true in config.",
 					"error",
 				);
 				return;
@@ -1007,136 +973,28 @@ export function registerReviewCommand(
 			if (ctx.mode === "json" || ctx.mode === "print") {
 				console.error(
 					"workflow review: /review requires interactive mode (TUI/RPC). " +
-						"In JSON/print mode, call workflow_code_review directly: " +
-						"scope (workspace|range|commit), background, from, to, commit, preview.",
+						"In JSON/print mode, call workflow_review directly.",
 				);
 				return;
 			}
 
-			// RPC mode: basic-dialog wizard (select scope, input refs).
-			if (ctx.mode === "rpc") {
-				const scopeKind = await ctx.ui.select(
-					"Review Scope — pick what to review",
-					["workspace", "range", "commit"],
-				);
-				if (!scopeKind) {
-					ctx.ui.notify("Review cancelled: no scope selected.", "info");
-					return;
-				}
-
-				let from: string | undefined;
-				let to: string | undefined;
-				let commit: string | undefined;
-
-				if (scopeKind === "range") {
-					from = await rpcReadNonEmptyRef(ctx, "From ref");
-					if (from === undefined) return;
-					if (!from) {
-						ctx.ui.notify("Review cancelled: from ref cannot be empty.", "info");
-						return;
-					}
-					to = await rpcReadNonEmptyRef(ctx, "To ref");
-					if (to === undefined) return;
-					if (!to) {
-						ctx.ui.notify("Review cancelled: to ref cannot be empty.", "info");
-						return;
-					}
-				}
-
-				if (scopeKind === "commit") {
-					commit = await rpcReadNonEmptyRef(ctx, "Commit hash");
-					if (commit === undefined) return;
-					if (!commit) {
-						ctx.ui.notify("Review cancelled: commit hash cannot be empty.", "info");
-						return;
-					}
-				}
-
-				if (scopeKind !== "workspace" && scopeKind !== "range" && scopeKind !== "commit") {
-					ctx.ui.notify(`Review cancelled: unknown scope "${scopeKind}".`, "error");
-					return;
-				}
-
-				// Hand off to the same worktree/transition/kickoff path as TUI.
-				await startReviewLoop(pi, ctx, getAgentDir, sessionKey, { scopeKind, from, to, commit });
-				return;
-			}
-
-			// 1. Show scope selector (TUI only)
-			const scopeKind = await ctx.ui.custom<ReviewScope["kind"] | null>(
-				(_tui, theme, _kb, done) => scopeSelectorComponent(theme, done),
-				{
-					overlay: true,
-					overlayOptions: { anchor: "center", width: "60%", minWidth: 48 },
-				},
-			);
-			if (!scopeKind) {
-				ctx.ui.notify("Review cancelled: no scope selected.", "info");
-				return;
-			}
-
-			// 2. Collect scope-specific inputs
-			if (scopeKind !== "workspace") {
-				ctx.ui.notify(
-					`Selected ${scopeKind} scope. Collecting input...`,
-					"info",
-				);
-			}
-
-			let from: string | undefined;
-			let to: string | undefined;
-			let commit: string | undefined;
-
-			if (scopeKind === "range") {
-				const values = await ctx.ui.custom<Record<string, string> | null>(
-					(_tui, theme, _kb, done) => scopeInputComponent("range", theme, done),
-					{
-						overlay: true,
-						overlayOptions: { anchor: "center", width: "60%", minWidth: 48 },
-					},
-				);
-				from = values?.from;
-				to = values?.to;
-				if (!from || !to) {
-					ctx.ui.notify("Review cancelled: from/to refs required.", "info");
-					return;
-				}
-			}
-
-			if (scopeKind === "commit") {
-				const values = await ctx.ui.custom<Record<string, string> | null>(
-					(_tui, theme, _kb, done) =>
-						scopeInputComponent("commit", theme, done),
-					{
-						overlay: true,
-						overlayOptions: { anchor: "center", width: "60%", minWidth: 48 },
-					},
-				);
-				commit = values?.commit;
-				if (!commit) {
-					ctx.ui.notify("Review cancelled: commit hash required.", "info");
-					return;
-				}
-			}
-
-			// Hand off to the shared review-loop kickoff (worktree/transition/prompt).
-			await startReviewLoop(pi, ctx, getAgentDir, sessionKey, { scopeKind, from, to, commit });
+			await startReviewLoop(pi, ctx, getAgentDir, sessionKey);
 			return;
 		},
 	});
 }
 
 /**
- * Shared review-loop kickoff for TUI and RPC. Validates the worktree, moves
- * the next agent turn into Work runtime, and sends the review/fix/re-review
- * prompt. `scope` carries the chosen kind and any refs.
+ * Shared review-loop kickoff. Validates the worktree, moves the next agent
+ * turn into Work runtime, and sends the unified review/fix/re-review prompt.
+ * The unified review always targets the current workspace (active worktree or
+ * main checkout); scope/ref selection has been removed.
  */
 async function startReviewLoop(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
 	getAgentDir: () => string,
 	sessionKey: string,
-	scope: { scopeKind: ReviewScope["kind"]; from?: string; to?: string; commit?: string },
 ): Promise<void> {
 	const current = loadState(ctx.cwd, sessionKey);
 	if (current.worktreePath) {
@@ -1166,60 +1024,24 @@ async function startReviewLoop(
 		return;
 	}
 
-	let scopeDescription: string;
-	let toolArguments: string;
-	switch (scope.scopeKind) {
-		case "workspace":
-			scopeDescription = "workspace (unstaged + staged + untracked changes)";
-			toolArguments = 'scope="workspace"';
-			break;
-		case "range":
-			scopeDescription = `range from=${scope.from} to=${scope.to}`;
-			toolArguments = `scope="range", from=${JSON.stringify(scope.from)}, to=${JSON.stringify(scope.to)}`;
-			break;
-		case "commit":
-			scopeDescription = `commit=${scope.commit}`;
-			toolArguments = `scope="commit", commit=${JSON.stringify(scope.commit)}`;
-			break;
-		default:
-			ctx.ui.notify(`Unhandled review scope: ${scope.scopeKind}`, "error");
-			return;
-	}
+	const promptText = `请执行统一 review 循环。
 
-	const promptText = `请执行 code review 循环。
-
-Review scope: ${scopeDescription}
+Review scope: 当前 workspace（含 active worktree 的工作树与分支）。
 
 要求：
-1. 调用 workflow_code_review，参数使用 ${toolArguments}；background 由你根据当前任务上下文填写，包含用户目标、本轮修改范围、关键约束、已运行测试和希望 reviewer 重点检查的风险点。
-2. 收到 review 结果后，逐条验证每个 Critical/Important 问题是否真实存在。
+1. 调用 \`workflow_review()\`（无参数）。reviewer 是独立 agent，使用 models.review，自行探索实际 checkout/worktree。当 codeReview.enabled 为 true 时，统一 Review 先运行 workspace OCR 并把 normalized findings 注入 reviewer task；为 false 时 reviewer 直接审查实现/测试/错误路径。
+2. 收到 review 结果后，逐条验证 reviewer 与 OCR 的每个 Critical/Important 问题是否真实存在。
 3. 对确认存在的 Critical/Important 问题进行修复，并运行最相关测试验证。
-4. 修复后再次调用 workflow_code_review，让 reviewer 基于更新后的代码重新审查；持续 review → fix → re-review，直到没有新的 Critical/Important 问题。
-5. 如果你判断某个 reviewer 问题是误判、超出范围、投入产出比不合理或与项目约束冲突，在下一轮 background 中说明技术理由。
+4. 修复后再次调用 \`workflow_review\`，让 reviewer 基于更新后的代码重新审查；持续 review → fix → re-review，直到没有新的 Critical/Important 问题。
+5. 如果你判断某个 reviewer/OCR 问题是误判、超出范围、投入产出比不合理或与项目约束冲突，在下一轮说明技术理由。
 6. 第一轮 review 已经没有 Critical/Important 问题时，可以结束循环。2-3 轮后仍存在分歧时，停止并交给用户裁决。
 7. Minor 问题按价值选择处理，不能阻塞 review 通过。
-8. ⚠️ OCR 修复（或任何其他代码修改）会使之前的 Plan Implementation Review PASS 失效。若本轮 OCR 产生了代码改动，结束前必须重新调用 workflow_plan_implementation_review() 获得 PASS，确保最终一次代码修改之后仍有有效 Implementation Review PASS，否则 /commit 会被拒绝。`;
-	ctx.ui.notify(`Starting code review loop: ${scopeDescription}.`, "info");
-	pi.setSessionName(`review: ${scope.scopeKind}`);
+8. \`workflow_review\` 的 verdict 是瞬时的，不会写入 workflow 状态，也不门禁 \`/commit\`；review 完成后可随时使用 \`/commit\` 提交。`;
+	ctx.ui.notify("Starting unified review loop: workspace.", "info");
+	pi.setSessionName("review: workspace");
 	pi.sendUserMessage(promptText);
 }
 
-/**
- * Read a non-empty git ref via RPC input. Returns the trimmed value, "" for
- * an empty submit (caller treats as cancel), or undefined when the user
- * cancels the input dialog. Re-prompts once on empty input so users do not
- * lose the whole wizard on an accidental blank Enter.
- */
-async function rpcReadNonEmptyRef(ctx: ExtensionCommandContext, label: string): Promise<string | undefined> {
-	const first = await ctx.ui.input(label, "");
-	if (first === undefined) return undefined; // user cancelled
-	const trimmed = first.trim();
-	if (trimmed) return trimmed;
-	// Empty submit: re-prompt once with a clearer placeholder.
-	const second = await ctx.ui.input(`${label} (required — press Esc to cancel)`, "");
-	if (second === undefined) return undefined;
-	return second.trim();
-}
 
 export function registerCommitCommand(
 	pi: ExtensionAPI,
@@ -1244,66 +1066,10 @@ export function registerCommitCommand(
 				}
 			}
 
-			// Active-Work commit gate: require a matching Implementation Review PASS
-			// when implementationReview is enabled. Only enforced when committing
-			// from an active Work run (mode === "work" with a workRunId). When
-			// implementationReview.enabled is false the gate is skipped entirely
-			// (the review is fully optional). OCR code review status does NOT
-			// participate — it remains user-optional.
-			const commitConfig = loadConfigForContext(
-				ctx.cwd,
-				getAgentDir(),
-				sessionKey,
-				ctx as { isProjectTrusted?: () => boolean },
-			);
-			if (
-				commitConfig.implementationReview.enabled &&
-				current.mode === "work" &&
-				current.workRunId
-			) {
-				const pass = current.implementationReview;
-				if (!pass) {
-					ctx.ui.notify(
-						"Active Work 没有通过 Plan Implementation Review。\n" +
-							"请先调用 workflow_plan_implementation_review() 完成 implementation review → fix → re-review 循环，\n" +
-							"PASS 后再使用 /commit。如果 OCR /review 修复产生了代码变化，需重新执行 Implementation Review PASS。",
-						"error",
-					);
-					return;
-				}
-				if (pass.workRunId !== current.workRunId) {
-					ctx.ui.notify(
-						"Implementation Review PASS 属于另一个 Work run。\n" +
-							"请重新调用 workflow_plan_implementation_review() 为当前 Work run 生成有效 PASS。",
-						"error",
-					);
-					return;
-				}
-				try {
-					const effectiveCwd = resolveEffectiveCwd(ctx.cwd, current);
-					const currentFp = computeWorkspaceFingerprint(effectiveCwd);
-					if (currentFp !== pass.workspaceFingerprint) {
-						ctx.ui.notify(
-							"Workspace 指纹与 Implementation Review PASS 不匹配——代码或 untracked 内容在 PASS 之后发生了变化。\n" +
-								"请重新调用 workflow_plan_implementation_review() 验证最新代码后再 /commit。",
-							"error",
-						);
-						return;
-					}
-				} catch (err) {
-					ctx.ui.notify(
-						`无法计算 workspace 指纹：${err instanceof Error ? err.message : err}\n` +
-							"请确认 git 可用后重新调用 workflow_plan_implementation_review() 再 /commit。",
-						"error",
-					);
-					return;
-				}
-			}
-
-			const state = {
-				...current,
-				mode: "commit" as const,
-			};
+		const state = {
+			...current,
+			mode: "commit" as const,
+		};
 
 			const result = await transitionWorkflowMode({
 				pi,
@@ -1384,8 +1150,9 @@ export function registerWfStatusCommand(
 			msg += `\nconfigured role thinking: ${roleSpec?.thinking ?? "(none)"}`;
 			msg += `\nworkflow.autoEnter: ${eff.workflow.autoEnter} (source: ${report.sources["workflow.autoEnter"]})`;
 			msg += `\nplanReview.enabled: ${eff.planReview.enabled} (source: ${report.sources["planReview.enabled"]})`;
-			msg += `\ncodeReview.enabled: ${eff.codeReview.enabled} (source: ${report.sources["codeReview.enabled"]})`;
-			for (const r of ["explore", "plan", "planReview", "work", "commit"] as const) {
+			msg += `\nreview.enabled: ${eff.review.enabled} (source: ${report.sources["review.enabled"]})`;
+			msg += `\ncodeReview.enabled (Review OCR): ${eff.codeReview.enabled} (source: ${report.sources["codeReview.enabled"]})`;
+			for (const r of ["explore", "plan", "planReview", "review", "work", "commit"] as const) {
 				const spec = eff.models[r];
 				if (!spec) continue;
 				msg += `\nmodels.${r}: ${spec.provider}/${spec.model} / ${spec.thinking ?? "(none)"}`;

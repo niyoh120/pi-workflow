@@ -15,8 +15,7 @@ export const WORKFLOW_GATED_TOOLS = [
 	"workflow_plan_clear",
 	"workflow_grill_record",
 	"workflow_plan_review",
-	"workflow_code_review",
-	"workflow_plan_implementation_review",
+	"workflow_review",
 	"workflow_init_complete",
 ] as const;
 
@@ -88,9 +87,7 @@ export function computeWorkflowToolNames(
 		}
 		case "work": {
 			const names = withTodoToolName([...WORK_WORKFLOW_TOOL_NAMES], todoToolName);
-			if (config.implementationReview.enabled)
-				names.push("workflow_plan_implementation_review");
-			if (config.codeReview.enabled) names.push("workflow_code_review");
+			if (config.review.enabled) names.push("workflow_review");
 			return names;
 		}
 		case "explore":

@@ -6,7 +6,10 @@
  *
  * Plan review runs an independent reviewer AgentSession (fresh, in-memory,
  * multi-turn) that inherits the parent Plan information-tool surface.
- * Code review uses alibaba/open-code-review CLI.
+ * The unified on-demand Review (/review → workflow_review) launches an
+ * independent reviewer over the current workspace and, when codeReview.enabled
+ * is true, folds workspace OCR findings into the same review. Review output is
+ * transient and never gates /commit.
  * No external extension dependency required.
  *
  * Workflow commands and tools are gated behind /wf by default.

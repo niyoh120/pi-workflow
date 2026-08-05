@@ -20,7 +20,6 @@ import {
 	plannedWorktreeInfo,
 	removeWorktree,
 	validateWorktreeState,
-	computeWorkspaceFingerprint,
 } from "./worktree.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import {
@@ -37,8 +36,8 @@ import {
 	runPlanReviewAgent,
 } from "./plan-review-agent.js";
 import {
-	runImplementationReviewAgent,
-} from "./implementation-review-agent.js";
+	runReviewAgent,
+} from "./review-agent.js";
 import { transitionWorkflowMode } from "./mode.js";
 import {
 	WORK_APPROVAL_CUSTOM_TYPE,
@@ -48,19 +47,6 @@ import {
 import { isAllowedInitTargetPath } from "./guards.js";
 import * as path from "node:path";
 import * as fs from "node:fs";
-import {
-	checkOcrAvailable,
-	buildReviewArgv,
-	ocrCommandSummary,
-	runOcrReview,
-	type ReviewScopeKind,
-} from "./ocr-helpers.js";
-import {
-	parseOcrReviewJson,
-	compactReviewText,
-	compactPreviewText,
-	OcrParseError,
-} from "./ocr-result.js";
 
 function cleanupCreatedWorktree(cwd: string, worktreePath: string, branch: string): void {
 	try {
@@ -282,10 +268,6 @@ export function registerTodoTool(
 				changedId = params.id;
 			}
 
-			// Todo mutations invalidate any recorded Implementation Review PASS —
-			// the reviewer validated the prior task list, and changes mean the PASS
-			// no longer covers the current plan.
-			delete state.implementationReview;
 			saveState(ctx.cwd, sessionKey, state);
 
 			const overlay = getWorkflowOverlay();
@@ -346,8 +328,6 @@ export function registerUpdatePlanTool(
 					kind: "replace",
 					items: params.plan,
 				});
-				// Full-list replacement invalidates any Implementation Review PASS.
-				delete state.implementationReview;
 				saveState(ctx.cwd, sessionKey, state);
 
 				if (overlay) overlay.update(state.todos);
@@ -625,10 +605,6 @@ export function registerPlanApproveTool(
 				// The reviewer and handoff use this snapshot, not the mutable live
 				// state.todos, so later Work mutations don't alter what was approved.
 				approvedTodos: state.todos.map((t) => ({ ...t })),
-				// Clear any prior Implementation Review PASS — a new work run starts
-				// without a valid PASS; Work must run the Implementation Reviewer
-				// before /commit will accept a commit.
-				implementationReview: undefined,
 				// Plan-lifecycle review-context fields are no longer relevant once the
 				// plan is approved; drop them so they cannot leak into a later Plan run.
 				planStartEntryId: undefined,
@@ -1017,234 +993,17 @@ export function registerPlanReviewTool(
 	});
 }
 
-// ── Internal OCR constants (no longer configurable) ──────
+// ── workflow_review tool (on-demand unified review) ───────────────────────
 
-export const OCR_BINARY = "ocr";
-export const OCR_TIMEOUT_MS = 1_800_000;
-
-/**
- * Compact argv summary that omits the --background value, so the model-visible
- * result does not echo the full background context back. Used in
- * model-visible content; the full `ocrCommandSummary` stays in error/details.
- */
-function ocrScopeSummary(argv: string[]): string {
-	const flags: string[] = [];
-	for (let i = 0; i < argv.length; i++) {
-		const a = argv[i];
-		if (a === "--background") {
-			flags.push("--background <redacted>");
-			i++; // skip value
-			continue;
-		}
-		flags.push(a);
-	}
-	return [OCR_BINARY, ...flags].join(" ");
-}
-
-// ── workflow_code_review tool ────────────────────────────
-
-const ReviewScopeKindSchema = StringEnum([
-	"workspace",
-	"range",
-	"commit",
-] as const);
-
-export function registerCodeReviewTool(
+export function registerReviewTool(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
 	pi.registerTool({
-		name: "workflow_code_review",
-		label: "Workflow Code Review",
+		name: "workflow_review",
+		label: "Workflow Review",
 		description:
-			"Run OCR code review on the current workspace or a Git ref range/commit. Work Mode only, triggered by /review. Provide a background string describing the task context, changes, constraints, and risk areas. Default scope is workspace (staged + unstaged + untracked changes). When an active workflow worktree exists, all scopes run against that worktree's working tree and branch.",
-		parameters: Type.Object({
-			scope: Type.Optional(ReviewScopeKindSchema),
-			background: Type.String({
-				description:
-					"Task context and review focus — user goal, changes, constraints, tests, risk areas.",
-			}),
-			from: Type.Optional(
-				Type.String({ description: "Source ref for range scope." }),
-			),
-			to: Type.Optional(
-				Type.String({ description: "Target ref for range scope." }),
-			),
-			commit: Type.Optional(
-				Type.String({ description: "Commit hash for commit scope." }),
-			),
-			preview: Type.Optional(
-				Type.Boolean({ description: "Preview files without running the LLM." }),
-			),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const denied = checkWorkflowEnabled(ctx, getAgentDir);
-			if (denied) return denied;
-
-			// Validate OCR availability
-			if (!checkOcrAvailable(OCR_BINARY)) {
-				throw new Error(
-					"ocr CLI not found. " +
-						"Install alibaba/open-code-review: npm i -g @alibaba-group/open-code-review\n" +
-						"Then configure LLM with ocr config set llm.url / llm.auth_token / llm.model.",
-				);
-			}
-
-			// Validate required fields per scope
-			const scope: ReviewScopeKind =
-				(params.scope as ReviewScopeKind) ?? "workspace";
-			const background = params.background as string;
-			const from = params.from as string | undefined;
-			const to = params.to as string | undefined;
-			const commit = params.commit as string | undefined;
-			const preview = params.preview as boolean | undefined;
-
-			if (!background || !background.trim()) {
-				throw new Error(
-					"workflow_code_review requires a non-empty background describing task context and review focus.",
-				);
-			}
-
-			if (scope === "range" && (!from || !to)) {
-				throw new Error("scope=range requires both from and to refs.");
-			}
-
-			if (scope === "commit" && !commit) {
-				throw new Error("scope=commit requires a commit hash.");
-			}
-
-			// Resolve the execution cwd before the OCR run: an active workflow
-			// worktree takes precedence so workspace, range, and commit reviews
-			// all run against the implementation branch's working tree. Kept
-			// outside the runOcrReview try block so the worktree-recovery error
-			// surfaces directly. The generic ocr-failure handler does not mask
-			// the /wf-status or /wf-reset hint.
-			const sessionKey = getSessionKey(ctx.sessionManager);
-			const state = loadState(ctx.cwd, sessionKey);
-			const reviewCwd = resolveEffectiveCwd(ctx.cwd, state);
-
-			// Build argv and execute
-			const argv = buildReviewArgv(
-				background.trim(),
-				scope,
-				from,
-				to,
-				commit,
-				preview,
-			);
-			const cmdSummary = ocrCommandSummary(OCR_BINARY, argv);
-			// Compact summary for model-visible output: omits the full --background
-			// value (kept in cmdSummary / details) to avoid echoing context back.
-			const scopeSummary = ocrScopeSummary(argv);
-
-			try {
-				const rawOutput = await runOcrReview(
-					OCR_BINARY,
-					reviewCwd,
-					argv,
-					OCR_TIMEOUT_MS,
-					_signal,
-				);
-
-				// Preview output is ANSI text (ocr ignores --format json for preview);
-				// compact it into a file list. Full review output is JSON parsed
-				// into normalized findings with the raw JSON saved to a temp file.
-				if (preview) {
-					const previewText = compactPreviewText(rawOutput);
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Code review preview (files only, no LLM run).\n\n${previewText}`,
-							},
-						],
-						details: {
-							scope,
-							preview: true,
-						},
-					};
-				}
-
-				let result;
-				try {
-					result = parseOcrReviewJson(rawOutput);
-				} catch (parseErr) {
-					// parseOcrReviewJson wraps all errors in OcrParseError carrying the
-					// saved raw file path plus the real cause. Surface both so the model
-					// can inspect the original output. Mark as an explicit tool error so
-					// the review loop does not treat this as a successful review.
-					const rawPath = parseErr instanceof OcrParseError ? parseErr.rawPath : "";
-					const errMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
-					return {
-						isError: true,
-						content: [
-							{
-								type: "text",
-								text:
-									`Code review output could not be processed.` +
-									(rawPath ? `\nRaw output saved to: ${rawPath}` : "") +
-									`\nError: ${errMsg}` +
-									`\n\nCommand: ${scopeSummary}`,
-							},
-						],
-						details: {
-							scope,
-							parseError: true,
-							rawPath,
-							error: errMsg,
-							command: scopeSummary,
-						},
-					};
-				}
-
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Code review complete.\n\n${compactReviewText(result)}`,
-						},
-					],
-					details: {
-						scope,
-						counts: result.counts,
-						findings: result.findings.length,
-						rawPath: result.rawPath,
-						sessionId: result.sessionId,
-						stats: result.stats,
-					},
-				};
-			} catch (err: unknown) {
-				// AbortError from cancelled signal — rethrow so the platform handles cancellation
-				if (err instanceof Error && err.name === "AbortError") throw err;
-
-				const errMsg = err instanceof Error ? err.message : String(err);
-				const stderr =
-					typeof err === "object" && err !== null && "stderr" in err
-						? (err as { stderr?: unknown }).stderr
-						: "";
-				throw new Error(
-					`ocr review failed.\n\n` +
-						`Command: ${cmdSummary}\n` +
-						`Error: ${errMsg}\n` +
-						`stderr: ${String(stderr).slice(0, 2000)}\n\n` +
-						`Check ocr config and LLM connectivity: ocr llm test`,
-				);
-			}
-		},
-	});
-}
-
-// ── workflow_plan_implementation_review tool (mandatory Work gate) ──────
-
-export function registerPlanImplementationReviewTool(
-	pi: ExtensionAPI,
-	getAgentDir: () => string,
-): void {
-	pi.registerTool({
-		name: "workflow_plan_implementation_review",
-		label: "Workflow Plan Implementation Review",
-		description:
-			"Launch an independent reviewer that verifies the Work agent's implementation genuinely satisfies the approved plan (Approved Work) or current todos (Direct Work), using its own exploration of the actual repository. Work Mode only, mandatory before /commit. Zero-argument: the reviewer task is assembled from workflow state. Returns structured findings + a PASS/FAIL verdict.",
+			"Launch an independent reviewer that reviews the Work agent's implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work), using its own exploration of the actual repository. Work Mode only, on-demand (triggered by /review). Zero-argument: the reviewer task is assembled from workflow state. When codeReview.enabled is true, a workspace OCR review runs first and its normalized findings are folded into the reviewer task; when false the reviewer covers the implementation directly. Returns structured findings + a PASS/FAIL verdict that signals whether this review loop can end (never gates /commit and is not persisted).",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, signal, onUpdate, ctx) {
 			const denied = checkWorkflowEnabled(ctx, getAgentDir);
@@ -1254,7 +1013,7 @@ export function registerPlanImplementationReviewTool(
 			const state = loadState(ctx.cwd, sessionKey);
 			if (state.mode !== "work") {
 				throw new Error(
-					`workflow_plan_implementation_review only allowed in Work Mode (current: ${state.mode}).`,
+					`workflow_review only allowed in Work Mode (current: ${state.mode}).`,
 				);
 			}
 			if (!state.workRunId) {
@@ -1277,12 +1036,16 @@ export function registerPlanImplementationReviewTool(
 				planMarkdown = requirePlanMarkdown(ctx.cwd, state.planPath!);
 			}
 
+			// codeReview.enabled controls whether the unified review folds workspace
+			// OCR findings into the reviewer task. It does not gate the tool itself.
+			const includeOcr = config.codeReview.enabled;
+
 			let result;
 			try {
-				result = await runImplementationReviewAgent({
+				result = await runReviewAgent({
 					ctx,
 					pi,
-					modelSpec: config.models.implementationReview,
+					modelSpec: config.models.review,
 					branch: ctx.sessionManager?.getBranch?.(),
 					planStartEntryId: state.planStartEntryId,
 					workStartEntryId: state.workStartEntryId,
@@ -1291,6 +1054,7 @@ export function registerPlanImplementationReviewTool(
 					currentTodos: state.todos,
 					reviewCwd,
 					primaryCwd,
+					includeOcr,
 					parentSignal: signal,
 					onProgress: (text) => {
 						onUpdate?.({
@@ -1300,76 +1064,32 @@ export function registerPlanImplementationReviewTool(
 					},
 				});
 			} catch (err) {
-				// Reviewer run failure (timeout/abort/model error) is fail-closed:
-				// clear any existing PASS and surface the error. No PASS is written.
-				const reloaded = loadState(ctx.cwd, sessionKey);
-				delete reloaded.implementationReview;
-				saveState(ctx.cwd, sessionKey, reloaded);
-				throw err;
+				// Reviewer/OCR run failure (CLI missing, OCR exec failure, JSON parse
+				// failure, timeout/abort/model error) surfaces as an explicit tool
+				// error so the review loop does not treat it as success. No verdict is
+				// produced. AbortError from a cancelled signal is rethrown so the
+				// platform handles cancellation.
+				if (err instanceof Error && err.name === "AbortError") throw err;
+				const reason = err instanceof Error ? err.message : String(err);
+				return {
+					isError: true,
+					content: [
+						{
+							type: "text",
+							text: `Review failed: ${reason}`,
+						},
+					],
+					details: { ocrEnabled: includeOcr, error: true, reason },
+				};
 			}
 
-			// A PASS requires: verdict === PASS AND the reviewer actually inspected
-			// the repository. Zero repo tool calls → fail-closed FAIL.
+			// The verdict is transient: it only signals whether this on-demand
+			// review loop can end. It is never written to WorkflowState and never
+			// gates /commit. A PASS requires verdict === PASS AND the reviewer
+			// actually inspected the repository (zero repo tool calls → fail-closed
+			// FAIL surfaced for the Work agent to act on).
 			const passed =
 				result.verdict === "PASS" && result.madeRepoToolCall;
-
-			if (passed) {
-				// Compute the workspace fingerprint AFTER the child session is fully
-				// disposed (the shared runner guarantees cleanup-before-return). The
-				// fingerprint binds this PASS to the exact code version reviewed.
-				let fingerprint: string;
-				try {
-					fingerprint = computeWorkspaceFingerprint(reviewCwd);
-				} catch (err) {
-					// Fingerprint computation failure → fail-closed: no PASS.
-					const errMsg = err instanceof Error ? err.message : String(err);
-					return {
-						isError: true,
-						content: [
-							{
-								type: "text",
-								text: `Implementation review returned PASS but the workspace fingerprint could not be computed: ${errMsg}. No PASS recorded. Resolve the git/file access issue and re-run.`,
-							},
-						],
-						details: {
-							verdict: result.verdict,
-							fingerprintError: true,
-							error: errMsg,
-						},
-					};
-				}
-
-				const reloaded = loadState(ctx.cwd, sessionKey);
-				// Guard against a stale work run: if Work Mode was exited/re-entered
-				// during the review, recording a PASS bound to the old workRunId
-				// would be misleading. /commit also checks workRunId match, but this
-				// defense-in-depth gives clearer feedback.
-				if (reloaded.mode !== "work" || reloaded.workRunId !== state.workRunId) {
-					return {
-						isError: true,
-						content: [
-							{
-								type: "text",
-								text: "Implementation review returned PASS but the Work run changed during the review (mode/workRunId mismatch). No PASS recorded. Re-run workflow_plan_implementation_review() in the current Work run.",
-							},
-						],
-						details: {
-							verdict: result.verdict,
-							staleWorkRun: true,
-						},
-					};
-				}
-				reloaded.implementationReview = {
-					workRunId: reloaded.workRunId!,
-					workspaceFingerprint: fingerprint,
-				};
-				saveState(ctx.cwd, sessionKey, reloaded);
-			} else {
-				// FAIL / format error / no repo tool calls → clear any stale PASS.
-				const reloaded = loadState(ctx.cwd, sessionKey);
-				delete reloaded.implementationReview;
-				saveState(ctx.cwd, sessionKey, reloaded);
-			}
 
 			const elapsedSec = Math.round(result.elapsedMs / 1000);
 			const ops: string[] = [
@@ -1378,8 +1098,8 @@ export function registerPlanImplementationReviewTool(
 				`turns: ${result.turns}`,
 				`tool calls: ${result.toolCalls}`,
 				`repo tool used: ${result.madeRepoToolCall ? "yes" : "NO"}`,
+				`ocr: ${result.ocr.enabled ? `enabled (${result.ocr.findings} findings)` : "disabled"}`,
 				`verdict: ${result.verdict}${result.verdictReason ? ` (${result.verdictReason})` : ""}`,
-				`PASS recorded: ${passed ? "yes" : "no"}`,
 			];
 			if (result.unavailableTools.length) {
 				ops.push(`unavailable tools: ${result.unavailableTools.join(", ")}`);
@@ -1393,11 +1113,11 @@ export function registerPlanImplementationReviewTool(
 
 			let verdictNotice: string;
 			if (passed) {
-				verdictNotice = "\n\n✅ Implementation Review PASS recorded. Workspace fingerprint bound to this code version. Todo changes or any code change will invalidate it; /commit is now allowed.";
+				verdictNotice = "\n\n✅ Review PASS. This on-demand review loop can end; the verdict is transient and never gates /commit.";
 			} else if (result.verdict === "PASS" && !result.madeRepoToolCall) {
 				verdictNotice = "\n\n❌ Verdict was PASS but the reviewer made no repository tool calls — treated as FAIL (no independent verification). Re-run after the reviewer inspects the repository.";
 			} else {
-				verdictNotice = "\n\n❌ Implementation Review did NOT pass. Fix the findings, then re-run workflow_plan_implementation_review(). /commit remains blocked until PASS.";
+				verdictNotice = "\n\n❌ Review did NOT pass. Address the Critical/Important findings, then re-run workflow_review(). /commit is always available regardless of the verdict.";
 			}
 
 			return {
@@ -1421,7 +1141,7 @@ export function registerPlanImplementationReviewTool(
 					verdict: result.verdict,
 					verdictReason: result.verdictReason,
 					madeRepoToolCall: result.madeRepoToolCall,
-					passRecorded: passed,
+					ocr: result.ocr,
 				},
 				usage: result.usage,
 			};
@@ -1561,8 +1281,7 @@ export function registerAllWorkflowTools(
 	// mode reconciliation controls visibility, and each execute/handler path
 	// rechecks workflow/config gates with the real session context.
 	registerPlanReviewTool(pi, getAgentDir);
-	registerCodeReviewTool(pi, getAgentDir);
-	registerPlanImplementationReviewTool(pi, getAgentDir);
+	registerReviewTool(pi, getAgentDir);
 	registerInitCompleteTool(pi, getAgentDir);
 
 	_workflowToolsRegistered.add(pi);

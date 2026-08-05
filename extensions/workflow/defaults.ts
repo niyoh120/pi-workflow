@@ -17,7 +17,7 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
 			model: "gpt-5.1",
 			thinking: "high",
 		},
-		implementationReview: {
+		review: {
 			provider: "openai",
 			model: "gpt-5.1",
 			thinking: "high",
@@ -39,7 +39,7 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
 	planReview: {
 		enabled: true,
 	},
-	implementationReview: {
+	review: {
 		enabled: true,
 	},
 	codeReview: {

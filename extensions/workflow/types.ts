@@ -7,9 +7,9 @@ export type Role =
 	| "explore"
 	| "plan"
 	| "planReview"
+	| "review"
 	| "work"
-	| "commit"
-	| "implementationReview";
+	| "commit";
 
 /**
  * Simplified mode: idle plus explore/init/plan/work/commit workflow states.
@@ -56,7 +56,7 @@ export interface WorkflowConfigOverride {
 	models?: Partial<Record<Role, Partial<ModelSpec>>>;
 	workflow?: Partial<WorkflowConfig["workflow"]>;
 	planReview?: Partial<WorkflowConfig["planReview"]>;
-	implementationReview?: Partial<WorkflowConfig["implementationReview"]>;
+	review?: Partial<WorkflowConfig["review"]>;
 	codeReview?: Partial<WorkflowConfig["codeReview"]>;
 }
 
@@ -71,16 +71,19 @@ export interface WorkflowConfig {
 		enabled: boolean;
 	};
 	/**
-	 * Plan Implementation Review — a mandatory Work Mode gate that verifies
-	 * the implementation satisfies the approved plan before /commit. When
-	 * enabled (default), the workflow_plan_implementation_review tool is exposed
-	 * and /commit requires a matching PASS. When disabled, the tool is hidden
-	 * and /commit skips the gate (the review becomes fully optional).
+	 * On-demand unified Review — gated by this enabled flag. When enabled
+	 * (default), `/review` and the `workflow_review` tool are available in Work
+	 * Mode. The Review Agent independently verifies requirements/plan/todos and,
+	 * when `codeReview.enabled` is true, folds workspace OCR findings into the
+	 * same review. Review output is transient (a tool result); it never gates
+	 * `/commit` and is never persisted to WorkflowState.
 	 */
-	implementationReview: {
+	review: {
 		enabled: boolean;
 	};
-	/** Code review via alibaba/open-code-review CLI — optional, controlled by enabled flag. */
+	/** OCR toggle for the unified Review. When true, `workflow_review` runs the
+	 *  workspace `ocr review` and feeds normalized findings into the reviewer
+	 *  task. When false, the Review Agent reviews without OCR. */
 	codeReview: {
 		enabled: boolean;
 	};
@@ -182,17 +185,7 @@ export interface WorkflowState {
 	 * Undefined in Approved Work (which uses the Final Plan instead).
 	 */
 	workStartEntryId?: string;
-	/**
-	 * Implementation Review PASS metadata. Records the workRunId and workspace
-	 * fingerprint at the time the reviewer returned PASS. Cleared by todo
-	 * mutations, code changes, or a workRun switch. `/commit` requires a
-	 * matching PASS before accepting a commit in active Work.
-	 */
-	implementationReview?: {
-		workRunId: string;
-		workspaceFingerprint: string;
-	};
-	/**
+/**
 	 * Mode to restore after Init Mode ends. Undefined when not in init.
 	 * `idle` and `init` are excluded as return targets (workflow auto-promotes
 	 * idle → explore; init → init is a no-op); init_complete falls back to

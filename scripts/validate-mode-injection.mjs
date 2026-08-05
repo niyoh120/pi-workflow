@@ -304,35 +304,37 @@ assert(
 	/const EXPLORE_WORKFLOW_TOOL_NAMES: string\[\] = \[\];/.test(mode),
 	"mode.ts: Explore workflow tool set is empty (plan_read removed from Explore)",
 );
-// WORK_WORKFLOW_TOOL_NAMES base set is todo-only; implementation review is
-// conditionally pushed in computeWorkflowToolNames on implementationReview.enabled.
-// Scope the regex to the array literal so it cannot match the push site.
+// WORK_WORKFLOW_TOOL_NAMES base set is todo-only; the unified review tool
+// (workflow_review) is conditionally pushed in computeWorkflowToolNames on
+// review.enabled. Scope the regex to the array literal so it cannot match the
+// push site.
 const workBaseMatch = mode.match(/const WORK_WORKFLOW_TOOL_NAMES = (\[[\s\S]*?\]);/);
 assert(workBaseMatch !== null, "mode.ts: WORK_WORKFLOW_TOOL_NAMES array found");
 assert(
 	workBaseMatch !== null &&
 		/"workflow_todo"/.test(workBaseMatch[1]) &&
-		!/workflow_plan_implementation_review/.test(workBaseMatch[1]),
-	"mode.ts: WORK_WORKFLOW_TOOL_NAMES base set is todo-only (implementation review is conditional)",
+		!/workflow_review/.test(workBaseMatch[1]),
+	"mode.ts: WORK_WORKFLOW_TOOL_NAMES base set is todo-only (unified review is conditional)",
 );
 assert(
-	/config\.implementationReview\.enabled[\s\S]*?names\.push\("workflow_plan_implementation_review"\)/.test(mode),
-	"mode.ts: computeWorkflowToolNames conditionally adds implementation review on implementationReview.enabled",
+	/config\.review\.enabled[\s\S]*?names\.push\("workflow_review"\)/.test(mode),
+	"mode.ts: computeWorkflowToolNames conditionally adds unified review on review.enabled",
 );
 assert(
-	mode.includes('"workflow_plan_implementation_review"'),
-	"mode.ts: WORKFLOW_GATED_TOOLS includes workflow_plan_implementation_review",
+	mode.includes('"workflow_review"'),
+	"mode.ts: WORKFLOW_GATED_TOOLS includes workflow_review",
 );
-// Implementation Review is always enabled in Work; OCR code review stays
-// conditional on codeReview.enabled.
+// Unified review is gated by review.enabled; codeReview.enabled does NOT change
+// the Work tool set (it only toggles OCR inside the review).
 const workComputeBlock = mode.slice(
 	mode.indexOf("case \"work\": {"),
 	mode.indexOf("case \"explore\":", mode.indexOf("case \"work\": {")),
 );
 assert(
 	workComputeBlock.includes("WORK_WORKFLOW_TOOL_NAMES") &&
-		workComputeBlock.includes("workflow_code_review"),
-	"mode.ts: computeWorkflowToolNames work branch spreads WORK base set then conditionally adds implementation review and code review",
+		workComputeBlock.includes("workflow_review") &&
+		!/codeReview\.enabled/.test(workComputeBlock),
+	"mode.ts: computeWorkflowToolNames work branch spreads WORK base set then conditionally adds unified review (codeReview.enabled does not change the tool set)",
 );
 assert(
 	/sameMembers/.test(mode),

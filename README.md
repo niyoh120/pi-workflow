@@ -1,8 +1,8 @@
 # pi-workflow
 
-Lightweight software development workflow extension for pi-coding-agent: plan, optional independent plan-review agent, mandatory plan implementation review, optional code review via alibaba/open-code-review CLI, and commit orchestration.
+Lightweight software development workflow extension for pi-coding-agent: plan, optional independent plan-review agent, on-demand unified review (independent reviewer + optional workspace OCR), and commit orchestration.
 
-**Zero external Pi extension dependencies.** Plan review and Implementation review run as fresh, in-memory child AgentSessions that independently re-validate the saved plan and verify the implementation. Code review runs via the standalone `ocr review` CLI. No `@tintinweb/pi-subagents` required.
+**Zero external Pi extension dependencies.** Plan review and the unified Review run as fresh, in-memory child AgentSessions that independently re-validate the saved plan and review the implementation. When OCR is enabled, the Review runs the standalone `ocr review` CLI against the workspace and folds the normalized findings into the same reviewer. No `@tintinweb/pi-subagents` required.
 
 ## Installation
 
@@ -26,7 +26,7 @@ pi install .
 ## Architecture
 
 ```
-idle → explore → plan → work → implementation review (PASS) → [/review loop] → commit → idle
+idle → explore → plan → work → [/review loop] → commit → idle
 ```
 
 - **Tool ownership**: pi-workflow manages only its own `workflow_*` tools. Built-in tools and other extension tools preserve their active/inactive state across mode changes; mode permissions apply to every active tool through prompts and stable path guards. There is no special auto-activation of `ask_user_question`.
@@ -34,8 +34,7 @@ idle → explore → plan → work → implementation review (PASS) → [/review
 - **Mode context**: the current mode prompt and worktree notice are injected into the stable system prompt (via `before_agent_start`), and the Approved-Plan Work handoff is isolated via a canonical marker so Plan→Work transitions within the same agent run always see the latest mode. Dynamic state (todos, run IDs) comes from tool results, not the system prompt.
 - **Explore Mode**: Default landing after `/wf`. Read-only codebase exploration and Q&A (same permissions as Plan Mode). Explore exposes no workflow tools; a preserved plan is read in Plan Mode. Use `/plan` when ready to design.
 - **Plan Review** (optional): Model-initiated `workflow_plan_review` tool call — the plan agent may invoke it after saving a plan. Spawns a fresh, isolated in-memory AgentSession that inherits the parent Plan session's information-tool surface (minus workflow tools), independently explores the repository and active external tools, and returns structured Critical/Important/Minor/Summary findings grounded in repository evidence. Not a separate mode; runs within Plan Mode under a single 30-minute total timeout.
-- **Plan Implementation Review** (default-on, configurable): The Work agent must call `workflow_plan_implementation_review` before `/commit` when `implementationReview.enabled` is true (default). A fresh, isolated in-memory AgentSession independently verifies that the implementation genuinely satisfies the approved plan (or current todos in Direct Work) by exploring the actual checkout/worktree itself — it does NOT receive the Work agent's execution summary, diffs, or test claims. It emits a coverage matrix, correctness/verification findings, and a machine-parseable `IMPLEMENTATION_REVIEW_VERDICT: PASS|FAIL` line. PASS is bound to the current `workRunId` and a workspace fingerprint (tracked + untracked content); todo or code changes invalidate it. `/commit` refuses to commit active Work without a matching PASS. Disable via `implementationReview.enabled: false` to hide the tool and skip the commit gate entirely.
-- **Code Review** (optional): `/review` selects scope, prompts the model to invoke `workflow_code_review`, and runs the review/fix/re-review loop. Work Mode points users to `/review` after the mandatory Implementation Review PASS; OCR fixes that change code invalidate the Implementation Review PASS and require a re-run before `/commit`.
+- **Unified Review** (on-demand, configurable): `/review` (or a direct `workflow_review` call) in Work Mode launches a fresh, isolated in-memory AgentSession that independently reviews the implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work) by exploring the actual checkout/worktree itself — it does NOT receive the Work agent's execution summary, diffs, or test claims. When `codeReview.enabled` is true, a workspace `ocr review` runs first and its normalized findings are injected into the reviewer task (each finding must be dispositioned with repository evidence). It emits a coverage matrix, correctness/verification findings, OCR dispositions, and a machine-parseable `REVIEW_VERDICT: PASS|FAIL` line. The verdict is **transient**: it only signals whether this on-demand review loop can end — it is never written to workflow state and never gates `/commit`. Disable via `review.enabled: false` to hide `/review` and the tool; set `codeReview.enabled: false` to review without OCR.
 
 ## Modes
 
@@ -48,8 +47,8 @@ Workflow tools and commands are **opt-in by default**: only `/wf` is visible unt
 | Explore Mode | `/explore` | Return to Explore Mode from any mode (non-destructive — keeps plan/todos) |
 | Plan Mode | `/plan` | Brainstorm and produce an implementation plan |
 | Work Mode | `/work` | Implement the approved plan |
-| Review/Fix Loop | `/review` | Interactive TUI: choose scope, run `ocr review`, fix Critical/Important issues, and re-review |
-| Commit Mode | `/commit` | Generate and execute a conventional commit |
+| Review/Fix Loop | `/review` | On-demand unified review of the current workspace (incl. active worktree); folds in workspace OCR when enabled |
+| Commit Mode | `/commit` | Generate and execute a conventional commit (always available, no review gate) |
 
 ## Configuration
 
@@ -98,6 +97,11 @@ Set `workflow.autoEnter: true` to enable workflow commands and tools automatical
       "model": "gpt-5.1",
       "thinking": "high"
     },
+    "review": {
+      "provider": "openai",
+      "model": "gpt-5.1",
+      "thinking": "high"
+    },
     "work": {
       "provider": "anthropic",
       "model": "claude-sonnet-4-5",
@@ -112,6 +116,9 @@ Set `workflow.autoEnter: true` to enable workflow commands and tools automatical
   "planReview": {
     "enabled": true
   },
+  "review": {
+    "enabled": true
+  },
   "codeReview": {
     "enabled": true
   }
@@ -120,34 +127,33 @@ Set `workflow.autoEnter: true` to enable workflow commands and tools automatical
 
 See `config.json.example` for the canonical config template.
 
-### Plan review (optional tool)
+### Unified Review (on-demand tool)
 
-Plan review is an **optional** feature — when `planReview.enabled` is `true`, the `workflow_plan_review` tool becomes available. The plan agent decides whether to call it based on plan complexity and risk.
+Review is an **on-demand** feature — when `review.enabled` is `true` (default), `/review` and the `workflow_review` tool become available in Work Mode. `codeReview.enabled` controls whether the Review folds a workspace OCR pass into the reviewer task.
 
-The reviewer is a **fresh, independent AgentSession** (no subprocess, no RPC): `SessionManager.inMemory(...)` gives it isolated, non-persistent conversation state. It runs the configured `models.planReview` model and thinking level, and receives only authoritative inputs:
+The reviewer is a **fresh, independent AgentSession** (no subprocess, no RPC): `SessionManager.inMemory(...)` gives it isolated, non-persistent conversation state. It runs the configured `models.review` model and thinking level, and receives only authoritative inputs:
 
-- The original user requirements from the current Plan lifecycle (captured via the `/plan` session-leaf marker)
-- The confirmed grilling decisions (snapshotted into `planReviewDecisions` at plan-save time)
-- The saved Final Plan
+- Approved Work: original user requirements (plan lifecycle) + Final Plan + approved todo snapshot + current todos
+- Direct Work: Work-lifecycle user requirements + current todos
 
-The planner's reasoning, thinking, tool results, and prior review output are **excluded by construction** — the reviewer re-derives its own view by exploring the repository.
+The Work agent's reasoning, thinking, tool results, execution summaries, diffs, and test claims are **excluded by construction** — the reviewer re-derives its own view by exploring the repository.
+
+**When OCR is enabled**, the reviewer first runs a workspace `ocr review` (deterministic background derived from the requirements + plan/todos) and receives the normalized findings. It must disposition **every** finding: confirm a real issue or refute a false positive, both backed by repository evidence. Confirmed Critical/Important findings contribute to the unified FAIL.
 
 **Inherited tool surface (best-effort).** At review time the parent's active tools are snapshotted, every workflow-owned tool is removed, and the remainder is reconstructed in the child: built-in tools (`read`/`bash`/`edit`/`write`/`grep`/`find`/`ls`) are rebuilt by `createAgentSession`; active extension/MCP/Web/remote/memory tools are rebuilt from their owning extension source paths via `DefaultResourceLoader({ noExtensions: true, additionalExtensionPaths })`. pi-workflow itself is never loaded into the child (its bash override is treated as builtin, so its path is never collected). Tool reconstruction differences never block review and surface only as `requestedTools`/`activeTools`/`unavailableTools` diagnostics.
 
-**Read-only safety boundary.** An inline child extension reuses the existing pure path guards: direct reads of `.pi/workflow/` are blocked, and `write`/`edit` are confined to the Plan scratch root (`/tmp/pi-workflow-plan-scratch/`). Bash mutation is governed by the reviewer system prompt (read-only + scratch probes only).
+**Read-only safety boundary.** An inline child extension reuses the existing pure path guards: direct reads of `.pi/workflow/` are blocked (in BOTH the main checkout and active worktree), and `write`/`edit` are confined to the Plan scratch root (`/tmp/pi-workflow-plan-scratch/`). Bash mutation is governed by the reviewer system prompt (read-only + scratch probes only).
 
-**Runtime budget.** A single 30-minute total timeout (`1_800_000ms`) bounds the whole run, combined with the parent turn's AbortSignal. There is no turn or tool-call limit — the reviewer controls its own exploration. The child session is always disposed in `finally`; timeout or user cancellation aborts the active AgentSession and returns an explicit tool error.
+**Runtime budget.** A single 30-minute total timeout (`1_800_000ms`) bounds the reviewer run, combined with the parent turn's AbortSignal. OCR shares the same parent signal. The child session is always disposed in `finally`; timeout or user cancellation aborts the active AgentSession and returns an explicit tool error.
 
-**Result.** The tool is zero-argument; legacy `task`/`context`/`instructions` fields from resumed sessions are accepted and discarded via `prepareArguments`. The final text keeps the `Critical / Important / Minor / Summary` structure with concrete repository evidence, and the result carries aggregated nested usage on its top-level `usage` field plus operational metadata (reviewer model/thinking, elapsed time, turns, tool-call count, requested/active/unavailable tools, stop reason/error).
+**Result.** The tool is zero-argument; the reviewer task is assembled from workflow state. The final text keeps the `Critical / Important / Minor / Summary` structure with concrete repository evidence, and the result carries aggregated nested usage on its top-level `usage` field plus operational metadata (reviewer model/thinking, elapsed time, turns, tool-call count, requested/active/unavailable tools, OCR enabled/counts/rawPath, verdict, stop reason/error). The verdict is **transient**: PASS means the review loop can end; it is never written to workflow state and never gates `/commit`.
 
-### Code review (optional tool)
+### Unified review (on-demand tool)
 
-Code review is also **optional** — when `codeReview.enabled` is `true`, the `workflow_code_review` tool (and the `/review` command) become available.
+The unified Review is **on-demand** — when `review.enabled` is `true` (default), `/review` and the `workflow_review` tool become available in Work Mode. `codeReview.enabled` toggles whether the Review includes a workspace OCR pass.
 
-- **Workspace** (default): reviews staged + unstaged + untracked changes.
-- **Custom ref range** or **single commit**: via `/review` command TUI.
-
-The model fills in the `--background` parameter based on current task context. The `/review` command opens a TUI for scope selection, prompts the model to call the tool, and keeps the loop in the agent turn so confirmed Critical/Important findings are fixed and re-reviewed.
+- **Workspace** (the only scope): reviews staged + unstaged + untracked changes; an active workflow worktree is reviewed against its working tree and branch.
+- The Review Agent fills the OCR `--background` from the authoritative requirements + plan/todo summary (deterministic). The `/review` command enters Work runtime and prompts the model to call `workflow_review`, keeping the loop in the agent turn so confirmed Critical/Important findings are fixed and re-reviewed.
 
 The `ocr` binary is assumed to be in PATH (hardcoded). No additional OCR configuration is exposed.
 
@@ -165,7 +171,8 @@ On load, pi-workflow strips stale config keys from old versions:
 - Removed `codeReview.ocrBinary/timeoutMs/maxLoops` (hardcoded, no longer configurable)
 - Removed `planReview.maxLoops` (no longer used)
 - Removed `codeReview.auto` (no longer used)
-- Unknown models keys are stripped; only `explore/plan/planReview/work/commit` are recognized
+- Unknown models keys are stripped; only `explore/plan/planReview/review/work/commit` are recognized
+- The old top-level `implementationReview` section and `models.implementationReview` are **not** migrated or cleaned: they remain as unread extra properties. Rename them to `review` / `models.review` manually to take effect.
 
 ## Settings Menu (`/wf-settings`)
 
@@ -179,7 +186,7 @@ Flow:
 2. Edit options in a searchable list:
    - `models.<role>.provider` / `models.<role>.model` — free-text input (clear the field to inherit).
    - `models.<role>.thinking` — cycle through `inherit / off / minimal / low / medium / high / xhigh / max`.
-   - `workflow.autoEnter`, `planReview.enabled`, `codeReview.enabled` — toggle through `inherit / true / false` (**Project / Global scopes only**, see below).
+   - `workflow.autoEnter`, `planReview.enabled`, `review.enabled` — toggle through `inherit / true / false` (**Project / Global scopes only**, see below). `codeReview.enabled` (Review OCR toggle) is editable in all scopes including Session.
 3. Press Esc to return to the scope picker; pick **Done** to finish.
 
 **Reset Session** clears this Pi process's session overrides so it inherits Project / Global / default settings.
@@ -207,12 +214,14 @@ layer, letting lower layers take over.
   across turns, `/reload`, and `/resume` — workflow only re-applies the role
   config on explicit mode transitions and `/wf-settings` saves. Use `/wf-status`
   to compare the active runtime model/thinking against the configured role.
-- **`workflow.autoEnter`, `planReview.enabled`, `codeReview.enabled`** gate
+- **`workflow.autoEnter`, `planReview.enabled`, `review.enabled`** gate
   command/tool registration, which happens at extension load time using the
   Project/Global layers. They are editable only in **Project** and **Global**
   scopes (the Session layer cannot influence load-time registration), and need
-  `/reload` (or the next startup) to take effect. The menu shows a reminder when
-  you change one of them.
+  `/reload` (or the next startup) to take effect. `codeReview.enabled` is a
+  runtime OCR toggle for the unified Review and is editable in all scopes
+  (including Session) with immediate effect. The menu shows a reminder when
+  you change a reload-sensitive option.
 
 ## Plan Document Management
 
@@ -254,7 +263,7 @@ This prevents wasting tokens when the user still wants to refine the design.
 | `/plan` | Enter Plan Mode |
 | `/go [--force]` | Approve current plan and hand off to Work Mode |
 | `/work [task]` | Skip Plan Mode, go straight to implementation |
-| `/review` | TUI scope selector for code review — runs the workflow_code_review loop |
+| `/review` | On-demand unified review of the current workspace (incl. active worktree); folds in workspace OCR when `codeReview.enabled` is true |
 | `/commit [notes]` | Generate commit message and commit |
 | `/wf-status` | Show current workflow state (mode, active runtime model/thinking vs configured role, plan path, run IDs) |
 | `/wf-exit` | Exit workflow mode |
@@ -272,28 +281,27 @@ Plan review runs an **optional, model-initiated** independent reviewer — no su
 - **Structured output** — Critical/Important/Minor/Summary with concrete repository evidence; nested usage is returned on the tool result.
 - **Zero config** — just set `models.planReview` and `planReview.enabled: true` in your config.
 
-## Plan Implementation Review (Mandatory Work Gate)
+## Unified Review (On-Demand)
 
-Plan Implementation review runs a **mandatory, Work-agent-initiated** independent reviewer that verifies the implementation before `/commit`. The Work agent calls `workflow_plan_implementation_review` (zero-argument) after finishing the todos.
+The unified Review runs an **on-demand, user-triggered** independent reviewer over the current workspace. Trigger it with `/review` (or a direct `workflow_review` call) in Work Mode.
 
-- **Independent** — a fresh in-memory AgentSession verifies the implementation through its own repository exploration (read, grep, find, ls, bash, git diff). It never sees the Work agent's execution summary, pre-selected diffs, test claims, or prior review output.
+- **Independent** — a fresh in-memory AgentSession reviews the implementation through its own repository exploration (read, grep, find, ls, bash, git diff). It never sees the Work agent's execution summary, pre-selected diffs, test claims, or prior review output.
 - **Authoritative inputs only** — Approved Work: user requirements (plan lifecycle) + Final Plan + approved todo snapshot + current todos. Direct Work: Work-lifecycle user requirements + current todos.
-- **Validates against actual code** — every todo marked done must have concrete file/line evidence; plan coverage gaps and unverifiable completion claims force FAIL.
+- **Optional workspace OCR** — when `codeReview.enabled` is true, a workspace `ocr review` runs first with a deterministic background derived from the requirements + plan/todo summary; its normalized findings are injected into the reviewer task, and every finding must be dispositioned (confirm with evidence or refute as a false positive). When false, the reviewer covers the implementation directly.
+- **Validates against actual code** — every todo marked done should have concrete file/line evidence; plan coverage gaps and unverifiable completion claims force FAIL.
 - **Read-only** — `.pi/workflow/` reads blocked in BOTH the main checkout and active worktree; project writes confined to the Plan scratch root; git/source mutation forbidden by prompt.
-- **Bounded** — one 30-minute total timeout; uses `models.implementationReview`.
-- **Configurable** — set `models.implementationReview` for the reviewer model/thinking and `implementationReview.enabled` (default `true`) to toggle the tool and commit gate. When disabled, the tool is hidden and `/commit` skips the gate.
-- **Machine verdict** — emits `IMPLEMENTATION_REVIEW_VERDICT: PASS|FAIL`; fail-closed on missing/conflicting/zero-tool-call output.
-- **PASS fingerprint binding** — PASS records the current `workRunId` and a workspace fingerprint (SHA-256 over tracked diff bytes + sorted non-ignored untracked file contents). Todo changes, any code change, or a workRun switch invalidate it.
-- **Commit gate** — `/commit` refuses to commit active Work without a matching, fresh PASS. OCR `/review` stays optional; if OCR fixes change code, the Implementation Review PASS must be re-run before `/commit`.
+- **Bounded** — one 30-minute total timeout; uses `models.review`.
+- **Configurable** — set `models.review` for the reviewer model/thinking, `review.enabled` (default `true`) to toggle `/review` + the tool, and `codeReview.enabled` to toggle the OCR pass.
+- **Machine verdict** — emits `REVIEW_VERDICT: PASS|FAIL`; fail-closed on missing/conflicting/zero-tool-call output.
+- **Transient verdict** — PASS means the review loop can end. It is never written to workflow state and never gates `/commit`.
 
-### Two flows to commit
+### Flow to commit
 
-- **Without OCR**: Implementation Review PASS → `/commit`.
-- **With OCR**: Implementation Review PASS → `/review` → if OCR produced code fixes, re-run Implementation Review PASS → `/commit`.
+- Implement → optionally `/review` (with or without OCR) → fix → re-review → `/commit` (always available, no review gate).
 
-## Code Review (OCR CLI)
+## OCR (workspace findings)
 
-Code review uses the `workflow_code_review` tool, which wraps alibaba/open-code-review's `ocr review` CLI:
+When `codeReview.enabled` is true, the unified Review runs alibaba/open-code-review's `ocr review` CLI against the workspace before the reviewer:
 
 - **Deterministic rules** — Built-in detectors for NPE, thread safety, XSS, SQL injection, etc. Not LLM-dependent.
 - **Dedicated review tools** — `code_search` for cross-file reference checking, `code_comment` for line-level annotations.
@@ -301,12 +309,7 @@ Code review uses the `workflow_code_review` tool, which wraps alibaba/open-code-
 - **Line-level comments** — Precise issue locations, not vague text descriptions.
 - **Severity classification** — Security/Defect → Critical, Maintainability/Quality → Important.
 
-The `workflow_code_review` tool:
-1. Always runs with `--audience agent` for structured output.
-2. Requires a model-supplied `--background` with task context.
-3. Defaults to workspace scope (staged + unstaged + untracked changes).
-
-For interactive scope selection and the full review/fix/re-review loop, use `/review` — it shows a TUI and prompts the model to call the tool.
+The reviewer runs OCR with `--audience agent --format json` over the workspace (staged + unstaged + untracked changes), parses normalized findings, and dispositions them. Set `codeReview.enabled: false` to review without OCR.
 
 ## RPC / Paseo Compatibility
 
@@ -317,7 +320,7 @@ pi-workflow adapts to Pi's run modes so Paseo (and other Pi RPC clients) can dri
 | Command / surface | TUI | RPC (Paseo) | JSON / print |
 |---|---|---|---|
 | `/wf-settings` | `SettingsList` overlay + searchable model picker | basic-dialog wizard: scope → setting → value (select/input) | stderr guidance, no UI |
-| `/review` | custom scope/ref overlay | basic-dialog wizard: scope (select) + refs (input) | stderr guidance, no UI |
+| `/review` | on-demand review of current workspace | on-demand review of current workspace | stderr guidance, no UI |
 | `/wf-status` | `notify` | `notify` (handled-command, Paseo surfaces it) | stderr text |
 | todo tool | `workflow_todo` + TUI overlay | `update_plan` alias (Paseo native TodoListCard) | provider-dependent |
 | `setStatus` / `setWidget` | footer + overlay widget | Pi emits events; Paseo currently ignores persistent status/widgets | n/a |
@@ -362,35 +365,24 @@ Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) ar
 | `workflow_plan_clear` | Clear workflow state and return to idle mode |
 | `workflow_grill_record` | Record grilling decisions (batch `decisions[]`; legacy single fields accepted) |
 | `workflow_plan_review` | Launch the independent plan-reviewer agent (zero-argument, optional) |
-| `workflow_plan_implementation_review` | Launch the mandatory implementation-reviewer agent (zero-argument, Work Mode gate before `/commit`) |
-| `workflow_code_review` | Run OCR code review on workspace or git ref range (optional) |
+| `workflow_review` | Launch the on-demand unified reviewer agent (zero-argument, Work Mode; folds in workspace OCR when `codeReview.enabled`) |
 
 ### workflow_plan_review
 
-Launch the independent reviewer agent (only available when `planReview.enabled: true`). Zero-argument: the reviewer task is assembled from workflow state — the current Plan lifecycle's user requirements, the snapshotted confirmed decisions, and the saved Final Plan. Returns structured Critical/Important/Minor/Summary feedback with repository evidence; aggregated nested usage is returned on the top-level `usage` field, and operational metadata (reviewer model/thinking, elapsed time, turns, tool-call count, requested/active/unavailable tools, stop reason/error) is in `details`.
+Launch the independent plan-reviewer agent (only available when `planReview.enabled: true`). Zero-argument: the reviewer task is assembled from workflow state — the current Plan lifecycle's user requirements, the snapshotted confirmed decisions, and the saved Final Plan. Returns structured Critical/Important/Minor/Summary feedback with repository evidence; aggregated nested usage is returned on the top-level `usage` field, and operational metadata (reviewer model/thinking, elapsed time, turns, tool-call count, requested/active/unavailable tools, stop reason/error) is in `details`.
 
 Legacy `task` / `context` / `instructions` fields carried by resumed sessions are accepted and discarded by `prepareArguments`.
 
-### workflow_plan_implementation_review
+### workflow_review
 
-Launch the mandatory implementation-reviewer agent (always available in Work Mode). Zero-argument: the reviewer task is assembled from workflow state.
+Launch the on-demand unified reviewer agent (available in Work Mode when `review.enabled: true`). Zero-argument: the reviewer task is assembled from workflow state.
 
 - **Approved Work** input: plan-lifecycle user requirements + Final Plan + approved todo snapshot + current todos.
 - **Direct Work** input: Work-lifecycle user requirements + current todos.
-- Returns a coverage matrix, Implementation Correctness / Verification findings, Critical/Important/Minor, and a final `IMPLEMENTATION_REVIEW_VERDICT: PASS|FAIL` line.
+- When `codeReview.enabled` is true, a workspace `ocr review` runs first and its normalized findings are injected; the reviewer dispositions every finding.
+- Returns a coverage matrix, Implementation Correctness / Verification findings, OCR dispositions (when OCR ran), Critical/Important/Minor, and a final `REVIEW_VERDICT: PASS|FAIL` line.
 - PASS requires both a PASS verdict AND at least one repository tool call (fail-closed otherwise).
-- On PASS, a workspace fingerprint is computed and bound to the current `workRunId`; todo/code changes invalidate it. Operational metadata (reviewer model, elapsed, turns, tool calls, repo-tool-used, verdict, pass-recorded) is in `details`.
-
-### workflow_code_review
-
-Run OCR code review (only available when `codeReview.enabled: true`). Defaults to workspace scope.
-
-**Parameters:**
-- `background` (required): task context and review focus
-- `scope`: `"workspace"` (default), `"range"`, or `"commit"`
-- `from` / `to` / `commit`: scope-specific refs
-
-OCR runs with `--audience agent --format json`. The raw JSON is saved to a temp file and parsed into normalized findings (severity, rule, file, line range, message, suggestion); exact-duplicate findings are deduped. The model-visible result is a compact summary + finding list; the full raw JSON path, per-severity counts, and stats are kept in `details`. Preview output is ANSI text and is compacted into a file list. If JSON parsing fails, the raw file path is surfaced so the output can be inspected. The review → fix → re-review loop behavior is unchanged.
+- The verdict is **transient** — it only signals whether this review loop can end. It is never written to workflow state and never gates `/commit`. Operational metadata (reviewer model, elapsed, turns, tool calls, repo-tool-used, OCR enabled/counts/rawPath, verdict) is in `details`.
 
 | Path | Purpose |
 |------|---------|

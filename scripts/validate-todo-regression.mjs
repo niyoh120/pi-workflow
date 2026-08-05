@@ -75,8 +75,7 @@ function inlineComputeWorkflowToolNames(mode, config) {
 		}
 		case "work": {
 			const names = ["workflow_todo"];
-			if (config.implementationReview && config.implementationReview.enabled) names.push("workflow_plan_implementation_review");
-			if (config.codeReview.enabled) names.push("workflow_code_review");
+			if (config.review && config.review.enabled) names.push("workflow_review");
 			return names;
 		}
 		case "explore":
@@ -466,8 +465,8 @@ console.log("\n=== Check 6: Source structure verification ===");
 	nsBody = nsBody.replace(/:\s*NonNullable<[^>]*>/g, "");
 	const nsFnStr = "function normalizeState(raw) {" + nsBody + "\n}";
 	// normalizeState now delegates todos / approvedTodos / grillTurns /
-	// planReviewDecisions / implementationReview normalization to module-level
-	// helpers; extract and strip each so the isolated eval has them in scope.
+	// planReviewDecisions normalization to module-level helpers; extract and
+	// strip each so the isolated eval has them in scope.
 	const helperStrips = [
 		[/\bas\s+Record<[^>]*>/g, ""],
 		[/\bas\s+WorkflowState\["[a-z]+"\]\[number\]/g, ""],
@@ -495,17 +494,14 @@ console.log("\n=== Check 6: Source structure verification ===");
 	}
 	const ngBody = extractFnBody("normalizeGrillTurns");
 	const ntBody = extractFnBody("normalizeTodos");
-	const nirBody = extractFnBody("normalizeImplementationReview");
 	const ngFnStr = "function normalizeGrillTurns(raw) {" + ngBody + "\n}";
 	const ntFnStr = "function normalizeTodos(raw) {" + ntBody + "\n}";
-	const nirFnStr = "function normalizeImplementationReview(raw) {" + nirBody + "\n}";
 	// Guards against silent ReferenceErrors.
 	assert(ngBody.length > 0, "normalizeGrillTurns function found and extracted from state.ts");
 	assert(ntBody.length > 0, "normalizeTodos function found and extracted from state.ts");
-	assert(nirBody.length > 0, "normalizeImplementationReview function found and extracted from state.ts");
 	const normalizeState = eval(
 		"(function(DEFAULT_STATE) { " +
-			ngFnStr + ntFnStr + nirFnStr +
+			ngFnStr + ntFnStr +
 			" return " + nsFnStr + "; })(DEFAULT_STATE)",
 	);
 
@@ -670,7 +666,7 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"tools.ts: no old registerSubagentTool",
 	);
 	const prtStart = toolsTs.indexOf("export function registerPlanReviewTool");
-	const prtEnd = toolsTs.indexOf("// ── Internal OCR constants", prtStart);
+	const prtEnd = toolsTs.indexOf("// ── workflow_review tool", prtStart);
 	assert(
 		prtStart >= 0 && prtEnd > prtStart,
 		"tools.ts: plan review tool block anchors exist",
@@ -697,8 +693,8 @@ console.log("\n=== Check 7: Code review tooling ===");
 	);
 	assert(
 		toolsTs.includes("registerPlanReviewTool(pi, getAgentDir);") &&
-			toolsTs.includes("registerCodeReviewTool(pi, getAgentDir);"),
-		"tools.ts registers plan/code review definitions unconditionally",
+			toolsTs.includes("registerReviewTool(pi, getAgentDir);"),
+		"tools.ts registers plan review + unified review definitions unconditionally",
 	);
 	assert(
 		!/if\s*\(\s*config\.planReview\.enabled\)\s*\{?\s*registerPlanReviewTool/.test(toolsTs),
@@ -747,33 +743,28 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"mode.ts: removed implicit restricted-agent early return",
 	);
 
-	// Code review tool
+	// Unified review tool (merged implementation + code review)
 	assert(
-		/export\s+function\s+registerCodeReviewTool\s*\(/.test(toolsTs),
-		"tools.ts exports registerCodeReviewTool",
+		/export\s+function\s+registerReviewTool\s*\(/.test(toolsTs),
+		"tools.ts exports registerReviewTool",
 	);
 	assert(
-		toolsTs.includes("requires a non-empty background"),
-		"workflow_code_review requires non-empty background",
-	);
-
-	// OCR internal constants (no longer configurable)
-	assert(
-		toolsTs.includes('OCR_BINARY = "ocr"'),
-		"tools.ts: OCR_BINARY constant",
+		!/export\s+function\s+registerCodeReviewTool\s*\(/.test(toolsTs),
+		"tools.ts no longer exports registerCodeReviewTool (merged into registerReviewTool)",
 	);
 	assert(
-		toolsTs.includes("OCR_TIMEOUT_MS = 1_800_000"),
-		"tools.ts: OCR_TIMEOUT_MS constant",
+		!/export\s+function\s+registerPlanImplementationReviewTool\s*\(/.test(toolsTs),
+		"tools.ts no longer exports registerPlanImplementationReviewTool",
 	);
-	assert(
-		!toolsTs.includes("config.codeReview.ocrBinary"),
-		"tools.ts: no config.codeReview.ocrBinary reference",
-	);
-	assert(
-		!toolsTs.includes("config.codeReview.timeoutMs"),
-		"tools.ts: no config.codeReview.timeoutMs reference",
-	);
+	// The unified tool is zero-argument and folds OCR in via codeReview.enabled.
+	const reviewToolStart = toolsTs.indexOf("export function registerReviewTool");
+	const reviewToolEnd = toolsTs.indexOf("// ── Bulk registration", reviewToolStart);
+	assert(reviewToolStart >= 0 && reviewToolEnd > reviewToolStart, "tools.ts: unified review tool block anchors exist");
+	const reviewToolBlock = toolsTs.slice(reviewToolStart, reviewToolEnd);
+	assert(/parameters:\s*Type\.Object\(\s*\{\s*\}\)/.test(reviewToolBlock), "tools.ts: workflow_review is zero-argument");
+	assert(reviewToolBlock.includes("runReviewAgent("), "tools.ts: workflow_review invokes runReviewAgent");
+	assert(reviewToolBlock.includes("config.codeReview.enabled"), "tools.ts: workflow_review passes config.codeReview.enabled as includeOcr");
+	assert(reviewToolBlock.includes("config.models.review"), "tools.ts: workflow_review uses config.models.review");
 
 	// OCR helpers — verify exports and that buildReviewArgv body has required flags
 	assert(
@@ -795,6 +786,7 @@ console.log("\n=== Check 7: Code review tooling ===");
 		buildArgvStart,
 		buildArgvEnd > 0 ? buildArgvEnd : ocrHelpersTs.length,
 	);
+	// buildReviewArgv is workspace-only: required flags present, scope flags gone.
 	assert(
 		buildArgvBody.includes("--audience"),
 		"ocr-helpers.ts: buildReviewArgv body uses --audience flag",
@@ -803,8 +795,12 @@ console.log("\n=== Check 7: Code review tooling ===");
 		buildArgvBody.includes("--background"),
 		"ocr-helpers.ts: buildReviewArgv body uses --background flag",
 	);
+	assert(
+		!/ReviewScopeKind|--from|--to|--commit|--preview/.test(ocrHelpersTs),
+		"ocr-helpers.ts: ReviewScopeKind and range/commit/preview flags removed (workspace-only)",
+	);
 
-	// /review owns the workflow_code_review review/fix loop
+	// /review owns the unified workflow_review review/fix loop
 	const reviewCmdStart = commandsTs.indexOf(
 		"export function registerReviewCommand",
 	);
@@ -818,14 +814,22 @@ console.log("\n=== Check 7: Code review tooling ===");
 	);
 	const reviewCmdBlock = commandsTs.slice(reviewCmdStart, reviewCmdEnd);
 	assert(
-		reviewCmdBlock.includes("workflow_code_review") &&
+		reviewCmdBlock.includes("workflow_review") &&
 			reviewCmdBlock.includes("review → fix → re-review") &&
 			reviewCmdBlock.includes("transitionWorkflowMode"),
-		"/review command includes workflow_code_review review/fix loop",
+		"/review command includes unified workflow_review review/fix loop",
+	);
+	assert(
+		reviewCmdBlock.includes("config.review.enabled"),
+		"/review handler is gated on review.enabled",
 	);
 	assert(
 		!reviewCmdBlock.includes("async function runCodeReviewSubagent"),
 		"/review: no old runCodeReviewSubagent",
+	);
+	assert(
+		!/scopeSelectorComponent|scopeInputComponent|ReviewScope/.test(commandsTs),
+		"/review: no scope TUI / RPC wizard references",
 	);
 
 	// No stale config field references in commands
@@ -903,9 +907,13 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"prompts.ts: work prompt forbids git repository writes",
 	);
 	assert(
-		/\/review.*code review/.test(workPromptBlock) &&
-			/\/commit.*命令提交/.test(workPromptBlock),
-		"prompts.ts: work prompt tells users to use /review then /commit after work",
+		/\/review.*统一 Review|统一 Review.*\`\/review\`|按需统一 Review/.test(workPromptBlock) &&
+			/\/commit.*命令提交|始终直接可用/.test(workPromptBlock),
+		"prompts.ts: work prompt describes on-demand /review and /commit availability",
+	);
+	assert(
+		workPromptBlock.includes("REVIEW_VERDICT"),
+		"prompts.ts: work prompt describes the transient REVIEW_VERDICT",
 	);
 	assertNotContains(
 		workPromptBlock,
@@ -923,8 +931,18 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"prompts.ts: work prompt does not tell model to auto-review",
 	);
 	assert(
-		promptsTs.includes("workflow_plan_implementation_review"),
-		"prompts.ts: mentions workflow_plan_implementation_review (mandatory Work gate)",
+		promptsTs.includes("workflow_review"),
+		"prompts.ts: mentions workflow_review",
+	);
+	assertNotContains(
+		promptsTs,
+		"workflow_plan_implementation_review",
+		"prompts.ts: no old workflow_plan_implementation_review",
+	);
+	assertNotContains(
+		promptsTs,
+		"workflow_code_review",
+		"prompts.ts: no old workflow_code_review",
 	);
 	assert(
 		promptsTs.includes("workflow_plan_review"),
@@ -997,7 +1015,7 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"// ── workflow_plan_review tool (independent reviewer agent)",
 	);
 	const planReviewToolEnd = toolsTs.indexOf(
-		"// ── Internal OCR constants",
+		"// ── workflow_review tool",
 		planReviewToolStart,
 	);
 	assert(
@@ -1345,12 +1363,12 @@ console.log("\n=== Check 14: Explore mode ===");
 	// mode.ts: workflow tool gating hides workflow tools in explore/idle.
 	const cfgAllReviewTools = {
 		planReview: { enabled: true },
-		implementationReview: { enabled: true },
+		review: { enabled: true },
 		codeReview: { enabled: true },
 	};
 	const cfgNoReviewTools = {
 		planReview: { enabled: false },
-		implementationReview: { enabled: false },
+		review: { enabled: false },
 		codeReview: { enabled: false },
 	};
 	assert(
@@ -1362,11 +1380,13 @@ console.log("\n=== Check 14: Explore mode ===");
 		inlineComputeWorkflowToolNames("plan", cfgAllReviewTools).join(",") ===
 			"workflow_todo,workflow_plan_read,workflow_plan_save,workflow_plan_approve,workflow_plan_clear,workflow_plan_review" &&
 			inlineComputeWorkflowToolNames("work", cfgAllReviewTools).join(",") ===
-				"workflow_todo,workflow_plan_implementation_review,workflow_code_review" &&
+				"workflow_todo,workflow_review" &&
 			inlineComputeWorkflowToolNames("work", cfgNoReviewTools).join(",") ===
 				"workflow_todo" &&
+			// codeReview.enabled alone does NOT change the work tool set.
+			inlineComputeWorkflowToolNames("work", { planReview: { enabled: false }, review: { enabled: false }, codeReview: { enabled: true } }).join(",") === "workflow_todo" &&
 			inlineComputeWorkflowToolNames("commit", cfgAllReviewTools).length === 0,
-		"inline runtime: plan exposes plan tools; work exposes todo (+optional review); commit exposes none",
+		"inline runtime: plan exposes plan tools; work exposes todo (+optional workflow_review); codeReview.enabled does not change the tool set; commit exposes none",
 	);
 	assert(
 		/export function isWorkflowToolMode\([\s\S]*?mode === "plan"[\s\S]*?mode === "work"[\s\S]*?mode === "init"/.test(
@@ -1381,7 +1401,7 @@ console.log("\n=== Check 14: Explore mode ===");
 		"mode.ts: isWorkflowToolMode allow-list is plan/work/init (explore excluded)",
 	);
 	assert(
-		/const PLAN_WORKFLOW_TOOL_NAMES[\s\S]*?workflow_plan_save[\s\S]*?const WORK_WORKFLOW_TOOL_NAMES[\s\S]*?export function computeWorkflowToolNames[\s\S]*?config\.planReview\.enabled[\s\S]*?config\.codeReview\.enabled[\s\S]*?return \[\]/.test(
+		/const PLAN_WORKFLOW_TOOL_NAMES[\s\S]*?workflow_plan_save[\s\S]*?const WORK_WORKFLOW_TOOL_NAMES[\s\S]*?export function computeWorkflowToolNames[\s\S]*?config\.planReview\.enabled[\s\S]*?config\.review\.enabled[\s\S]*?return \[\]/.test(
 			modeTs14,
 		),
 		"mode.ts: computeWorkflowToolNames mirrors mode-specific runtime behavior (work has no plan_read)",
@@ -1393,7 +1413,7 @@ console.log("\n=== Check 14: Explore mode ===");
 		"workflow_plan_approve",
 		"workflow_plan_clear",
 		"workflow_plan_review",
-		"workflow_code_review",
+		"workflow_review",
 	];
 	for (const toolName of expectedWorkflowTools) {
 		assert(
@@ -1604,34 +1624,36 @@ function validateWorktreeIntegrationStatic() {
 		"bash override routes external commands through the shared worktree-aware cwd resolver",
 	);
 
-	// workflow_code_review resolves the same worktree-aware cwd and passes it
-	// to runOcrReview so workspace/range/commit reviews run against the active
+	// The unified workflow_review resolves the same worktree-aware cwd and
+	// passes it to runReviewAgent so OCR + reviewer run against the active
 	// worktree's working tree and branch.
-	const crStart = tools.indexOf("export function registerCodeReviewTool");
+	const crStart = tools.indexOf("export function registerReviewTool");
 	const crEnd = tools.indexOf("// ── Bulk registration", crStart);
 	assert(
 		crStart >= 0 && crEnd > crStart,
-		"tools.ts: code review block anchors exist for cwd assertion",
+		"tools.ts: unified review block anchors exist for cwd assertion",
 	);
 	const crBlock = tools.slice(crStart, crEnd > 0 ? crEnd : tools.length);
 	assert(
 		crBlock.includes("getSessionKey(ctx.sessionManager)") &&
 			crBlock.includes("loadState(ctx.cwd, sessionKey)"),
-		"workflow_code_review reads session state before running OCR",
+		"workflow_review reads session state before running the review",
 	);
 	assert(
 		crBlock.includes("resolveEffectiveCwd(ctx.cwd, state)"),
-		"workflow_code_review resolves worktree-aware cwd via the shared helper",
+		"workflow_review resolves worktree-aware cwd via the shared helper",
 	);
 	assert(
-		/runOcrReview\(\s*OCR_BINARY,\s*reviewCwd,/.test(crBlock),
-		"workflow_code_review passes the resolved reviewCwd to runOcrReview (ctx.cwd replaced)",
+		/runReviewAgent\(/.test(crBlock) && /reviewCwd,/.test(crBlock),
+		"workflow_review passes the resolved reviewCwd to runReviewAgent (ctx.cwd replaced)",
 	);
 	assert(
-		crBlock.includes(
-			"all scopes run against that worktree's working tree and branch",
-		),
-		"workflow_code_review description documents active-worktree execution",
+		crBlock.includes("includeOcr"),
+		"workflow_review forwards codeReview.enabled as includeOcr",
+	);
+	assert(
+		crBlock.includes("active worktree") || /worktree/.test(crBlock),
+		"workflow_review description documents active-worktree execution",
 	);
 	assert(
 		commands.includes("Branch was not deleted") &&
@@ -1943,15 +1965,18 @@ console.log("\n=== Check 18: hardened error paths + shared invariants ===");
 	assert(/workflow_plan_save requires non-blank markdown/.test(toolsSrc18), "tools.ts: plan_save rejects blank markdown");
 	assert(/Active plan is missing or empty/.test(toolsSrc18), "tools.ts: plan_read surfaces missing/empty plan error");
 
-	// OCR parse failure returns isError: true with rawPath + command.
-	const parseCatchStart = toolsSrc18.indexOf("} catch (parseErr) {");
-	const parseCatchEnd = toolsSrc18.indexOf("} catch (err: unknown)", parseCatchStart);
-	assert(parseCatchStart >= 0 && parseCatchEnd > parseCatchStart, "tools.ts: OCR parse catch block anchors exist");
-	const ocrParseBlock = toolsSrc18.slice(parseCatchStart, parseCatchEnd);
-	assert(/isError: true/.test(ocrParseBlock), "OCR parse failure returns isError: true");
-	assert(/parseError: true/.test(ocrParseBlock), "OCR parse failure details.parseError set");
-	assert(/rawPath/.test(ocrParseBlock), "OCR parse failure preserves rawPath");
-	assert(/command: scopeSummary/.test(ocrParseBlock), "OCR parse failure keeps compact command in details");
+	// OCR parse failure (and other review failures) surface as a tool error from
+	// workflow_review; runReviewAgent throws with rawPath on parse failure.
+	const reviewAgentSrc18 = fs.readFileSync(path.join(CWD, "extensions/workflow/review-agent.ts"), "utf8");
+	assert(/parseOcrReviewJson\(rawOutput\)/.test(reviewAgentSrc18), "review-agent.ts: enabled branch parses OCR via parseOcrReviewJson");
+	assert(/OcrParseError|rawPath/.test(reviewAgentSrc18), "review-agent.ts: parse failure surfaces rawPath");
+	assert(/runOcrReview\(/.test(reviewAgentSrc18), "review-agent.ts: enabled branch runs runOcrReview");
+	const reviewCatchStart = toolsSrc18.indexOf("} catch (err) {");
+	const reviewCatchEnd = toolsSrc18.indexOf("const passed", reviewCatchStart);
+	assert(reviewCatchStart >= 0 && reviewCatchEnd > reviewCatchStart, "tools.ts: workflow_review catch block anchors exist");
+	const reviewCatchBlock = toolsSrc18.slice(reviewCatchStart, reviewCatchEnd);
+	assert(/isError: true/.test(reviewCatchBlock), "workflow_review failure returns isError: true");
+	assert(/ocrEnabled: includeOcr/.test(reviewCatchBlock), "workflow_review failure details include ocrEnabled");
 
 	// Pure path getters: no directory creation as a side effect.
 	const pathsMod = await import(
@@ -1980,13 +2005,14 @@ console.log("\n=== Check 18: hardened error paths + shared invariants ===");
 	assert(ttMod.stripTerminalControl("a\x1B[31mb\nc\td") === "abcd", "stripTerminalControl: default removes newlines + tabs");
 	assert(ttMod.stripTerminalControl("a\x1B[31mb\nc\td", { keepNewlines: true }) === "ab\nc\td", "stripTerminalControl: keepNewlines preserves LF + tab");
 	assert(ttMod.stripTerminalControl("a\u0000b\x07c") === "abc", "stripTerminalControl: strips C0/C1 controls");
-	// Three prior implementations now delegate to the shared module.
+	// ocr-result.ts no longer sanitizes anything (preview compaction removed);
+	// ocr-helpers.ts still delegates to the shared terminal-text sanitizer.
+	// review-tui.ts was removed (no scope UI anymore).
 	const ocrResultSrc = fs.readFileSync(path.join(CWD, "extensions/workflow/ocr-result.ts"), "utf8");
 	const ocrHelpersSrc = fs.readFileSync(path.join(CWD, "extensions/workflow/ocr-helpers.ts"), "utf8");
-	const reviewTuiSrc = fs.readFileSync(path.join(CWD, "extensions/workflow/review-tui.ts"), "utf8");
-	assert(ocrResultSrc.includes('from "./terminal-text.js"') && /stripTerminalControl\(s, \{ keepNewlines: true \}\)/.test(ocrResultSrc), "ocr-result.ts delegates stripAnsi to shared sanitizer (keepNewlines)");
+	assert(!/stripAnsi|stripTerminalControl/.test(ocrResultSrc), "ocr-result.ts no longer carries stripAnsi / stripTerminalControl (preview + sanitizer wrapper removed)");
 	assert(ocrHelpersSrc.includes('from "./terminal-text.js"') && !/function stripTerminalControlChars/.test(ocrHelpersSrc), "ocr-helpers.ts delegates to shared sanitizer, local impl removed");
-	assert(reviewTuiSrc.includes('from "./terminal-text.js"') && !/function stripTerminalControlChars/.test(reviewTuiSrc), "review-tui.ts delegates to shared sanitizer, local impl removed");
+	assert(!fs.existsSync(path.join(CWD, "extensions/workflow/review-tui.ts")), "review-tui.ts removed (unified review has no scope UI)");
 
 	// Shared branch matcher reused by state normalization.
 	const wtMod = await import(

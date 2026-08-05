@@ -179,8 +179,7 @@ console.log("\n=== Part 2: reviewer tool-surface reconstruction ===");
 			return new Set([
 				"workflow_todo", "workflow_plan_read", "workflow_plan_save",
 				"workflow_plan_approve", "workflow_plan_clear", "workflow_grill_record",
-				"workflow_plan_review", "workflow_code_review",
-				"workflow_plan_implementation_review",
+				"workflow_plan_review", "workflow_review",
 				"workflow_init_complete",
 				"update_plan",
 			]);
@@ -194,7 +193,7 @@ console.log("\n=== Part 2: reviewer tool-surface reconstruction ===");
 			// Exercise stripping across the full managed set, not a subset.
 			"workflow_todo", "workflow_plan_review",
 			"workflow_plan_approve", "workflow_grill_record",
-			"workflow_plan_implementation_review",
+			"workflow_review",
 			"update_plan",
 			"web_search", "mcp__server__tool",
 		],
@@ -232,8 +231,7 @@ console.log("\n=== Part 2: reviewer tool-surface reconstruction ===");
 	const stubGated = new Set([
 		"workflow_todo", "workflow_plan_read", "workflow_plan_save",
 		"workflow_plan_approve", "workflow_plan_clear", "workflow_grill_record",
-		"workflow_plan_review", "workflow_code_review",
-		"workflow_plan_implementation_review",
+		"workflow_plan_review", "workflow_review",
 		"workflow_init_complete",
 	]);
 	const realGated = new Set(realManagedNames);
@@ -242,11 +240,12 @@ console.log("\n=== Part 2: reviewer tool-surface reconstruction ===");
 			[...realGated].every((n) => stubGated.has(n)),
 		"Part 2: stub workflowManagedToolNames set is bidirectionally equal to mode.ts WORKFLOW_GATED_TOOLS",
 	);
-	assert(realGated.has("workflow_plan_implementation_review"), "Part 2: WORKFLOW_GATED_TOOLS includes workflow_plan_implementation_review");
+	assert(realGated.has("workflow_review"), "Part 2: WORKFLOW_GATED_TOOLS includes workflow_review");
 	const req = new Set(requestedTools);
 	assert(!req.has("workflow_todo") && !req.has("workflow_plan_review"), "workflow tools removed from requested allowlist");
 	assert(!req.has("workflow_plan_approve") && !req.has("workflow_grill_record"), "additional workflow tools removed from requested allowlist");
-	assert(!req.has("workflow_plan_implementation_review"), "workflow_plan_implementation_review removed from requested allowlist (stripped from child reviewer)");
+	assert(!req.has("workflow_review"), "workflow_review removed from requested allowlist (stripped from child reviewer)");
+	assert(!req.has("workflow_code_review") && !req.has("workflow_plan_implementation_review"), "old review tool names absent from requested allowlist");
 	assert(!req.has("update_plan"), "update_plan RPC alias removed from requested allowlist");
 	assert(req.has("read") && req.has("bash") && req.has("grep"), "builtin tools retained in requested allowlist");
 	assert(req.has("web_search") && req.has("mcp__server__tool"), "external information tools retained");
@@ -366,16 +365,16 @@ assert(typesTs.includes("planReviewDecisions: GrillTurn[];"), "WorkflowState dec
 assert(typesTs.includes("planStartEntryId?: string;"), "WorkflowState declares planStartEntryId");
 assert(typesTs.includes("approvedTodos?: TodoItem[];"), "WorkflowState declares approvedTodos");
 assert(typesTs.includes("workStartEntryId?: string;"), "WorkflowState declares workStartEntryId");
-assert(typesTs.includes("implementationReview?:"), "WorkflowState declares implementationReview");
+assert(!/implementationReview\??:/.test(typesTs), "WorkflowState no longer declares implementationReview PASS metadata");
 assert(stateTs.includes("planReviewDecisions: normalizeGrillTurns(obj.planReviewDecisions)"), "planReviewDecisions normalized through shared helper");
 assert(stateTs.includes("planStartEntryId:"), "planStartEntryId normalized");
 
 {
 	const ngFn = extractDecl(stateTs, "function normalizeGrillTurns(raw");
 	const ntFn = extractDecl(stateTs, "function normalizeTodos(raw");
-	const nirFn = extractDecl(stateTs, "function normalizeImplementationReview(");
 	const nsFn = extractDecl(stateTs, "export function normalizeState(raw");
-	assert(ngFn.length > 0 && ntFn.length > 0 && nirFn.length > 0 && nsFn.length > 0, "Part 5: normalizeGrillTurns + normalizeTodos + normalizeImplementationReview + normalizeState extracted from state.ts");
+	assert(ngFn.length > 0 && ntFn.length > 0 && nsFn.length > 0, "Part 5: normalizeGrillTurns + normalizeTodos + normalizeState extracted from state.ts");
+	assert(!/function normalizeImplementationReview\(/.test(stateTs), "state.ts no longer defines normalizeImplementationReview");
 	const mod = await loadTsModule(
 		[
 			"const DEFAULT_STATE = { workflowEnabled: false, workflowExplicitlyDisabled: false, mode: \"idle\", todos: [], grillTurns: [], planReviewDecisions: [] };",
@@ -383,7 +382,6 @@ assert(stateTs.includes("planStartEntryId:"), "planStartEntryId normalized");
 			'function branchMatchesWorkRun(branch, workRunId) { return typeof branch === "string" && typeof workRunId === "string" && branch.includes(workRunId.slice(-8)); }',
 			ngFn,
 			ntFn,
-			nirFn,
 			nsFn,
 		].join("\n\n"),
 	);
@@ -394,7 +392,6 @@ assert(stateTs.includes("planStartEntryId:"), "planStartEntryId normalized");
 	// New additive fields: old state normalizes to undefined/absent.
 	assert(oldState.approvedTodos === undefined, "old state without approvedTodos normalizes to undefined");
 	assert(oldState.workStartEntryId === undefined, "old state without workStartEntryId normalizes to undefined");
-	assert(oldState.implementationReview === undefined, "old state without implementationReview normalizes to undefined");
 
 	const withDecisions = mod.normalizeState({
 		planReviewDecisions: [{ question: "q", recommendedAnswer: "r", decisionStatus: "resolved" }],
@@ -414,12 +411,8 @@ assert(stateTs.includes("planStartEntryId:"), "planStartEntryId normalized");
 	assert(mod.normalizeState({ workStartEntryId: "leaf-1" }).workStartEntryId === "leaf-1", "workStartEntryId round-trips through normalization");
 	assert(mod.normalizeState({ workStartEntryId: "  " }).workStartEntryId === undefined, "blank workStartEntryId normalizes to undefined");
 
-	// implementationReview normalization: valid record preserved, invalid dropped.
-	const validReview = mod.normalizeState({ implementationReview: { workRunId: "run-1", workspaceFingerprint: "abc123" } });
-	assert(validReview.implementationReview && validReview.implementationReview.workRunId === "run-1" && validReview.implementationReview.workspaceFingerprint === "abc123", "implementationReview round-trips when valid");
-	assert(mod.normalizeState({ implementationReview: { workRunId: "", workspaceFingerprint: "x" } }).implementationReview === undefined, "implementationReview with empty workRunId normalizes to undefined");
-	assert(mod.normalizeState({ implementationReview: { workRunId: "r", workspaceFingerprint: "" } }).implementationReview === undefined, "implementationReview with empty fingerprint normalizes to undefined");
-	assert(mod.normalizeState({ implementationReview: "garbage" }).implementationReview === undefined, "implementationReview with non-object normalizes to undefined");
+	// Old implementationReview PASS metadata is dropped by whitelist normalization.
+	assert(mod.normalizeState({ implementationReview: { workRunId: "run-1", workspaceFingerprint: "abc123" } }).implementationReview === undefined, "old implementationReview PASS metadata is dropped by normalizeState");
 }
 
 // ═══ Part 6: source-level wiring (timeout / dispose / usage / contract) ═══
@@ -455,233 +448,239 @@ console.log("\n=== Part 6: reviewer wiring & tool contract ===");
 	assert(!fs.existsSync(path.join(root, "extensions/workflow/sidecall.ts")), "sidecall.ts removed");
 }
 
-// ═══ Part 7: Implementation Reviewer pure functions ═══════════════════════
+// ═══ Part 7: unified Review Agent pure functions ═══════════════════════════
 
-console.log("\n=== Part 7: implementation-review-agent pure functions ===");
+console.log("\n=== Part 7: review-agent pure functions ===");
 
 {
-	const implTs = read("extensions/workflow/implementation-review-agent.ts");
-	assert(implTs.includes("export async function runImplementationReviewAgent"), "implementation-review-agent.ts exports runImplementationReviewAgent");
-	assert(implTs.includes("IMPLEMENTATION_REVIEWER_SYSTEM_PROMPT"), "implementation-review-agent.ts defines its own system prompt");
-	assert(implTs.includes("VERDICT_LINE_PREFIX"), "implementation-review-agent.ts exports VERDICT_LINE_PREFIX");
-	assert(implTs.includes("runIndependentReviewer"), "implementation-review-agent.ts delegates to the shared runner");
-	assert(implTs.includes("reviewCwd"), "implementation-review-agent.ts runs in the validated review cwd");
-	assert(implTs.includes("primaryCwd"), "implementation-review-agent.ts passes primaryCwd for dual-root guard");
-	// FAIL without repo tool calls is enforced.
-	assert(implTs.includes("madeRepoToolCall"), "implementation-review-agent.ts tracks whether the reviewer inspected the repo");
-	assert(implTs.includes("REPO_TOOL_NAMES"), "implementation-review-agent.ts defines REPO_TOOL_NAMES for repo-inspection detection");
-	// Prompt verdict examples must stay consistent with the parser's VERDICT_LINE_PREFIX.
-	assert(
-		/IMPLEMENTATION_REVIEW_VERDICT: PASS/.test(implTs),
-		"implementation-review-agent.ts system prompt includes the PASS verdict example matching VERDICT_LINE_PREFIX",
-	);
+	const reviewTs = read("extensions/workflow/review-agent.ts");
+	assert(reviewTs.includes("export async function runReviewAgent"), "review-agent.ts exports runReviewAgent");
+	assert(reviewTs.includes("REVIEWER_SYSTEM_PROMPT"), "review-agent.ts defines its own system prompt");
+	assert(reviewTs.includes("VERDICT_LINE_PREFIX"), "review-agent.ts exports VERDICT_LINE_PREFIX");
+	assert(reviewTs.includes("runIndependentReviewer"), "review-agent.ts delegates to the shared runner");
+	assert(reviewTs.includes("reviewCwd"), "review-agent.ts runs in the validated review cwd");
+	assert(reviewTs.includes("primaryCwd"), "review-agent.ts passes primaryCwd for dual-root guard");
+	assert(reviewTs.includes("madeRepoToolCall"), "review-agent.ts tracks whether the reviewer inspected the repo");
+	assert(reviewTs.includes("REPO_TOOL_NAMES"), "review-agent.ts defines REPO_TOOL_NAMES for repo-inspection detection");
+	assert(/REVIEW_VERDICT: PASS/.test(reviewTs), "review-agent.ts system prompt includes the PASS verdict example matching VERDICT_LINE_PREFIX");
+	// OCR wiring: enabled branch runs OCR + parse; disabled branch skips.
+	assert(reviewTs.includes("includeOcr"), "review-agent.ts takes an includeOcr flag");
+	assert(/runOcrReview\(/.test(reviewTs), "review-agent.ts enabled branch calls runOcrReview");
+	assert(/parseOcrReviewJson\(/.test(reviewTs), "review-agent.ts enabled branch parses via parseOcrReviewJson");
+	assert(/buildReviewArgv\(/.test(reviewTs), "review-agent.ts builds a workspace OCR argv");
+	assert(/checkOcrAvailable\(/.test(reviewTs), "review-agent.ts checks OCR CLI availability when enabled");
+	// The old file is gone.
+	assert(!fs.existsSync(path.join(root, "extensions/workflow/implementation-review-agent.ts")), "implementation-review-agent.ts removed");
 
 	// ── verdict parser (pure fixture) ──
-	const vpFn = extractDecl(implTs, "export function parseImplementationVerdict(");
-	assert(vpFn.length > 0, "Part 7: parseImplementationVerdict extracted");
+	const vpFn = extractDecl(reviewTs, "export function parseReviewVerdict(");
+	assert(vpFn.length > 0, "Part 7: parseReviewVerdict extracted");
 	const vpMod = await loadTsModule([
-		'export const VERDICT_LINE_PREFIX = "IMPLEMENTATION_REVIEW_VERDICT:";',
+		'export const VERDICT_LINE_PREFIX = "REVIEW_VERDICT:";',
 		vpFn,
 	].join("\n\n"));
 
-	const passText = "## Summary\nok\nIMPLEMENTATION_REVIEW_VERDICT: PASS";
-	assert(vpMod.parseImplementationVerdict(passText).verdict === "PASS", "verdict parser: exact PASS line → PASS");
-	const failText = "## Summary\nissues found\nIMPLEMENTATION_REVIEW_VERDICT: FAIL";
-	assert(vpMod.parseImplementationVerdict(failText).verdict === "FAIL", "verdict parser: exact FAIL line → FAIL");
-	// Missing verdict line → FAIL (fail-closed).
-	const noVerdict = vpMod.parseImplementationVerdict("## Summary\nno verdict here");
+	const passText = "## Summary\nok\nREVIEW_VERDICT: PASS";
+	assert(vpMod.parseReviewVerdict(passText).verdict === "PASS", "verdict parser: exact PASS line → PASS");
+	const failText = "## Summary\nissues found\nREVIEW_VERDICT: FAIL";
+	assert(vpMod.parseReviewVerdict(failText).verdict === "FAIL", "verdict parser: exact FAIL line → FAIL");
+	const noVerdict = vpMod.parseReviewVerdict("## Summary\nno verdict here");
 	assert(noVerdict.verdict === "FAIL" && noVerdict.reason, "verdict parser: missing verdict line → FAIL with reason");
-	// Empty text → FAIL.
-	assert(vpMod.parseImplementationVerdict("").verdict === "FAIL", "verdict parser: empty text → FAIL");
-	// Conflicting verdict lines → FAIL.
-	const conflicting = vpMod.parseImplementationVerdict("IMPLEMENTATION_REVIEW_VERDICT: PASS\nIMPLEMENTATION_REVIEW_VERDICT: FAIL");
+	assert(vpMod.parseReviewVerdict("").verdict === "FAIL", "verdict parser: empty text → FAIL");
+	const conflicting = vpMod.parseReviewVerdict("REVIEW_VERDICT: PASS\nREVIEW_VERDICT: FAIL");
 	assert(conflicting.verdict === "FAIL", "verdict parser: conflicting verdict lines → FAIL");
-	// Multiple PASS lines that agree → PASS.
-	const multiPass = vpMod.parseImplementationVerdict("IMPLEMENTATION_REVIEW_VERDICT: PASS\nIMPLEMENTATION_REVIEW_VERDICT: PASS");
+	const multiPass = vpMod.parseReviewVerdict("REVIEW_VERDICT: PASS\nREVIEW_VERDICT: PASS");
 	assert(multiPass.verdict === "PASS", "verdict parser: multiple agreeing PASS lines → PASS");
-	// Unrecognized verdict value → FAIL.
-	const badValue = vpMod.parseImplementationVerdict("IMPLEMENTATION_REVIEW_VERDICT: MAYBE");
+	const badValue = vpMod.parseReviewVerdict("REVIEW_VERDICT: MAYBE");
 	assert(badValue.verdict === "FAIL", "verdict parser: unrecognized verdict value → FAIL");
 
-	// ── task builders (pure fixture) ──
-	const approvedFn = extractDecl(implTs, "export function buildApprovedImplementationReviewTask(");
-	const directFn = extractDecl(implTs, "export function buildDirectImplementationReviewTask(");
-	const fmtFn = extractDecl(implTs, "export function formatTodosForReview(");
-	assert(approvedFn.length > 0 && directFn.length > 0 && fmtFn.length > 0, "Part 7: task builders + formatTodosForReview extracted");
+	// ── OCR context + task builders (pure fixture) ──
+	const approvedFn = extractDecl(reviewTs, "export function buildApprovedReviewTask(");
+	const directFn = extractDecl(reviewTs, "export function buildDirectReviewTask(");
+	const fmtFn = extractDecl(reviewTs, "export function formatTodosForReview(");
+	const fmtFindingsFn = extractDecl(reviewTs, "export function formatOcrFindings(");
+	const buildBgFn = extractDecl(reviewTs, "export function buildOcrBackground(");
+	const extractGoalFn = extractDecl(reviewTs, "function extractPlanGoal(");
+	const truncateFn = extractDecl(reviewTs, "function truncate(s");
+	const renderOcrFn = extractDecl(reviewTs, "function renderOcrSection(");
+	assert(approvedFn.length > 0 && directFn.length > 0 && fmtFn.length > 0 && fmtFindingsFn.length > 0 && buildBgFn.length > 0 && renderOcrFn.length > 0, "Part 7: task builders + formatTodosForReview + formatOcrFindings + buildOcrBackground + renderOcrSection extracted");
 
-	// Approved task builder fixture.
-	const approvedMod = await loadTsModule(fmtFn + "\n\n" + approvedFn);
-	const approvedTask = approvedMod.buildApprovedImplementationReviewTask({
+	const finding = {
+		id: "abc123",
+		severity: "critical",
+		rule: "bug",
+		file: "src/a.ts",
+		line: 10,
+		endLine: 10,
+		message: "NPE risk",
+		suggestion: "guard null",
+	};
+
+	// Approved task builder fixture — OCR enabled with findings.
+	const approvedMod = await loadTsModule(fmtFn + "\n\n" + fmtFindingsFn + "\n\n" + renderOcrFn + "\n\n" + approvedFn);
+	const approvedTaskOcr = approvedMod.buildApprovedReviewTask({
 		requirements: ["build feature X"],
 		planMarkdown: "# Final Plan\n## Goal\nDo X",
 		approvedTodos: [{ id: "T1", title: "impl X", status: "pending" }],
 		currentTodos: [{ id: "T1", title: "impl X", status: "done" }],
+		ocr: { enabled: true, findings: [finding], counts: { critical: 1 }, rawPath: "/tmp/raw.json" },
 	});
-	assert(approvedTask.includes("Authoritative User Requirements"), "Approved task includes user requirements");
-	assert(approvedTask.includes("Final Plan"), "Approved task includes Final Plan");
-	assert(approvedTask.includes("Approved Todo Snapshot"), "Approved task includes approved todo snapshot");
-	assert(approvedTask.includes("Current Todo List"), "Approved task includes current todos");
-	// Must NOT include parent diff/summary/test claims (isolation).
-	// Isolation: the task must not embed parent-provided diff output, execution
-	// summaries, or test-result claims. ("git diff" appears only as a tool the
-	// reviewer may use, not as embedded parent evidence.)
-	assert(!/Parent Execution Summary|Parent Diff|Test Results Claim|passed tests:/i.test(approvedTask), "Approved task excludes parent execution summary / diff output / test claims");
-	assert(!approvedTask.includes("workflow_code_review"), "Approved task does not embed OCR code review output");
-	// Snapshot gap is flagged when approvedTodos is empty.
-	const gapTask = approvedMod.buildApprovedImplementationReviewTask({
+	assert(approvedTaskOcr.includes("Authoritative User Requirements"), "Approved task includes user requirements");
+	assert(approvedTaskOcr.includes("Final Plan"), "Approved task includes Final Plan");
+	assert(approvedTaskOcr.includes("Approved Todo Snapshot"), "Approved task includes approved todo snapshot");
+	assert(approvedTaskOcr.includes("Current Todo List"), "Approved task includes current todos");
+	assert(approvedTaskOcr.includes("OCR Workspace Findings"), "Approved task includes OCR findings section (enabled)");
+	assert(approvedTaskOcr.includes("NPE risk"), "Approved task embeds the OCR finding message");
+	assert(approvedTaskOcr.includes("Disposition EVERY OCR finding"), "Approved task requires per-finding disposition");
+	assert(approvedTaskOcr.includes("false positive"), "Approved task requires false-positive evidence");
+	// Isolation: no parent diff/summary/test claims.
+	assert(!/Parent Execution Summary|Parent Diff|Test Results Claim|passed tests:/i.test(approvedTaskOcr), "Approved task excludes parent execution summary / diff output / test claims");
+
+	// Approved task builder fixture — OCR disabled.
+	const approvedTaskNoOcr = approvedMod.buildApprovedReviewTask({
+		requirements: ["build feature X"],
+		planMarkdown: "# Final Plan\n## Goal\nDo X",
+		approvedTodos: [{ id: "T1", title: "impl X", status: "pending" }],
+		currentTodos: [{ id: "T1", title: "impl X", status: "done" }],
+		ocr: { enabled: false, findings: [], counts: {}, skippedReason: "codeReview.enabled is false" },
+	});
+	assert(approvedTaskNoOcr.includes("OCR is disabled"), "Approved task records OCR disabled/skipped status");
+	assert(!approvedTaskNoOcr.includes("Disposition EVERY OCR finding"), "Approved task omits disposition block when OCR disabled");
+	// Snapshot gap flag when approvedTodos missing.
+	const gapTask = approvedMod.buildApprovedReviewTask({
 		requirements: ["r"],
 		planMarkdown: "# Plan",
 		approvedTodos: undefined,
 		currentTodos: [{ id: "T1", title: "t", status: "done" }],
+		ocr: { enabled: false, findings: [], counts: {} },
 	});
 	assert(gapTask.includes("Approved todo snapshot is MISSING"), "Approved task flags missing snapshot gap");
 
-	// Direct task builder fixture.
-	const directMod = await loadTsModule(fmtFn + "\n\n" + directFn);
-	const directTask = directMod.buildDirectImplementationReviewTask({
+	// Direct task builder fixture — OCR enabled.
+	const directMod = await loadTsModule(fmtFn + "\n\n" + fmtFindingsFn + "\n\n" + renderOcrFn + "\n\n" + directFn);
+	const directTaskOcr = directMod.buildDirectReviewTask({
 		requirements: ["fix bug Y"],
 		currentTodos: [{ id: "T1", title: "fix Y", status: "done" }],
+		ocr: { enabled: true, findings: [finding], counts: { critical: 1 }, rawPath: "/tmp/raw.json" },
 	});
-	assert(directTask.includes("Authoritative User Requirements (this Work lifecycle)"), "Direct task includes Work-lifecycle requirements");
-	assert(directTask.includes("Current Todo List"), "Direct task includes current todos");
-	assert(!directTask.includes("Final Plan"), "Direct task does NOT include a Final Plan");
-	assert(!directTask.includes("Approved Todo Snapshot"), "Direct task does NOT include approved todo snapshot");
+	assert(directTaskOcr.includes("Authoritative User Requirements (this Work lifecycle)"), "Direct task includes Work-lifecycle requirements");
+	assert(directTaskOcr.includes("Current Todo List"), "Direct task includes current todos");
+	assert(!directTaskOcr.includes("Final Plan"), "Direct task does NOT include a Final Plan");
+	assert(!directTaskOcr.includes("Approved Todo Snapshot"), "Direct task does NOT include approved todo snapshot");
+	assert(directTaskOcr.includes("Disposition EVERY OCR finding"), "Direct task requires per-finding disposition when OCR enabled");
+
+	// buildOcrBackground determinism.
+	const bgMod = await loadTsModule(extractGoalFn + "\n\n" + truncateFn + "\n\n" + buildBgFn);
+	const bg1 = bgMod.buildOcrBackground({ requirements: ["r1"], planMarkdown: "# Final Plan\n## Goal\nShip X", todos: [{ id: "T1", title: "t", status: "done" }] });
+	const bg2 = bgMod.buildOcrBackground({ requirements: ["r1"], planMarkdown: "# Final Plan\n## Goal\nShip X", todos: [{ id: "T1", title: "t", status: "done" }] });
+	assert(bg1 === bg2, "buildOcrBackground is deterministic for identical inputs");
+	assert(bg1.includes("r1") && bg1.includes("Ship X") && bg1.includes("T1"), "buildOcrBackground embeds requirements, plan goal, and todos");
 }
 
-// ═══ Part 8: workspace fingerprint + cleanup-before-fingerprint timing ════
+// ═══ Part 8: unified review runner wiring (no fingerprint) ═════════════════
 
-console.log("\n=== Part 8: workspace fingerprint + runner timing ===");
+console.log("\n=== Part 8: unified review runner wiring ===");
 
 {
+	// The workspace fingerprint helpers are gone (no commit gate / no PASS).
 	const wtTs = read("extensions/workflow/worktree.ts");
-	assert(wtTs.includes("export function computeWorkspaceFingerprint"), "worktree.ts exports computeWorkspaceFingerprint");
-	assert(wtTs.includes("export function workspaceFingerprintMatches"), "worktree.ts exports workspaceFingerprintMatches");
-	// Fixed git args for reproducibility.
-	assert(wtTs.includes('"--no-ext-diff"'), "fingerprint uses --no-ext-diff for reproducibility");
-	assert(wtTs.includes('"--no-textconv"'), "fingerprint uses --no-textconv for reproducibility");
-	assert(wtTs.includes('"--no-renames"'), "fingerprint uses --no-renames for reproducibility");
-	assert(wtTs.includes('"--binary"'), "fingerprint uses --binary to capture all diff bytes");
-	// Untracked (non-ignored) files are included so new source is covered.
-	assert(wtTs.includes('"--others", "--exclude-standard", "-z"'), "fingerprint includes sorted non-ignored untracked files");
-	assert(/hash\.update\(content\)/.test(wtTs), "fingerprint feeds untracked file content into the hash");
-	// SHA-256 digest.
-	assert(wtTs.includes('"sha256"'), "fingerprint uses SHA-256");
+	assert(!/export function computeWorkspaceFingerprint/.test(wtTs), "worktree.ts no longer exports computeWorkspaceFingerprint");
+	assert(!/export function workspaceFingerprintMatches/.test(wtTs), "worktree.ts no longer exports workspaceFingerprintMatches");
+	assert(!/NUL_SEP|MAX_UNTRACKED_FILE_SIZE|parseNulDelimited/.test(wtTs), "worktree.ts fingerprint internals removed");
 
-	// Real fingerprint on a temp git repo.
-	const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "wf-fp-"));
-	try {
-		const { execSync } = await import("node:child_process");
-		const run = (cmd) => execSync(cmd, { cwd: tmpRepo, stdio: "ignore", encoding: "utf8" });
-		run("git init");
-		run('git config user.email "t@t.t"');
-		run('git config user.name "t"');
-		fs.writeFileSync(path.join(tmpRepo, "a.txt"), "initial\n");
-		run("git add a.txt");
-		run('git commit -m "init"');
-		const { computeWorkspaceFingerprint, workspaceFingerprintMatches } = await import(
-			pathToFileURL(path.join(root, "extensions/workflow/worktree.ts")).href
-		);
-		const fp1 = computeWorkspaceFingerprint(tmpRepo);
-		assert(typeof fp1 === "string" && fp1.length === 64, "computeWorkspaceFingerprint returns a 64-char SHA-256 hex");
-		assert(workspaceFingerprintMatches(tmpRepo, fp1), "workspaceFingerprintMatches true for unchanged workspace");
-		// Modify tracked content → fingerprint changes.
-		fs.writeFileSync(path.join(tmpRepo, "a.txt"), "changed\n");
-		assert(!workspaceFingerprintMatches(tmpRepo, fp1), "fingerprint changes after tracked file edit (PASS would be invalidated)");
-		const fp2 = computeWorkspaceFingerprint(tmpRepo);
-		// Add untracked new source file → fingerprint changes (new files covered).
-		fs.writeFileSync(path.join(tmpRepo, "new-source.txt"), "brand new file\n");
-		assert(!workspaceFingerprintMatches(tmpRepo, fp2), "fingerprint changes after adding untracked new source file");
-		const fp3 = computeWorkspaceFingerprint(tmpRepo);
-		assert(workspaceFingerprintMatches(tmpRepo, fp3), "fingerprint stable when no changes");
-		// Ignored files do NOT affect the fingerprint.
-		fs.writeFileSync(path.join(tmpRepo, ".gitignore"), "ignored.log\n");
-		run("git add .gitignore && git commit -m gi");
-		const fp4 = computeWorkspaceFingerprint(tmpRepo);
-		fs.writeFileSync(path.join(tmpRepo, "ignored.log"), "noise\n");
-		assert(workspaceFingerprintMatches(tmpRepo, fp4), "ignored untracked files do NOT affect the fingerprint");
-	} finally {
-		fs.rmSync(tmpRepo, { recursive: true, force: true });
-	}
+	const reviewTs = read("extensions/workflow/review-agent.ts");
+	assert(/includeOcr[\s\S]*?runOcrReview\(/.test(reviewTs), "review-agent.ts: OCR runs inside the includeOcr=true branch");
+	assert(/parseOcrReviewJson\(rawOutput\)/.test(reviewTs), "review-agent.ts: OCR output parsed into normalized findings");
+	assert(/ocrContext = \{[\s\S]*?enabled: true/.test(reviewTs), "review-agent.ts: enabled branch builds an enabled ocrContext");
+	assert(/skippedReason: "codeReview\.enabled is false"/.test(reviewTs), "review-agent.ts: disabled branch records the skip reason");
+	assert(/OcrContext/.test(reviewTs), "review-agent.ts declares an OcrContext type passed to task builders");
+	// Findings flow into the task builder via ocrContext.
+	assert(/buildApprovedReviewTask\([\s\S]*?ocr: ocrContext/.test(reviewTs), "review-agent.ts passes ocrContext into buildApprovedReviewTask");
+	assert(/buildDirectReviewTask\([\s\S]*?ocr: ocrContext/.test(reviewTs), "review-agent.ts passes ocrContext into buildDirectReviewTask");
+	// Delegates to the shared runner with the review cwd + dual-root safety.
+	assert(/runIndependentReviewer\(\{[\s\S]*?reviewCwd,/.test(reviewTs), "review-agent.ts delegates to runIndependentReviewer with reviewCwd");
+	assert(/safetyRoots[\s\S]*?\{ primaryCwd, reviewCwd \}/.test(reviewTs), "review-agent.ts builds dual-root safetyRoots");
 
-	// Cleanup-before-fingerprint timing: the implementation review tool computes
-	// the fingerprint AFTER runImplementationReviewAgent returns (which fully
-	// disposes the child session via the shared runner's finally).
-	const toolsSrc = read("extensions/workflow/tools.ts");
-	const implToolStart = toolsSrc.indexOf("export function registerPlanImplementationReviewTool");
-	const implToolEnd = toolsSrc.indexOf("// ── Bulk registration", implToolStart);
-	assert(implToolStart >= 0 && implToolEnd > implToolStart, "Part 8: implementation review tool block anchors exist");
-	const implToolBlock = toolsSrc.slice(implToolStart, implToolEnd);
-	assert(implToolBlock.includes("runImplementationReviewAgent("), "implementation review tool invokes runImplementationReviewAgent");
-	// The fingerprint computation must come AFTER the runner returns.
-	const runnerCallIdx = implToolBlock.indexOf("runImplementationReviewAgent(");
-	const fpIdx = implToolBlock.indexOf("computeWorkspaceFingerprint(reviewCwd)");
-	assert(runnerCallIdx >= 0 && fpIdx > runnerCallIdx, "implementation review tool computes fingerprint AFTER the runner returns (cleanup-before-fingerprint)");
-	// PASS only recorded when verdict PASS + repo tool calls.
-	assert(/delete reloaded\.implementationReview/.test(implToolBlock), "implementation review tool clears stale PASS on FAIL/no-repo-calls");
-	assert(implToolBlock.includes("workRunId: reloaded.workRunId"), "implementation review tool binds PASS to the current (reloaded) workRunId");
-	assert(implToolBlock.includes("staleWorkRun"), "implementation review tool guards against stale work run during review (staleWorkRun check)");
+	// OCR errors surface as explicit errors (no verdict produced).
+	assert(/ocr CLI not found/.test(reviewTs), "review-agent.ts: missing OCR CLI throws an explicit error");
+	assert(/ocr review failed/.test(reviewTs), "review-agent.ts: OCR exec failure throws an explicit error");
+	assert(/could not be processed/.test(reviewTs), "review-agent.ts: OCR parse failure throws an explicit error (carries rawPath)");
 }
 
-// ═══ Part 9: commit gate + agent_end fingerprint + approve snapshot ════════
+// ═══ Part 9: no commit gate + no agent_end PASS + approve snapshot ═════════
 
-console.log("\n=== Part 9: commit gate + agent_end + approve snapshot ===");
+console.log("\n=== Part 9: no commit gate + no agent_end PASS + approve snapshot ===");
 
 {
 	const commandsSrc = read("extensions/workflow/commands.ts");
 	const toolsSrc = read("extensions/workflow/tools.ts");
 
-	// /commit gate: requires matching Implementation Review PASS for active Work,
-	// but only when implementationReview.enabled is true (关闭即放行).
+	// /commit has NO review/implementation gate — it switches Commit Mode directly.
 	const commitStart = commandsSrc.indexOf("export function registerCommitCommand");
 	const commitEnd = commandsSrc.indexOf("export function registerWfStatusCommand", commitStart);
 	const commitBlock = commandsSrc.slice(commitStart, commitEnd > 0 ? commitEnd : commandsSrc.length);
-	assert(commitBlock.includes("current.mode === \"work\""), "/commit gate checks active Work mode");
-	assert(commitBlock.includes("current.implementationReview"), "/commit gate checks for implementationReview PASS");
-	assert(commitBlock.includes("commitConfig.implementationReview.enabled"), "/commit gate is gated on implementationReview.enabled (关闭即放行)");
-	assert(commitBlock.includes("loadConfigForContext"), "/commit gate loads config to check enabled flag");
-	assert(commitBlock.includes("computeWorkspaceFingerprint"), "/commit gate computes current fingerprint");
-	assert(commitBlock.includes("pass.workspaceFingerprint"), "/commit gate compares against recorded fingerprint");
-	// Commit does NOT require OCR.
-	assert(!/codeReview\.enabled/.test(commitBlock), "/commit gate does NOT require OCR code review");
+	assert(!/implementationReview/.test(commitBlock), "/commit no longer references implementationReview PASS");
+	assert(!/computeWorkspaceFingerprint/.test(commitBlock), "/commit no longer computes a workspace fingerprint");
+	assert(!/workspaceFingerprint/.test(commitBlock), "/commit no longer compares a fingerprint");
+	assert(commitBlock.includes("transitionWorkflowMode"), "/commit switches Commit Mode directly via transitionWorkflowMode");
 
-	// agent_end: only checks fingerprint when a PASS exists in Work mode.
+	// agent_end has no fingerprint/PASS check.
 	const agentEndStart = commandsSrc.indexOf("export function registerAgentEnd");
 	const agentEndEnd = commandsSrc.indexOf("export function registerWfCommand", agentEndStart);
 	const agentEndBlock = commandsSrc.slice(agentEndStart, agentEndEnd > 0 ? agentEndEnd : commandsSrc.length);
-	assert(agentEndBlock.includes("state.implementationReview"), "agent_end checks for existing PASS");
-	assert(agentEndBlock.includes("computeWorkspaceFingerprint"), "agent_end computes fingerprint to detect staleness");
-	assert(agentEndBlock.includes('state.mode === "work"'), "agent_end only runs the fingerprint check in Work mode");
+	assert(!/implementationReview/.test(agentEndBlock), "agent_end no longer references implementationReview PASS");
+	assert(!/computeWorkspaceFingerprint/.test(agentEndBlock), "agent_end no longer computes a fingerprint");
 
-	// approve: non-empty todo gate + approvedTodos snapshot + clear PASS.
+	// approve no longer clears a PASS; it still deep-copies approvedTodos.
 	const approveStart = toolsSrc.indexOf("export function registerPlanApproveTool");
 	const approveEnd = toolsSrc.indexOf("export function registerPlanClearTool", approveStart);
 	const approveBlock = toolsSrc.slice(approveStart, approveEnd);
 	assert(approveBlock.includes("empty todo list"), "approve rejects empty todo list");
 	assert(approveBlock.includes("approvedTodos: state.todos.map"), "approve deep-copies todos into approvedTodos snapshot");
-	assert(approveBlock.includes("implementationReview: undefined"), "approve clears any prior Implementation Review PASS");
+	assert(!/implementationReview: undefined/.test(approveBlock), "approve no longer clears implementationReview PASS");
 
-	// /work: captures workStartEntryId + clears approved/review state.
+	// /work no longer clears a PASS.
 	const workStart = commandsSrc.indexOf("export function registerWorkCommand");
 	const workEnd = commandsSrc.indexOf("export function registerReviewCommand", workStart);
 	const workBlock = commandsSrc.slice(workStart, workEnd > 0 ? workEnd : commandsSrc.length);
 	assert(workBlock.includes("workStartEntryId"), "/work captures workStartEntryId for Direct Work requirement scoping");
 	assert(workBlock.includes("approvedTodos: undefined"), "/work clears approved todos for Direct Work");
-	assert(workBlock.includes("implementationReview: undefined"), "/work clears prior Implementation Review PASS");
+	assert(!/implementationReview: undefined/.test(workBlock), "/work no longer clears implementationReview PASS");
 
-	// Todo mutations invalidate the PASS (both surfaces).
+	// Todo mutations no longer delete a PASS (both surfaces).
 	const todoToolStart = toolsSrc.indexOf("export function registerTodoTool");
 	const todoToolEnd = toolsSrc.indexOf("export function registerUpdatePlanTool", todoToolStart);
 	const todoToolBlock = toolsSrc.slice(todoToolStart, todoToolEnd);
-	assert(/delete state\.implementationReview/.test(todoToolBlock), "workflow_todo mutations delete implementationReview PASS");
+	assert(!/delete state\.implementationReview/.test(todoToolBlock), "workflow_todo no longer deletes implementationReview PASS");
 	const upStart = toolsSrc.indexOf("export function registerUpdatePlanTool");
 	const upEnd = toolsSrc.indexOf("// ── workflow plan tools", upStart);
 	const upBlock = toolsSrc.slice(upStart, upEnd > 0 ? upEnd : toolsSrc.length);
-	assert(/delete state\.implementationReview/.test(upBlock), "update_plan mutations delete implementationReview PASS");
+	assert(!/delete state\.implementationReview/.test(upBlock), "update_plan no longer deletes implementationReview PASS");
+
+	// No stale identifiers anywhere in source.
+	for (const file of [
+		"extensions/workflow/tools.ts",
+		"extensions/workflow/commands.ts",
+		"extensions/workflow/mode.ts",
+		"extensions/workflow/prompts.ts",
+		"extensions/workflow/settings.ts",
+		"extensions/workflow/index.ts",
+		"extensions/workflow/helpers.ts",
+		"extensions/workflow/state.ts",
+		"extensions/workflow/worktree.ts",
+		"extensions/workflow/review-agent.ts",
+	]) {
+		const src = read(file);
+		assert(!/workflow_plan_implementation_review|workflow_code_review/.test(src), `${file} has no old tool identifiers`);
+		assert(!/computeWorkspaceFingerprint|workspaceFingerprintMatches/.test(src), `${file} has no fingerprint helper references`);
+		assert(!/ocrScopeSummary|compactPreviewText/.test(src), `${file} has no scope-summary / preview formatter`);
+		assert(!/review-tui/.test(src), `${file} has no review-tui import`);
+	}
 }
 
-// ═══ Part 10: implementationReview config role + enabled flag ═════════════
+// ═══ Part 10: review config role + enabled flag ════════════════════════════
 
-console.log("\n=== Part 10: implementationReview config role + enabled flag ===");
+console.log("\n=== Part 10: review config role + enabled flag ===");
 
 {
 	const typesTs = read("extensions/workflow/types.ts");
@@ -692,46 +691,52 @@ console.log("\n=== Part 10: implementationReview config role + enabled flag ==="
 	const toolsTs = read("extensions/workflow/tools.ts");
 	const exampleJson = read("config.json.example");
 
-	// Role union includes implementationReview.
-	assert(/"implementationReview"/.test(typesTs), "types.ts: Role union includes implementationReview");
-	// WorkflowConfig has implementationReview section.
-	assert(typesTs.includes("implementationReview: {"), "types.ts: WorkflowConfig declares implementationReview section");
-	assert(typesTs.includes("implementationReview?: Partial<"), "types.ts: WorkflowConfigOverride declares implementationReview override");
+	// Role union includes review (not implementationReview).
+	assert(/"review"/.test(typesTs), "types.ts: Role union includes review");
+	assert(!/"implementationReview"/.test(typesTs), "types.ts: Role union no longer includes implementationReview");
+	// WorkflowConfig has a review section (and the override).
+	assert(typesTs.includes("review: {"), "types.ts: WorkflowConfig declares review section");
+	assert(typesTs.includes("review?: Partial<"), "types.ts: WorkflowConfigOverride declares review override");
+	assert(!/implementationReview\??:/.test(typesTs), "types.ts: no implementationReview config/state fields remain");
 
 	// defaults: model + enabled default true.
-	assert(defaultsTs.includes("implementationReview:"), "defaults.ts: DEFAULT_CONFIG includes implementationReview");
-	assert(/implementationReview:[\s\S]*?enabled: true/.test(defaultsTs), "defaults.ts: implementationReview.enabled defaults to true");
-	assert(/implementationReview:[\s\S]*?provider:[\s\S]*?model:[\s\S]*?thinking/.test(defaultsTs), "defaults.ts: implementationReview has a model spec");
+	assert(defaultsTs.includes("review:"), "defaults.ts: DEFAULT_CONFIG includes review");
+	assert(/review:[\s\S]*?enabled: true/.test(defaultsTs), "defaults.ts: review.enabled defaults to true");
+	assert(/review:[\s\S]*?provider:[\s\S]*?model:[\s\S]*?thinking/.test(defaultsTs), "defaults.ts: review has a model spec");
 
 	// config.json.example mirrors the closed set.
-	assert(exampleJson.includes('"implementationReview"'), "config.json.example includes implementationReview");
+	assert(exampleJson.includes('"review"'), "config.json.example includes review");
+	assert(!/"implementationReview"/.test(exampleJson), "config.json.example no longer includes implementationReview");
 
 	// config.ts: VALID_ROLES + normalize + leafPaths.
-	assert(configTs.includes('"implementationReview"'), "config.ts: VALID_ROLES includes implementationReview");
-	assert(/implementationReview && typeof cfg\.implementationReview === "object"/.test(configTs), "config.ts: normalizeConfig strips unknown implementationReview fields");
-	assert(configTs.includes('"implementationReview.enabled"'), "config.ts: leafPaths includes implementationReview.enabled");
-	assert(/"implementationReview", "work"/.test(configTs), "config.ts: leafPaths models list includes implementationReview");
+	assert(configTs.includes('"review"'), "config.ts: VALID_ROLES includes review");
+	assert(!/"implementationReview"/.test(configTs), "config.ts: VALID_ROLES no longer includes implementationReview");
+	assert(/review && typeof cfg\.review === "object"/.test(configTs), "config.ts: normalizeConfig strips unknown review fields");
+	assert(configTs.includes('"review.enabled"'), "config.ts: leafPaths includes review.enabled");
+	assert(/"planReview", "review", "work"/.test(configTs), "config.ts: leafPaths models list includes review");
 
-	// settings.ts: ROLES + RELOAD_SENSITIVE_IDS + descriptor.
-	assert(settingsTs.includes('"implementationReview"'), "settings.ts: ROLES includes implementationReview");
-	assert(settingsTs.includes('"implementationReview.enabled"'), "settings.ts: RELOAD_SENSITIVE_IDS + descriptor include implementationReview.enabled");
+	// settings.ts: ROLES + RELOAD_SENSITIVE_IDS + descriptors.
+	assert(settingsTs.includes('"review"'), "settings.ts: ROLES includes review");
+	assert(!/"implementationReview"/.test(settingsTs), "settings.ts: ROLES no longer includes implementationReview");
+	assert(settingsTs.includes('"review.enabled"'), "settings.ts: RELOAD_SENSITIVE_IDS + descriptor include review.enabled");
+	assert(!settingsTs.includes('"implementationReview.enabled"'), "settings.ts: no stale implementationReview.enabled descriptor");
+	// codeReview.enabled is a non-reload-sensitive OCR toggle.
+	assert(/codeReview\.enabled[\s\S]*?editable live|codeReview\.enabled is intentionally excluded/.test(settingsTs) || !settingsTs.includes('"codeReview.enabled"'), "settings.ts: codeReview.enabled is not reload-sensitive");
 
-	// mode.ts: implementation review is conditional on implementationReview.enabled
-	// (no longer unconditionally in WORK_WORKFLOW_TOOL_NAMES).
-	// WORK_WORKFLOW_TOOL_NAMES array body must NOT contain implementation review
-	// (it is now conditionally pushed in computeWorkflowToolNames). Scope the
-	// regex to the array literal's closing ] so it cannot match the push site.
+	// mode.ts: workflow_review is conditional on review.enabled.
 	const workArrayMatch = modeTs.match(/const WORK_WORKFLOW_TOOL_NAMES = (\[[\s\S]*?\]);/);
 	assert(workArrayMatch !== null, "Part 10: WORK_WORKFLOW_TOOL_NAMES array found");
-	assert(workArrayMatch !== null && !/workflow_plan_implementation_review/.test(workArrayMatch[1]), "mode.ts: WORK_WORKFLOW_TOOL_NAMES array does not include implementation review (now conditional)");
-	assert(/config\.implementationReview\.enabled[\s\S]*?names\.push\("workflow_plan_implementation_review"\)/.test(modeTs), "mode.ts: work branch conditionally pushes implementation review on implementationReview.enabled");
+	assert(workArrayMatch !== null && !/workflow_review/.test(workArrayMatch[1]), "mode.ts: WORK_WORKFLOW_TOOL_NAMES array does not include workflow_review (now conditional)");
+	assert(/config\.review\.enabled[\s\S]*?names\.push\("workflow_review"\)/.test(modeTs), "mode.ts: work branch conditionally pushes workflow_review on review.enabled");
+	assert(!/config\.implementationReview\.enabled/.test(modeTs), "mode.ts: no implementationReview.enabled reference");
 
-	// tools.ts: implementation review handler uses models.implementationReview.
-	const implToolStart = toolsTs.indexOf("export function registerPlanImplementationReviewTool");
-	const implToolEnd = toolsTs.indexOf("// ── Bulk registration", implToolStart);
-	const implToolBlock = toolsTs.slice(implToolStart, implToolEnd);
-	assert(implToolBlock.includes("config.models.implementationReview"), "tools.ts: implementation review handler uses config.models.implementationReview (own role, not planReview)");
-	assert(!/modelSpec: config\.models\.planReview/.test(implToolBlock), "tools.ts: implementation review handler does NOT reuse planReview model");
+	// tools.ts: unified review handler uses models.review + codeReview.enabled.
+	const reviewToolStart = toolsTs.indexOf("export function registerReviewTool");
+	const reviewToolEnd = toolsTs.indexOf("// ── Bulk registration", reviewToolStart);
+	const reviewToolBlock = toolsTs.slice(reviewToolStart, reviewToolEnd);
+	assert(reviewToolBlock.includes("config.models.review"), "tools.ts: unified review handler uses config.models.review");
+	assert(reviewToolBlock.includes("config.codeReview.enabled"), "tools.ts: unified review handler passes config.codeReview.enabled as includeOcr");
+	assert(!/modelSpec: config\.models\.implementationReview/.test(reviewToolBlock), "tools.ts: review handler does NOT reference models.implementationReview");
 }
 
 // ═══ Result ════════════════════════════════════════════════════════════════

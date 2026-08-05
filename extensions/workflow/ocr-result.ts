@@ -8,8 +8,7 @@
  *
  * This module normalizes that JSON into a compact, stable finding model, saves
  * the full raw JSON to a temp file, dedups exact-duplicate findings, and emits
- * a compact result for the model. Preview output is ANSI text (not JSON), so it
- * is stripped and summarized separately.
+ * a compact result for the model.
  */
 
 import * as fs from "node:fs";
@@ -17,7 +16,6 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
 import type { OcrFinding, OcrReviewResult, OcrSeverity } from "./types.js";
-import { stripTerminalControl } from "./terminal-text.js";
 
 // ── Raw JSON shapes (subset we depend on) ───────────────────────────────────
 
@@ -51,15 +49,6 @@ interface RawReview {
 	comments?: unknown;
 	session_id?: unknown;
 	[key: string]: unknown;
-}
-
-// ── ANSI / control stripping ────────────────────────────────────────────────
-
-/** Strip ANSI escape sequences and C0/C1 control characters, preserving
- *  newlines and tabs so multi-line review text stays readable. Delegates to
- *  the shared terminal-text sanitizer. */
-export function stripAnsi(s: string): string {
-	return stripTerminalControl(s, { keepNewlines: true });
 }
 
 // ── Normalization helpers ────────────────────────────────────────────────────
@@ -324,78 +313,4 @@ export function compactReviewText(result: OcrReviewResult): string {
 
 	const body = result.findings.map((f, i) => `${i + 1}. ${formatFinding(f)}`).join("\n");
 	return `${header}\n\n${body}`;
-}
-
-// ── Preview (ANSI text) compaction ──────────────────────────────────────────
-
-/** Parse a preview line like "[M]  src/lib.ts   +4   -1" into a file entry. */
-function parsePreviewLine(line: string): { status: string; file: string; added?: number; removed?: number } | undefined {
-	// Status token is a bracketed letter at the start of the file row, e.g. [M], [A], [D].
-	const m = line.match(/^\s*\[([MAD])\]\s+(.+?)\s{2,}\+(\d+)\s+-(\d+)\s*$/);
-	if (m) {
-		return { status: m[1], file: m[2].trim(), added: Number(m[3]), removed: Number(m[4]) };
-	}
-	const m2 = line.match(/^\s*\[([MAD])\]\s+(.+?)\s{2,}\+(\d+)\s+-(\d+)\s+\(([^)]+)\)\s*$/);
-	if (m2) {
-		return { status: m2[1], file: m2[2].trim(), added: Number(m2[3]), removed: Number(m2[4]) };
-	}
-	return undefined;
-}
-
-/** Convert ANSI preview text into a compact file list + summary. */
-export function compactPreviewText(raw: string): string {
-	const text = stripAnsi(raw);
-	const lines = text.split(/\r?\n/);
-	const files: { status: string; file: string; added?: number; removed?: number }[] = [];
-	const excluded: { file: string; reason: string }[] = [];
-	let inExcluded = false;
-	let headerLine = "";
-
-	for (const line of lines) {
-		const trimmed = line.trim();
-		if (!trimmed) continue;
-		if (/^Preview:/.test(trimmed)) {
-			headerLine = trimmed;
-			continue;
-		}
-		if (/^Excluded from review/i.test(trimmed)) {
-			inExcluded = true;
-			continue;
-		}
-		if (/^Will review/i.test(trimmed)) {
-			inExcluded = false;
-			continue;
-		}
-		const parsed = parsePreviewLine(trimmed);
-		if (parsed) {
-			if (inExcluded) {
-				const reasonMatch = trimmed.match(/\(([^)]+)\)\s*$/);
-				excluded.push({ file: parsed.file, reason: reasonMatch ? reasonMatch[1] : "excluded" });
-			} else {
-				files.push(parsed);
-			}
-			continue;
-		}
-		// Excluded line variant: "[A]  err.txt  (unsupported_ext)"
-		const exMatch = trimmed.match(/^\s*\[([MAD])\]\s+(.+?)\s+\(([^)]+)\)\s*$/);
-		if (exMatch && inExcluded) {
-			excluded.push({ file: exMatch[2].trim(), reason: exMatch[3] });
-		}
-	}
-
-	const parts: string[] = [];
-	if (headerLine) parts.push(headerLine);
-	if (files.length > 0) {
-		parts.push("files:");
-		for (const f of files) {
-			const add = f.added !== undefined ? `+${f.added}` : "";
-			const rem = f.removed !== undefined ? `-${f.removed}` : "";
-			parts.push(`  [${f.status}] ${f.file} ${add} ${rem}`.replace(/\s+$/g, ""));
-		}
-	}
-	if (excluded.length > 0) {
-		parts.push("excluded:");
-		for (const e of excluded) parts.push(`  ${e.file} (${e.reason})`);
-	}
-	return parts.length > 0 ? parts.join("\n") : "(preview empty)";
 }

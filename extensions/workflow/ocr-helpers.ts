@@ -1,8 +1,8 @@
 /**
  * ocr-helpers.ts — shared OCR CLI execution helpers.
  *
- * Used by both the workflow_code_review tool and the /review command
- * (legacy or refactored). All OCR calls go through these helpers.
+ * Used by the unified workflow_review tool / Review Agent. All OCR calls go
+ * through these helpers. The unified review is workspace-only.
  */
 
 import { execFileSync, execFile } from "node:child_process";
@@ -22,37 +22,19 @@ export function checkOcrAvailable(binary: string): boolean {
 
 // ── Argv construction ───────────────────────────────────────────────────────
 
-export type ReviewScopeKind = "workspace" | "range" | "commit";
-
 /**
- * Build the full argv array for `ocr review`.
+ * Build the full argv array for a workspace `ocr review`.
  * Always includes `--audience agent` and `--format json` so the model-visible
  * result can be parsed and compacted by ocr-result.ts. Adds `--background`
- * when non-empty. Appends scope flags for range/commit; workspace needs no
- * scope flags.
+ * when non-empty. The unified review reviews the current workspace (staged +
+ * unstaged + untracked changes), so no scope flags are appended.
  */
-export function buildReviewArgv(
-  background: string,
-  scope: ReviewScopeKind,
-  from?: string,
-  to?: string,
-  commit?: string,
-  preview?: boolean,
-): string[] {
+export function buildReviewArgv(background: string): string[] {
   const argv = ["review", "--audience", "agent", "--format", "json"];
 
   if (background) {
     argv.push("--background", background);
   }
-
-  if (scope === "range" && from && to) {
-    argv.push("--from", from, "--to", to);
-  } else if (scope === "commit" && commit) {
-    argv.push("--commit", commit);
-  }
-  // workspace: no extra flags
-
-  if (preview) argv.push("--preview");
 
   return argv;
 }
