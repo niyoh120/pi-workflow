@@ -500,10 +500,16 @@ console.log("\n=== Part 7: review-agent pure functions ===");
 	const fmtFn = extractDecl(reviewTs, "export function formatTodosForReview(");
 	const fmtFindingsFn = extractDecl(reviewTs, "export function formatOcrFindings(");
 	const buildBgFn = extractDecl(reviewTs, "export function buildOcrBackground(");
-	const extractGoalFn = extractDecl(reviewTs, "function extractPlanGoal(");
-	const truncateFn = extractDecl(reviewTs, "function truncate(s");
 	const renderOcrFn = extractDecl(reviewTs, "function renderOcrSection(");
 	assert(approvedFn.length > 0 && directFn.length > 0 && fmtFn.length > 0 && fmtFindingsFn.length > 0 && buildBgFn.length > 0 && renderOcrFn.length > 0, "Part 7: task builders + formatTodosForReview + formatOcrFindings + buildOcrBackground + renderOcrSection extracted");
+	// The goal/truncate helpers that fed the old dynamic background are gone.
+	assert(!/function extractPlanGoal/.test(reviewTs), "review-agent.ts: extractPlanGoal helper removed");
+	assert(!/function truncate\(s/.test(reviewTs), "review-agent.ts: truncate helper removed");
+	// Runtime call-site lock: the OCR branch calls the ZERO-ARG builder, so
+	// background construction has no entry for requirements/planMarkdown/todos.
+	assert(/const background = buildOcrBackground\(\);/.test(reviewTs), "review-agent.ts: OCR branch calls buildOcrBackground() with zero arguments");
+	assert(!/buildOcrBackground\(\s*\{/.test(reviewTs), "review-agent.ts: buildOcrBackground never receives an options object");
+	assert(!/buildOcrBackground\([^)]*(requirements|planMarkdown|todos)/.test(reviewTs), "review-agent.ts: background building never receives requirements/planMarkdown/todos");
 
 	const finding = {
 		id: "abc123",
@@ -569,12 +575,38 @@ console.log("\n=== Part 7: review-agent pure functions ===");
 	assert(!directTaskOcr.includes("Approved Todo Snapshot"), "Direct task does NOT include approved todo snapshot");
 	assert(directTaskOcr.includes("Disposition EVERY OCR finding"), "Direct task requires per-finding disposition when OCR enabled");
 
-	// buildOcrBackground determinism.
-	const bgMod = await loadTsModule(extractGoalFn + "\n\n" + truncateFn + "\n\n" + buildBgFn);
-	const bg1 = bgMod.buildOcrBackground({ requirements: ["r1"], planMarkdown: "# Final Plan\n## Goal\nShip X", todos: [{ id: "T1", title: "t", status: "done" }] });
-	const bg2 = bgMod.buildOcrBackground({ requirements: ["r1"], planMarkdown: "# Final Plan\n## Goal\nShip X", todos: [{ id: "T1", title: "t", status: "done" }] });
-	assert(bg1 === bg2, "buildOcrBackground is deterministic for identical inputs");
-	assert(bg1.includes("r1") && bg1.includes("Ship X") && bg1.includes("T1"), "buildOcrBackground embeds requirements, plan goal, and todos");
+	// ── fixed OCR background (pure fixture) ──
+	const bgMod = await loadTsModule(buildBgFn);
+	const bg = bgMod.buildOcrBackground();
+	assert(typeof bg === "string" && bg.length > 0, "buildOcrBackground returns non-empty text");
+	assert(bg.length <= 2000, `buildOcrBackground stays within the 2000-char budget (actual ${bg.length})`);
+	// Code-level review focus.
+	for (const focus of [
+		"runtime correctness and regressions",
+		"error, cancellation, timeout, cleanup, and recovery paths",
+		"API/type contracts and cross-module integration",
+		"security, concurrency, resource leaks, and performance hazards",
+	]) {
+		assert(bg.includes(focus), `background focuses on code-level concern: ${focus}`);
+	}
+	// Evidence scope: current Git diff / live repository, file+line evidence.
+	assert(bg.includes("current Git diff and live repository"), "background scopes evidence to the current Git diff / live repository");
+	assert(/file and line evidence/.test(bg), "background demands file and line evidence");
+	// Responsibility split: requirements/plan/todo coverage belongs to the independent reviewer.
+	assert(bg.includes("The independent reviewer handles requirements, plan, and todo coverage."), "background states requirements/plan/todo coverage belongs to the independent reviewer");
+	// Fixed semantics: no task dynamics enter the background.
+	assert(!/User requirements:|Plan goal:|Todos:/i.test(bg), "background carries no requirements/plan/todo header lines");
+	assert(!/Direct Work|no todos|no explicit requirements/.test(bg), "background carries no placeholder task text");
+
+	// Old-path isolation: the fixed background is path-free. The legacy paths
+	// below are exactly the stale file names that used to leak in via dynamic
+	// requirements/todo text and trigger OCR file_read failures; the zero-arg
+	// builder (locked by the source assertions above) has no entry for them, and
+	// this list-driven assertion pins the fixed text itself against every one.
+	const legacyPaths = ["db.py", "import_export.py", "repository.py", "yaml_import.py"];
+	for (const p of legacyPaths) {
+		assert(!bg.includes(p), `background contains no legacy path: ${p}`);
+	}
 }
 
 // ═══ Part 8: unified review runner wiring (no fingerprint) ═════════════════

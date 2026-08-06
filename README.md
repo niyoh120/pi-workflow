@@ -138,7 +138,7 @@ The reviewer is a **fresh, independent AgentSession** (no subprocess, no RPC): `
 
 The Work agent's reasoning, thinking, tool results, execution summaries, diffs, and test claims are **excluded by construction** — the reviewer re-derives its own view by exploring the repository.
 
-**When OCR is enabled**, the reviewer first runs a workspace `ocr review` (deterministic background derived from the requirements + plan/todos) and receives the normalized findings. It must disposition **every** finding: confirm a real issue or refute a false positive, both backed by repository evidence. Confirmed Critical/Important findings contribute to the unified FAIL.
+**When OCR is enabled**, the reviewer first runs a workspace `ocr review` with a **fixed, bounded code-review `--background`** (a constant constraint card — no requirements/plan/todo text, no file paths) and receives the normalized findings. It must disposition **every** finding: confirm a real issue or refute a false positive, both backed by repository evidence. Confirmed Critical/Important findings contribute to the unified FAIL. The authoritative requirements/plan/todos go only to the independent reviewer, never to OCR.
 
 **Inherited tool surface (best-effort).** At review time the parent's active tools are snapshotted, every workflow-owned tool is removed, and the remainder is reconstructed in the child: built-in tools (`read`/`bash`/`edit`/`write`/`grep`/`find`/`ls`) are rebuilt by `createAgentSession`; active extension/MCP/Web/remote/memory tools are rebuilt from their owning extension source paths via `DefaultResourceLoader({ noExtensions: true, additionalExtensionPaths })`. pi-workflow itself is never loaded into the child (its bash override is treated as builtin, so its path is never collected). Tool reconstruction differences never block review and surface only as `requestedTools`/`activeTools`/`unavailableTools` diagnostics.
 
@@ -153,7 +153,7 @@ The Work agent's reasoning, thinking, tool results, execution summaries, diffs, 
 The unified Review is **on-demand** — when `review.enabled` is `true` (default), `/review` and the `workflow_review` tool become available in Work Mode. `codeReview.enabled` toggles whether the Review includes a workspace OCR pass.
 
 - **Workspace** (the only scope): reviews staged + unstaged + untracked changes; an active workflow worktree is reviewed against its working tree and branch.
-- The Review Agent fills the OCR `--background` from the authoritative requirements + plan/todo summary (deterministic). The `/review` command enters Work runtime and prompts the model to call `workflow_review`, keeping the loop in the agent turn so confirmed Critical/Important findings are fixed and re-reviewed.
+- The Review Agent passes OCR a fixed, bounded code-review `--background` (a constant constraint card under 2000 characters — no requirements/plan/todo text, no file paths); the authoritative requirements/plan/todos go only to the independent reviewer. The `/review` command enters Work runtime and prompts the model to call `workflow_review`, keeping the loop in the agent turn so confirmed Critical/Important findings are fixed and re-reviewed.
 
 The `ocr` binary is assumed to be in PATH (hardcoded). No additional OCR configuration is exposed.
 
@@ -287,7 +287,7 @@ The unified Review runs an **on-demand, user-triggered** independent reviewer ov
 
 - **Independent** — a fresh in-memory AgentSession reviews the implementation through its own repository exploration (read, grep, find, ls, bash, git diff). It never sees the Work agent's execution summary, pre-selected diffs, test claims, or prior review output.
 - **Authoritative inputs only** — Approved Work: user requirements (plan lifecycle) + Final Plan + approved todo snapshot + current todos. Direct Work: Work-lifecycle user requirements + current todos.
-- **Optional workspace OCR** — when `codeReview.enabled` is true, a workspace `ocr review` runs first with a deterministic background derived from the requirements + plan/todo summary; its normalized findings are injected into the reviewer task, and every finding must be dispositioned (confirm with evidence or refute as a false positive). When false, the reviewer covers the implementation directly.
+- **Optional workspace OCR** — when `codeReview.enabled` is true, a workspace `ocr review` runs first with a fixed code-review `--background` (bounded constraint card, path-free — no requirements/plan/todo text); its normalized findings are injected into the reviewer task, and every finding must be dispositioned (confirm with evidence or refute as a false positive). When false, the reviewer covers the implementation directly. Requirements/plan/todo coverage stays with the independent reviewer's authoritative task.
 - **Validates against actual code** — every todo marked done should have concrete file/line evidence; plan coverage gaps and unverifiable completion claims force FAIL.
 - **Read-only** — `.pi/workflow/` reads blocked in BOTH the main checkout and active worktree; project writes confined to the Plan scratch root; git/source mutation forbidden by prompt.
 - **Bounded** — one 30-minute total timeout; uses `models.review`.

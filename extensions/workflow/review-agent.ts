@@ -9,11 +9,15 @@
  *  - Direct Work: Work-lifecycle user requirements + current todos.
  *
  * When OCR is enabled (`codeReview.enabled: true`), a workspace `ocr review`
- * runs first in the validated review cwd; its normalized findings are injected
- * into the reviewer task, and the reviewer must disposition each finding
- * (confirm with repository evidence or explain a false positive). When OCR is
- * disabled, the reviewer covers requirements/plan/todos/implementation/tests
- * and error paths directly.
+ * runs first in the validated review cwd with a FIXED, bounded code-review
+ * constraint card as `--background` (no dynamic requirements/plan/todo text,
+ * no file paths — see `buildOcrBackground()`); its normalized findings are
+ * injected into the reviewer task, and the reviewer must disposition each
+ * finding (confirm with repository evidence or explain a false positive). OCR
+ * is scoped to code-level defects over the current diff; requirements, Final
+ * Plan, and todo coverage stay with the independent reviewer's authoritative
+ * task. When OCR is disabled, the reviewer covers requirements/plan/todos/
+ * implementation/tests and error paths directly.
  *
  * The reviewer explores the actual checkout/worktree itself (read, grep, find,
  * ls, bash, git diff) and does NOT receive the parent Work agent's execution
@@ -126,72 +130,34 @@ export function formatTodosForReview(todos: TodoItem[] | undefined): string {
 // ── OCR background ──────────────────────────────────────────────────────────
 
 /**
- * Build a deterministic OCR `--background` from the authoritative requirements,
- * plan summary, and todo list. OCR reviews the workspace changes; this context
- * helps it focus on the task's intent, scope, and risk areas. Pure function.
+ * Build the FIXED OCR `--background` for the workspace code review.
  *
- * The reviewer continues to verify the implementation itself by exploring the
- * repository, so the background only needs to convey intent — not the diff.
+ * This is a constant, bounded, path-free code-review constraint card: it only
+ * states OCR's responsibility (code-level defect scanning over the current Git
+ * diff / live repository). It intentionally receives NO task dynamics — the
+ * full user messages, Final Plan, todos, file lists, or execution summaries
+ * must not enter `--background`, so historical/stale file paths can never be
+ * fed to OCR's file-reading steps. Requirements/plan/todo coverage belongs to
+ * the independent reviewer's authoritative task, not to OCR.
+ *
+ * Zero-argument and deterministic. Kept under 2000 characters. Pure function.
  */
-export function buildOcrBackground(opts: {
-	requirements: string[];
-	planMarkdown?: string;
-	todos: TodoItem[];
-}): string {
-	const reqs = opts.requirements.length
-		? opts.requirements.map((r) => r.trim()).filter(Boolean).join("\n")
-		: "(no explicit requirements captured)";
-
-	const planGoal = opts.planMarkdown
-		? extractPlanGoal(opts.planMarkdown)
-		: "(Direct Work — no approved plan)";
-
-	const todos = opts.todos.length
-		? opts.todos
-				.map((t) => `- [${t.status}] ${t.id}: ${t.title}`)
-				.join("\n")
-		: "(no todos)";
-
+export function buildOcrBackground(): string {
 	return [
-		"Unified workspace review for the current Work run.",
+		"Review the current Git workspace changes for code-level defects.",
 		"",
-		"User requirements:",
-		reqs,
+		"Focus:",
+		"- runtime correctness and regressions",
+		"- error, cancellation, timeout, cleanup, and recovery paths",
+		"- API/type contracts and cross-module integration",
+		"- security, concurrency, resource leaks, and performance hazards",
 		"",
-		"Plan goal:",
-		planGoal,
+		"Evidence scope:",
+		"Use the current Git diff and live repository as the source of file and symbol scope.",
+		"Report concrete actionable defects with file and line evidence.",
 		"",
-		"Todos:",
-		todos,
-		"",
-		"Focus: correctness, regressions, error/edge-case handling, and integration of the workspace changes against the requirements and plan.",
+		"The independent reviewer handles requirements, plan, and todo coverage.",
 	].join("\n");
-}
-
-/** Extract a compact goal/headline from the Final Plan markdown. Pure helper. */
-function extractPlanGoal(planMarkdown: string): string {
-	const trimmed = planMarkdown.trim();
-	if (!trimmed) return "(empty plan)";
-	// Prefer the first Goal section heading content; fall back to the first
-	// non-empty, non-heading line.
-	const goalIdx = trimmed.search(/^#+\s*Goal\s*$/im);
-	if (goalIdx >= 0) {
-		const after = trimmed.slice(goalIdx).split("\n").slice(1).join("\n");
-		const firstPara = after
-			.split(/\n\s*\n/)
-			.map((p) => p.trim())
-			.filter(Boolean)[0];
-		if (firstPara) return truncate(firstPara);
-	}
-	const firstLine = trimmed
-		.split("\n")
-		.map((l) => l.trim())
-		.filter((l) => l && !/^#/.test(l))[0];
-	return firstLine ? truncate(firstLine) : "(see Final Plan)";
-}
-
-function truncate(s: string, max = 600): string {
-	return s.length > max ? s.slice(0, max) + "…" : s;
 }
 
 // ── OCR context ─────────────────────────────────────────────────────────────
@@ -533,7 +499,7 @@ export async function runReviewAgent(
 					"Then configure LLM with ocr config set llm.url / llm.auth_token / llm.model.",
 			);
 		}
-		const background = buildOcrBackground({ requirements, planMarkdown, todos: currentTodos });
+		const background = buildOcrBackground();
 		const argv = buildReviewArgv(background);
 		const cmdSummary = ocrCommandSummary(OCR_BINARY, argv);
 		opts.onProgress?.("[review] running workspace OCR review");
