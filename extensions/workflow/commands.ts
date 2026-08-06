@@ -1026,17 +1026,17 @@ async function startReviewLoop(
 
 	const promptText = `请执行统一 review 循环。
 
-Review scope: 当前 workspace（含 active worktree 的工作树与分支）。
+Review scope: 当前 workspace（含 active worktree）。
 
 要求：
-1. 调用 \`workflow_review()\`（无参数）。reviewer 是独立 agent，使用 models.review，自行探索实际 checkout/worktree。当 codeReview.enabled 为 true 时，统一 Review 先运行 workspace OCR 并把 normalized findings 注入 reviewer task；为 false 时 reviewer 直接审查实现/测试/错误路径。
-2. 收到 review 结果后，逐条验证 reviewer 与 OCR 的每个 Critical/Important 问题是否真实存在。
-3. 对确认存在的 Critical/Important 问题进行修复，并运行最相关测试验证。
-4. 修复后再次调用 \`workflow_review\`，让 reviewer 基于更新后的代码重新审查；持续 review → fix → re-review，直到没有新的 Critical/Important 问题。
-5. 如果你判断某个 reviewer/OCR 问题是误判、超出范围、投入产出比不合理或与项目约束冲突，在下一轮说明技术理由。
-6. 第一轮 review 已经没有 Critical/Important 问题时，可以结束循环。2-3 轮后仍存在分歧时，停止并交给用户裁决。
+1. 调用 \`workflow_review()\`（无参数），启动独立 reviewer 对当前 workspace 审查。
+2. 收到 review 结果后，逐条验证 reviewer 的每个 Critical/Important 问题是否真实存在。
+3. 对确认存在的问题进行修复，并运行最相关测试验证。
+4. 修复后再次调用 \`workflow_review\` 重新审查；持续 review → fix → re-review，直到没有新的 Critical/Important 问题。
+5. 判断某问题是误判、超出范围、投入产出比不合理或与项目约束冲突时，在下一轮说明技术理由。
+6. 第一轮已经没有 Critical/Important 问题时，可以结束循环。2-3 轮后仍存在分歧时，停止并交给用户裁决。
 7. Minor 问题按价值选择处理，不能阻塞 review 通过。
-8. \`workflow_review\` 的 verdict 是瞬时的，不会写入 workflow 状态，也不门禁 \`/commit\`；review 完成后可随时使用 \`/commit\` 提交。`;
+8. \`/commit\` 始终直接可用，不要求 Review；review 完成后可随时提交。`;
 	ctx.ui.notify("Starting unified review loop: workspace.", "info");
 	pi.setSessionName("review: workspace");
 	pi.sendUserMessage(promptText);

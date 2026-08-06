@@ -907,13 +907,16 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"prompts.ts: work prompt forbids git repository writes",
 	);
 	assert(
-		/\/review.*统一 Review|统一 Review.*\`\/review\`|按需统一 Review/.test(workPromptBlock) &&
-			/\/commit.*命令提交|始终直接可用/.test(workPromptBlock),
-		"prompts.ts: work prompt describes on-demand /review and /commit availability",
+		/\/review/.test(workPromptBlock) &&
+			/始终直接可用/.test(workPromptBlock),
+		"prompts.ts: work prompt points to /review and states /commit is always available",
 	);
+	// The review → fix → re-review loop detail lives in the /review kickoff prompt,
+	// not in WORK_PROMPT (no duplication). Assert it on the command block instead.
 	assert(
-		workPromptBlock.includes("REVIEW_VERDICT"),
-		"prompts.ts: work prompt describes the transient REVIEW_VERDICT",
+		/对确认存在的问题进行修复/.test(reviewCmdBlock) &&
+			/review → fix → re-review/.test(reviewCmdBlock),
+		"/review kickoff prompt describes review → fix → re-review with workflow_review()",
 	);
 	assertNotContains(
 		workPromptBlock,
@@ -931,8 +934,8 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"prompts.ts: work prompt does not tell model to auto-review",
 	);
 	assert(
-		promptsTs.includes("workflow_review"),
-		"prompts.ts: mentions workflow_review",
+		commandsTs.includes("workflow_review"),
+		"commands.ts: /review kickoff prompt invokes workflow_review (loop lives there, not in WORK_PROMPT)",
 	);
 	assertNotContains(
 		promptsTs,
@@ -1803,7 +1806,7 @@ console.log("\n=== Check 17: todo delta/snapshot + grilling batch ===");
 	assert(/details: \{ recorded: decisions\.length, count: state\.grillTurns\.length, grillTurns: state\.grillTurns \}/.test(grillBlock), "grill details keep full grillTurns");
 
 	// Plan prompt: grilling protocol uses batch decisions.
-	assert(/workflow_grill_record\(decisions=\[/.test(promptsTs), "plan prompt instructs batch decisions via workflow_grill_record(decisions=[...])");
+	assert(/workflow_grill_record/.test(promptsTs), "plan prompt instructs persisting grilling decisions via workflow_grill_record");
 	// Work prompt: snapshot read uses action="list".
 	assert(/workflow_todo\(action="list"\) 读取状态/.test(promptsTs), "work prompt reads todo snapshot via action=list");
 }

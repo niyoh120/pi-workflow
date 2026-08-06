@@ -443,7 +443,7 @@ console.log("\n=== Part 6: reviewer wiring & tool contract ===");
 	assert(/parameters:\s*Type\.Object\(\{\s*\}\)/.test(toolsTs), "workflow_plan_review is zero-argument");
 	assert(/prepareArguments:\s*preparePlanReviewArguments/.test(toolsTs), "prepareArguments wired for legacy fields");
 	assert(toolsTs.includes("runPlanReviewAgent("), "tool invokes the independent reviewer");
-	assert(promptsTs.includes("独立的 agent") || promptsTs.includes("独立审查"), "plan prompt describes independent agent review");
+	assert(promptsTs.includes("独立 reviewer"), "plan prompt describes an independent reviewer re-validating the plan");
 	assert(!promptsTs.includes("workflow_plan_review(task="), "plan prompt no longer shows legacy sidecall arguments");
 	assert(!fs.existsSync(path.join(root, "extensions/workflow/sidecall.ts")), "sidecall.ts removed");
 }

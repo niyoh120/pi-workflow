@@ -91,8 +91,8 @@ assert(
 	"WORK_PROMPT states handoff already contains Final Plan",
 );
 assert(
-	/WORK_PROMPT[\s\S]*?handoff marker 与 approval journal 自动恢复计划/.test(prompts),
-	"WORK_PROMPT relies on handoff marker/journal for recovery (no plan_read call path)",
+	/WORK_PROMPT[\s\S]*?recovery warning[\s\S]*?标记为 blocked/.test(prompts),
+	"WORK_PROMPT relies on recovery warning → block todo → /plan (no plan_read call path)",
 );
 assert(
 	/WORK_PROMPT[\s\S]*?workflow_todo\(action="list"\) 读取状态/.test(prompts),

@@ -40,8 +40,7 @@ export const PLAN_PROMPT = `
 - scratch 脚本只允许写绝对路径到 ${tmpdir()}/pi-workflow-plan-scratch/ 下的普通文件，用于 API/SDK 探测或最小示例验证。
 - 禁止修改项目文件、写配置、安装依赖、执行会修改项目的 shell 命令。
 - 禁止 git 写操作、commit / push。
-- 🚫 计划文件只能通过 workflow_plan_save(markdown='完整计划内容') 更写；修订时传入完整修订后的计划文本，不要创建新文件。
-- Plan Mode 专用工作流工具：workflow_todo、workflow_plan_read、workflow_plan_save、workflow_plan_approve、workflow_plan_clear、workflow_grill_record，以及启用时的 workflow_plan_review。
+- 🚫 计划只能通过 workflow_plan_save(markdown) 保存/修订；请勿用 write/edit 直接写计划文件。
 - ask_user_question 处于 active 状态时，可用于结构化澄清和确认。
 
 流程：
@@ -50,19 +49,18 @@ export const PLAN_PROMPT = `
 3. ⭐ Grilling：基于推荐方案遍历关键决策点（边界条件、错误处理、依赖选择、兼容性、测试策略、性能与安全等），逐个拷问。
    - 相关且互不依赖的问题可以通过 ask_user_question 一次提出；每问一题，先给出你的推荐答案。
    - 能通过探索代码库回答的问题（查现有实现、工具 API、约定），直接查代码库，不要问用户。
-   - 同一批用户回答对应的多个决策，通过 workflow_grill_record(decisions=[{question, recommendedAnswer, userAnswer?, decisionStatus, notes?}]) 一次记录多个 decision。落盘是强制义务，未记录的决策不推进下一题。
+   - 同一批用户回答对应的多个决策，通过 workflow_grill_record 一次记录。落盘是强制义务，未记录的决策不推进下一题。
    - 用户可以说"开始写计划"提前结束；需求极简或用户明确拒绝时可跳过本阶段。
 4. 用户明确要求"开始写计划"或确认讨论已充分时，进入最终计划阶段。
-5. 产出最终计划。最终计划必须包含：目标、推荐方案、明确修改点、数量最少且可独立验证的可执行 todo、测试计划、风险和回滚点，以及 Decision Context。Decision Context 承接 Grilling 阶段的关键决策，只记录对实现有影响的内容：目标与硬约束、已确认关键决策、已放弃方案及简短原因、需要实现阶段验证的假设、明确排除的范围。Decision Context 解释背景与边界，不替代 Todo List、不引入新的可执行步骤。
-6. 调用 workflow_plan_save 保存计划，调用 workflow_todo(action="reset") 写入 todo（plan_save 会同时清空 grillTurns），并在回复中展示计划文件路径。
+5. 产出最终计划。最终计划必须包含：目标、推荐方案、明确修改点、数量最少且可独立验证的可执行 todo、测试计划、风险和回滚点，以及 Decision Context（承接 Grilling 阶段的关键决策：目标与硬约束、已确认关键决策、已放弃方案及原因、待验证假设、明确排除范围；它解释背景与边界，不替代 Todo List、不引入新的可执行步骤）。
+6. 调用 workflow_plan_save 保存计划，随后用 workflow_todo(action="reset") 写入完整 todo 列表，并在回复中展示计划文件路径。
 
 ## Plan Review（可选工具）
 
-如果 workflow_plan_review 工具可用，你可以在保存计划后自主决定是否调用它进行独立审查。建议在计划复杂、涉及多个模块/文件、用户明确要求、或你对方案有不确定时调用。
+如果 workflow_plan_review 可用，建议在计划复杂、涉及多个模块/文件、用户明确要求、或你对方案有不确定时调用，让独立 reviewer 重新验证计划。
 
 调用规则：
-- 调用 workflow_plan_review()，无参数。reviewer 是一个独立的 agent，使用独立配置的模型（models.planReview），在隔离的会话中自行探索仓库与可用信息工具（内置 read/grep/find/ls/bash、以及继承自当前 Plan 会话的扩展/MCP/Web 工具）重新验证计划。它只收到权威输入：本轮计划生命周期内的用户需求、已确认决策、以及你保存的 Final Plan；你的推理、思考与工具结果不会被转发。
-- reviewer 有一条总时限（默认 30 分钟），由其自行决定探索路径与工具调用次数。
+- 调用 workflow_plan_review()，无参数。
 - 收到 review 结果后，逐条技术评估 reviewer 提出的每个问题，结合你自己的仓库证据。对合理的问题修订计划并重新 workflow_plan_save；对不成立的问题（误判、超出范围、与技术事实不符）给出技术推理说明。
 - Critical/Important 问题导致方案发生实质修改时重新调用 workflow_plan_review 审查修订版。
 - 明确误判可记录理由后结束；真实分歧无法靠讨论解决时，将分歧摘要呈现给用户裁决。
@@ -72,7 +70,7 @@ export const PLAN_PROMPT = `
 
 7. 用户明确确认"执行 / 可以 / approved / go / 按计划做"或选择"批准执行"后，调用 workflow_plan_approve。
    - 调用 approve 时必须单独调用，不要在同一批次调用任何其他工具。
-   - approve 时可选传入 branchName（语义分支名，如 'feat/readable-name'、'fix/bug-desc'）。工具会自动追加 '@wf-<id>' 后缀。不传时回退为 'wf/<id>'。
+   - approve 时可选传入 branchName（语义分支名，如 'feat/readable-name'）。
    - approve 会结束当前 turn，并在下一 turn 自动进入 Work Mode；调用后不要继续输出、不要尝试实现。
 
 最终计划建议格式：
@@ -103,23 +101,11 @@ export const WORK_PROMPT = `
 - 可以读取、搜索、修改文件、运行测试、查询外部文档。
 - 🚫 禁止执行任何 git 仓库写操作（add / commit / push / checkout / switch / reset / clean / apply / restore / merge / rebase / cherry-pick / revert / stash / pull / fetch / branch -d/-m / tag / rm / mv 等）。
 - 通过 workflow_todo 维护任务进度。
-- Approved-Plan Work（由 workflow_plan_approve 进入）：handoff 已包含 Final Plan 与 Approved Todo Snapshot，直接按计划和 todo 执行。执行优先级为最新用户指令 → Final Plan（含 Decision Context 中的硬约束与已确认决策） → workflow_todo → 其他历史。Final Plan 是执行契约；Decision Context 解释背景与边界，不替代 Todo List、不引入新的可执行步骤。Approved Work 不提供 workflow_plan_read；handoff marker 与 approval journal 自动恢复计划，若上下文出现 recovery warning（handoff/marker 恢复失败），立即将当前 todo 标记为 blocked，停止执行，并请用户执行 /plan 修订计划。
+- Approved-Plan Work（由 workflow_plan_approve 进入）：handoff 已包含 Final Plan 与 Approved Todo Snapshot，直接按计划和 todo 执行。执行优先级为最新用户指令 → Final Plan（含 Decision Context 中的硬约束与已确认决策） → workflow_todo → 其他历史。Approved Work 不提供 workflow_plan_read；若上下文出现 recovery warning（handoff/marker 恢复失败），立即将当前 todo 标记为 blocked，停止执行，并请用户执行 /plan 修订计划。
 - Direct Work（由 /work 进入）：以本次 Work 生命周期内的原始用户请求和 workflow_todo 为权威输入。手动测试后发现需要追加的小任务，继续通过 workflow_todo 新增 todo 留在当前 Work。
-- 开始或恢复 Work 时，近期上下文缺少完整 todo snapshot 则先调用 workflow_todo(action="list") 读取状态；按 workflow_todo 和实际依赖推进，顺序需要调整时先更新 workflow_todo，每次保持一个 in_progress 项。workflow_todo 的修改操作返回增量 delta（本次变更 + next task + 计数），完整 todos 保存在 details 供 overlay 和状态恢复使用。
-- Approved-Plan Work 遇到 Plan 缺失、内容冲突或执行假设失效时，将对应 todo 标记为 blocked，停止该部分修改，报告具体冲突并请用户执行 /plan 修订计划；不要自行切换模式。
+- 开始或恢复 Work 时，近期上下文缺少完整 todo snapshot 则先调用 workflow_todo(action="list") 读取状态；按 workflow_todo 和实际依赖推进，每次保持一个 in_progress 项。
 - 修改后运行能验证改动的检查（项目测试或其他命令）。
-
-## 按需统一 Review（\`/review\`）
-
-用户可在 Work Mode 内随时用 \`/review\` 触发统一 Review。\`review.enabled\` 控制 \`/review\` 与 \`workflow_review\` 工具的可用性；\`codeReview.enabled\` 只控制统一 Review 是否包含 workspace OCR。Review 结果是瞬时的工具输出，不写入 workflow 状态，也不参与 \`/commit\`。
-
-调用规则：
-- \`/review\` 会进入 Work runtime 并发送 review/fix/re-review prompt。调用 \`workflow_review()\`（无参数）。reviewer 是一个独立 agent，使用独立配置的模型（models.review），在隔离会话中自行探索实际 checkout/worktree，核实需求覆盖、每个 todo 的真实完成情况以及计划要求的行为/集成是否落实。
-- reviewer 只收到权威输入：Approved Work 收到 Final Plan + approved todo 快照 + 当前 todo；Direct Work 收到本次 Work 生命周期用户请求 + 当前 todo。你的执行总结、git diff、测试声明和上一轮 reviewer 结论都不会被转发。
-- 当 \`codeReview.enabled\` 为 true 时，统一 Review 先在当前 worktree/checkout 运行 workspace OCR，解析为结构化 findings，再连同权威输入交给 reviewer 逐条核实；为 false 时 reviewer 直接覆盖实现/测试/错误路径审查，task 中会明确记录 OCR disabled。
-- reviewer 输出覆盖矩阵、Implementation Correctness、Verification、OCR Findings Disposition（启用时）、Critical/Important/Minor 和一条机器终行 \`REVIEW_VERDICT: PASS|FAIL\`。PASS 只代表本次按需 review 循环可以结束，不会写入状态，也不门禁 \`/commit\`。
-- FAIL 或格式异常时按反馈修复（Critical/Important 问题必须修复），然后重新调用 \`workflow_review\`，直到 PASS 或分歧交由用户裁决。
-- \`/commit\` 始终直接可用，不要求 Review。
+- 实现完成后，可提示用户用 \`/review\` 触发统一 Review（可选，适合复杂改动）；\`/commit\` 始终直接可用，不要求 Review。
 `;
 
 export const COMMIT_PROMPT = `
