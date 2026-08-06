@@ -9,7 +9,10 @@
  * The unified on-demand Review (/review → workflow_review) launches an
  * independent reviewer over the current workspace and, when codeReview.enabled
  * is true, folds workspace OCR findings into the same review. Review output is
- * transient and never gates /commit.
+ * transient and never gates /commit. Review rounds are persisted per work run
+ * (review-history.ts) so the next round re-dispositions the previous round's
+ * findings instead of re-deriving everything, reuses cached OCR findings when
+ * the workspace diff is unchanged, and short-circuits identical re-reviews.
  * No external extension dependency required.
  *
  * Workflow commands and tools are gated behind /wf by default.

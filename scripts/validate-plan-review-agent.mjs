@@ -501,7 +501,8 @@ console.log("\n=== Part 7: review-agent pure functions ===");
 	const fmtFindingsFn = extractDecl(reviewTs, "export function formatOcrFindings(");
 	const buildBgFn = extractDecl(reviewTs, "export function buildOcrBackground(");
 	const renderOcrFn = extractDecl(reviewTs, "function renderOcrSection(");
-	assert(approvedFn.length > 0 && directFn.length > 0 && fmtFn.length > 0 && fmtFindingsFn.length > 0 && buildBgFn.length > 0 && renderOcrFn.length > 0, "Part 7: task builders + formatTodosForReview + formatOcrFindings + buildOcrBackground + renderOcrSection extracted");
+	const prevRoundFn = extractDecl(reviewTs, "export function formatPreviousReviewRound(");
+	assert(approvedFn.length > 0 && directFn.length > 0 && fmtFn.length > 0 && fmtFindingsFn.length > 0 && buildBgFn.length > 0 && renderOcrFn.length > 0 && prevRoundFn.length > 0, "Part 7: task builders + formatTodosForReview + formatOcrFindings + buildOcrBackground + renderOcrSection + formatPreviousReviewRound extracted");
 	// The goal/truncate helpers that fed the old dynamic background are gone.
 	assert(!/function extractPlanGoal/.test(reviewTs), "review-agent.ts: extractPlanGoal helper removed");
 	assert(!/function truncate\(s/.test(reviewTs), "review-agent.ts: truncate helper removed");
@@ -523,7 +524,7 @@ console.log("\n=== Part 7: review-agent pure functions ===");
 	};
 
 	// Approved task builder fixture — OCR enabled with findings.
-	const approvedMod = await loadTsModule(fmtFn + "\n\n" + fmtFindingsFn + "\n\n" + renderOcrFn + "\n\n" + approvedFn);
+	const approvedMod = await loadTsModule(fmtFn + "\n\n" + fmtFindingsFn + "\n\n" + renderOcrFn + "\n\n" + prevRoundFn + "\n\n" + approvedFn);
 	const approvedTaskOcr = approvedMod.buildApprovedReviewTask({
 		requirements: ["build feature X"],
 		planMarkdown: "# Final Plan\n## Goal\nDo X",
@@ -563,7 +564,7 @@ console.log("\n=== Part 7: review-agent pure functions ===");
 	assert(gapTask.includes("Approved todo snapshot is MISSING"), "Approved task flags missing snapshot gap");
 
 	// Direct task builder fixture — OCR enabled.
-	const directMod = await loadTsModule(fmtFn + "\n\n" + fmtFindingsFn + "\n\n" + renderOcrFn + "\n\n" + directFn);
+	const directMod = await loadTsModule(fmtFn + "\n\n" + fmtFindingsFn + "\n\n" + renderOcrFn + "\n\n" + prevRoundFn + "\n\n" + directFn);
 	const directTaskOcr = directMod.buildDirectReviewTask({
 		requirements: ["fix bug Y"],
 		currentTodos: [{ id: "T1", title: "fix Y", status: "done" }],
@@ -574,6 +575,70 @@ console.log("\n=== Part 7: review-agent pure functions ===");
 	assert(!directTaskOcr.includes("Final Plan"), "Direct task does NOT include a Final Plan");
 	assert(!directTaskOcr.includes("Approved Todo Snapshot"), "Direct task does NOT include approved todo snapshot");
 	assert(directTaskOcr.includes("Disposition EVERY OCR finding"), "Direct task requires per-finding disposition when OCR enabled");
+
+	// ── previous-round context (pure fixture) ──
+	assert(approvedMod.formatPreviousReviewRound(undefined) === "", "previous round section is empty when there is no previous round");
+	const prevSection = approvedMod.formatPreviousReviewRound({
+		round: 1,
+		verdict: "FAIL",
+		reviewerText: "## Critical\n- C1 NPE",
+		changedFiles: ["src/a.ts"],
+		deltaUnknown: false,
+		todosChanged: true,
+		ocrCached: false,
+		ocrFindings: 2,
+	});
+	assert(prevSection.includes("Previous Review Round (round 1)"), "previous round section names the round");
+	assert(prevSection.includes("Verdict: FAIL"), "previous round section carries the previous verdict");
+	assert(prevSection.includes("src/a.ts"), "previous round section lists the changed files");
+	assert(prevSection.includes("Re-disposition EVERY Critical/Important"), "previous round section requires re-disposition of prior findings");
+	assert(prevSection.includes("REVIEW_VERDICT: PASS|FAIL"), "previous round section keeps the verdict-line requirement");
+	const unknownSection = approvedMod.formatPreviousReviewRound({
+		round: 2,
+		verdict: "FAIL",
+		reviewerText: "t",
+		changedFiles: [],
+		deltaUnknown: true,
+		todosChanged: false,
+		ocrCached: false,
+		ocrFindings: 0,
+	});
+	assert(unknownSection.includes("delta could not be computed"), "previous round section flags an unknown delta");
+	// Previous-round context flows into the built tasks (and is absent on round 1).
+	const approvedTaskPrev = approvedMod.buildApprovedReviewTask({
+		requirements: ["r"],
+		planMarkdown: "# Plan",
+		approvedTodos: [{ id: "T1", title: "t", status: "pending" }],
+		currentTodos: [{ id: "T1", title: "t", status: "done" }],
+		ocr: { enabled: false, findings: [], counts: {} },
+		previousRound: {
+			round: 1,
+			verdict: "FAIL",
+			reviewerText: "## Critical\n- C1",
+			changedFiles: ["src/a.ts"],
+			deltaUnknown: false,
+			todosChanged: true,
+			ocrCached: false,
+			ocrFindings: 0,
+		},
+	});
+	assert(approvedTaskPrev.includes("Previous Review Round"), "Approved task embeds the previous round section");
+	const directTaskPrev = directMod.buildDirectReviewTask({
+		requirements: ["r"],
+		currentTodos: [{ id: "T1", title: "t", status: "done" }],
+		ocr: { enabled: false, findings: [], counts: {} },
+		previousRound: {
+			round: 1,
+			verdict: "FAIL",
+			reviewerText: "x",
+			changedFiles: [],
+			deltaUnknown: false,
+			todosChanged: false,
+			ocrCached: false,
+			ocrFindings: 0,
+		},
+	});
+	assert(directTaskPrev.includes("Previous Review Round"), "Direct task embeds the previous round section");
 
 	// ── fixed OCR background (pure fixture) ──
 	const bgMod = await loadTsModule(buildBgFn);
@@ -637,6 +702,226 @@ console.log("\n=== Part 8: unified review runner wiring ===");
 	assert(/ocr CLI not found/.test(reviewTs), "review-agent.ts: missing OCR CLI throws an explicit error");
 	assert(/ocr review failed/.test(reviewTs), "review-agent.ts: OCR exec failure throws an explicit error");
 	assert(/could not be processed/.test(reviewTs), "review-agent.ts: OCR parse failure throws an explicit error (carries rawPath)");
+}
+
+// ═══ Part 8b: review-round history + diff fingerprint helpers ══════════════
+
+console.log("\n=== Part 8b: review-round history helpers ===");
+
+{
+	const histTs = read("extensions/workflow/review-history.ts");
+	const pathsTs = read("extensions/workflow/paths.ts");
+	const toolsTs = read("extensions/workflow/tools.ts");
+	const commandsTs = read("extensions/workflow/commands.ts");
+
+	// Source-level wiring: the review loop persists rounds and reuses them.
+	assert(histTs.includes("export function loadReviewHistory"), "review-history.ts exports loadReviewHistory");
+	assert(histTs.includes("export function saveReviewRound"), "review-history.ts exports saveReviewRound");
+	assert(histTs.includes("export function computeWorkspaceDiffSnapshot"), "review-history.ts exports computeWorkspaceDiffSnapshot");
+	assert(histTs.includes("export function computeTodoHash"), "review-history.ts exports computeTodoHash");
+	assert(histTs.includes("export function filesChangedSince"), "review-history.ts exports filesChangedSince");
+	assert(histTs.includes("export function boundedHeadTail"), "review-history.ts exports boundedHeadTail");
+	assert(histTs.includes("export function computeTaskInputHash"), "review-history.ts exports computeTaskInputHash");
+	assert(pathsTs.includes("export function reviewHistoryPath"), "paths.ts exports reviewHistoryPath");
+	assert(toolsTs.includes("saveReviewRound("), "workflow_review persists each review round");
+	assert(toolsTs.includes("computeWorkspaceDiffSnapshot("), "workflow_review computes the workspace diff snapshot");
+	assert(toolsTs.includes("loadReviewHistory("), "workflow_review loads prior round history");
+	assert(toolsTs.includes("shortCircuited"), "workflow_review short-circuits identical rounds");
+	assert(toolsTs.includes("cachedOcr"), "workflow_review reuses cached OCR findings on unchanged diffs");
+	assert(commandsTs.includes("reviewHistoryPath"), "wf-reset removes the review history file");
+	// The review-loop fingerprint is a NEW module — the old worktree helpers
+	// stay gone (Part 8) and nothing gates /commit (Part 9).
+	assert(!histTs.includes("computeWorkspaceFingerprint"), "review-history.ts does not resurrect the old fingerprint name");
+
+	// ── pure fixtures (Node 24 type-stripping, same approach as Part 7) ──
+	const todoHashFn = extractDecl(histTs, "export function computeTodoHash(");
+	const changedFn = extractDecl(histTs, "export function filesChangedSince(");
+	const headTailFn = extractDecl(histTs, "export function boundedHeadTail(");
+	const taskInputFn = extractDecl(histTs, "export function computeTaskInputHash(");
+	assert(todoHashFn.length > 0 && changedFn.length > 0 && headTailFn.length > 0 && taskInputFn.length > 0, "Part 8b: pure helpers extracted");
+
+	const histMod = await loadTsModule(
+		[
+			'import crypto from "node:crypto";',
+			todoHashFn,
+			changedFn,
+			headTailFn,
+			taskInputFn,
+		].join("\n\n"),
+	);
+
+	const todosA = [
+		{ id: "T1", title: "impl", status: "done" },
+		{ id: "T2", title: "fix", status: "pending", notes: "n" },
+	];
+	const todosB = [
+		{ id: "T1", title: "impl", status: "done" },
+		{ id: "T2", title: "fix", status: "done", notes: "n" },
+	];
+	assert(histMod.computeTodoHash(todosA) === histMod.computeTodoHash([...todosA]), "todo hash is stable for equal lists");
+	assert(histMod.computeTodoHash(todosA) !== histMod.computeTodoHash(todosB), "todo hash changes when a status changes");
+	assert(histMod.computeTodoHash(undefined) === histMod.computeTodoHash([]), "undefined/empty todos hash to the same value");
+
+	const prevSnap = { fingerprint: "p", fileHashes: { "a.ts": "1", "b.ts": "1" }, untrackedHashes: { "new.ts": "1" }, unknown: false };
+	const currSnap = { fingerprint: "c", fileHashes: { "a.ts": "1", "b.ts": "2" }, untrackedHashes: { "new.ts": "1", "extra.ts": "2" }, unknown: false };
+	const changed = histMod.filesChangedSince(prevSnap, currSnap);
+	assert(changed.includes("b.ts") && changed.includes("extra.ts"), "filesChangedSince finds modified + newly untracked files");
+	assert(!changed.includes("a.ts") && !changed.includes("new.ts"), "filesChangedSince omits unchanged files");
+	assert(changed.join("|") === [...changed].sort().join("|"), "filesChangedSince returns sorted names");
+
+	const longText = "HEAD-" + "x".repeat(1000) + "-TAIL";
+	const bounded = histMod.boundedHeadTail(longText, 200);
+	assert(bounded.length <= 200, "boundedHeadTail respects the budget");
+	assert(bounded.startsWith("HEAD-") && bounded.endsWith("-TAIL"), "boundedHeadTail keeps head and tail");
+	assert(histMod.boundedHeadTail("short", 200) === "short", "boundedHeadTail passes through short text unchanged");
+
+	const taskA = histMod.computeTaskInputHash({ requirements: ["r"], todos: todosA, includeOcr: true, reviewModel: "p/m", planMarkdown: "# P" });
+	const taskB = histMod.computeTaskInputHash({ requirements: ["r"], todos: todosA, includeOcr: true, reviewModel: "p/m", planMarkdown: "# P" });
+	const taskC = histMod.computeTaskInputHash({ requirements: ["r2"], todos: todosA, includeOcr: true, reviewModel: "p/m", planMarkdown: "# P" });
+	assert(taskA === taskB, "task input hash is stable for equal inputs");
+	assert(taskA !== taskC, "task input hash changes when a requirement changes");
+
+	// ── real-git integration fixture (temp repo) ──
+	const { execFileSync } = await import("node:child_process");
+	const git = (args, cwd) =>
+		execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).toString();
+	const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "wf-review-git-"));
+	try {
+		git(["init", "-q"], tmpRepo);
+		git(["config", "user.email", "t@t"], tmpRepo);
+		git(["config", "user.name", "t"], tmpRepo);
+		fs.writeFileSync(path.join(tmpRepo, "a.ts"), "export const a = 1;\n");
+		git(["add", "."], tmpRepo);
+		git(["commit", "-qm", "base"], tmpRepo);
+
+		const snapMod = await loadTsModule(
+			[
+				'import crypto from "node:crypto";',
+				'import { execFileSync } from "node:child_process";',
+				'import path from "node:path";',
+				'import fs from "node:fs";',
+				"export const MAX_UNTRACKED_FILES = 200;",
+				"export const MAX_UNTRACKED_BYTES = 8 * 1024 * 1024;",
+				extractDecl(histTs, "function sha1("),
+				extractDecl(histTs, "class GitOutputTooLargeError extends Error {"),
+				extractDecl(histTs, "function isEnoBufsError("),
+				extractDecl(histTs, "function runGit(").replace("function runGit(", "export function runGit("),
+				extractDecl(histTs, "function splitDiffSections("),
+				extractDecl(histTs, "export function unquoteGitPath("),
+				extractDecl(histTs, "function diffSectionFileName("),
+				extractDecl(histTs, "function readFileBounded("),
+				extractDecl(histTs, "export function computeWorkspaceDiffSnapshot("),
+				extractDecl(histTs, "export function filesChangedSince("),
+			].join("\n\n"),
+		);
+		const emptySnap = snapMod.computeWorkspaceDiffSnapshot(tmpRepo);
+		assert(emptySnap.fileHashes && Object.keys(emptySnap.fileHashes).length === 0 && emptySnap.unknown === false, "diff snapshot of a clean repo is empty and known");
+
+		const nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), "wf-review-nongit-"));
+		try {
+			const nonGitSnap = snapMod.computeWorkspaceDiffSnapshot(nonGitDir);
+			assert(nonGitSnap.unknown === true, "non-git directory snapshots are marked unknown (no cache/short-circuit)");
+		} finally {
+			fs.rmSync(nonGitDir, { recursive: true, force: true });
+		}
+
+		fs.writeFileSync(path.join(tmpRepo, "a.ts"), "export const a = 2;\n");
+		fs.writeFileSync(path.join(tmpRepo, "new.ts"), "export const n = 1;\n");
+		const dirtySnap = snapMod.computeWorkspaceDiffSnapshot(tmpRepo);
+		assert(dirtySnap.fingerprint !== emptySnap.fingerprint, "diff snapshot changes when files change");
+		assert(dirtySnap.fileHashes["a.ts"], "modified tracked file appears in per-file hashes");
+		assert(dirtySnap.untrackedHashes["new.ts"], "untracked file appears in per-file hashes");
+		assert(snapMod.filesChangedSince(emptySnap, dirtySnap).includes("a.ts"), "delta includes the modified file");
+		// No-content re-add must not perturb the fingerprint (determinism).
+		git(["add", "a.ts"], tmpRepo);
+		const stagedSnap = snapMod.computeWorkspaceDiffSnapshot(tmpRepo);
+		assert(stagedSnap.fingerprint === dirtySnap.fingerprint, "staging the same content keeps the diff fingerprint stable");
+		// runGit surfaces ENOBUFS (output beyond maxBuffer) as an error instead of
+		// silently returning "" — the snapshot then marks unknown (no stale cache).
+		let runGitEnobufs = false;
+		try {
+			snapMod.runGit(["diff", "HEAD", "--no-color"], tmpRepo, 64);
+		} catch (err) {
+			runGitEnobufs = err instanceof Error && /exceeded maxBuffer/.test(err.message);
+		}
+		assert(runGitEnobufs, "runGit ENOBUFS throws instead of returning empty");
+		// Unborn-HEAD repo: staged new files still register via the name set.
+		const unbornRepo = fs.mkdtempSync(path.join(os.tmpdir(), "wf-review-unborn-"));
+		try {
+			git(["init", "-q"], unbornRepo);
+			git(["config", "user.email", "t@t"], unbornRepo);
+			git(["config", "user.name", "t"], unbornRepo);
+			fs.writeFileSync(path.join(unbornRepo, "x.ts"), "export const x = 1;\n");
+			git(["add", "."], unbornRepo);
+			const unbornSnap = snapMod.computeWorkspaceDiffSnapshot(unbornRepo);
+			assert(unbornSnap.unknown === false, "unborn-HEAD repo snapshot is known");
+			assert(Object.keys(unbornSnap.fileHashes).length > 0 || Object.keys(unbornSnap.untrackedHashes).length > 0, "unborn-HEAD repo still registers new files");
+		} finally {
+			fs.rmSync(unbornRepo, { recursive: true, force: true });
+		}
+	} finally {
+		fs.rmSync(tmpRepo, { recursive: true, force: true });
+	}
+
+	// ── history round-trip fixture (fs-based) ──
+	const histPaths = read("extensions/workflow/paths.ts");
+	const historyMod = await loadTsModule(
+		[
+			'import path from "node:path";',
+			'import fs from "node:fs";',
+			"export const MAX_REVIEW_ROUNDS = 3;",
+			extractDecl(histPaths, "export function workflowDir("),
+			extractDecl(histPaths, "export function sessionDir("),
+			extractDecl(histPaths, "export function reviewHistoryPath("),
+			extractDecl(histTs, "function isReviewRoundRecord("),
+			extractDecl(histTs, "export function loadReviewHistory("),
+			extractDecl(histTs, "export function saveReviewRound("),
+		].join("\n\n"),
+	);
+	const histCwd = fs.mkdtempSync(path.join(os.tmpdir(), "wf-review-hist-"));
+	try {
+		const roundRec = (n, workRunId = "wr1") => ({
+			workRunId,
+			round: n,
+			at: "2026-01-01T00:00:00.000Z",
+			verdict: "FAIL",
+			model: "p/m",
+			elapsedMs: 1000,
+			turns: 2,
+			toolCalls: 3,
+			madeRepoToolCall: true,
+			reviewerText: `round ${n} text`,
+			ocrEnabled: true,
+			ocrCount: 0,
+			ocrCounts: {},
+			ocrFindings: [],
+			diffFingerprint: `fp${n}`,
+			deltaUnknown: false,
+			fileHashes: {},
+			untrackedHashes: {},
+			todoHash: "th",
+			taskInputHash: `ti${n}`,
+			shortCircuited: false,
+		});
+		assert(historyMod.loadReviewHistory(histCwd, "s1") === undefined, "no history file loads as undefined");
+		for (let n = 1; n <= 4; n++) historyMod.saveReviewRound(histCwd, "s1", roundRec(n));
+		const histLoaded = historyMod.loadReviewHistory(histCwd, "s1");
+		assert(histLoaded.rounds.length === 3, "history is capped at MAX_REVIEW_ROUNDS");
+		assert(histLoaded.rounds.map((r) => r.round).join(",") === "2,3,4", "oldest rounds are dropped, newest kept");
+		historyMod.saveReviewRound(histCwd, "s1", roundRec(5));
+		assert(historyMod.loadReviewHistory(histCwd, "s1").rounds.at(-1).round === 5, "same work run appends rounds");
+		historyMod.saveReviewRound(histCwd, "s1", roundRec(1, "wr2"));
+		const histSwitched = historyMod.loadReviewHistory(histCwd, "s1");
+		assert(histSwitched.workRunId === "wr2" && histSwitched.rounds.length === 1, "a new work run replaces the history");
+		fs.writeFileSync(
+			path.join(histCwd, ".pi", "workflow", "sessions", "s1", "review-history.json"),
+			"{not json",
+			"utf8",
+		);
+		assert(historyMod.loadReviewHistory(histCwd, "s1") === undefined, "corrupt history loads as undefined");
+	} finally {
+		fs.rmSync(histCwd, { recursive: true, force: true });
+	}
 }
 
 // ═══ Part 9: no commit gate + no agent_end PASS + approve snapshot ═════════

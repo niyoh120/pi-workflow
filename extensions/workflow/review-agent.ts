@@ -174,6 +174,8 @@ export interface OcrContext {
 	rawPath?: string;
 	/** Reason OCR was skipped/disabled (used when enabled is false). */
 	skippedReason?: string;
+	/** Round number the findings were reused from (workspace diff unchanged). */
+	cachedFromRound?: number;
 }
 
 // ── OCR finding formatting ──────────────────────────────────────────────────
@@ -201,6 +203,74 @@ export function formatOcrFindings(findings: OcrFinding[]): string {
 		.join("\n");
 }
 
+// ── Previous-round context ─────────────────────────────────────────────────
+
+/**
+ * Context from the previous review round, injected into the new reviewer's
+ * task so it can re-disposition prior findings and reuse prior evidence
+ * instead of re-deriving the whole review from scratch. Assembled by the
+ * workflow_review tool from the persisted review history. Pure data.
+ */
+export interface PreviousReviewRoundInput {
+	/** Previous round number (1-based). */
+	round: number;
+	/** Previous round's verdict. */
+	verdict: string;
+	/** Previous reviewer's full output (already bounded head+tail). */
+	reviewerText: string;
+	/** Files whose tracked diff or untracked content changed since that round. */
+	changedFiles: string[];
+	/** True when the delta could not be computed (review everything). */
+	deltaUnknown: boolean;
+	/** True when todos changed since that round. */
+	todosChanged: boolean;
+	/** True when this round's OCR findings were reused from the previous round
+	 *  (workspace diff unchanged). */
+	ocrCached: boolean;
+	/** Number of OCR findings in the previous round. */
+	ocrFindings: number;
+}
+
+/**
+ * Render the Previous Review Round section for the reviewer task. Returns ""
+ * when there is no previous round (first round of a work run) so task
+ * builders can omit it entirely. Pure function.
+ */
+export function formatPreviousReviewRound(
+	prev: PreviousReviewRoundInput | undefined,
+): string {
+	if (!prev) return "";
+	const delta = prev.deltaUnknown
+		? "(unknown — delta could not be computed; re-verify changed scope normally)"
+		: prev.changedFiles.length > 0
+			? prev.changedFiles.join(", ")
+			: "(none — the workspace diff is unchanged since that round)";
+	const ocrNote = prev.ocrCached
+		? ` — OCR findings reused from round ${prev.round} (workspace diff unchanged)`
+		: prev.ocrFindings > 0
+			? ` — OCR: ${prev.ocrFindings} finding(s)`
+			: "";
+	return [
+		`# Previous Review Round (round ${prev.round})`,
+		"",
+		`The previous independent review round reached **Verdict: ${prev.verdict}**${ocrNote}.`,
+		`Files changed since that round: ${delta}`,
+		`Todos changed since that round: ${prev.todosChanged ? "yes" : "no"}`,
+		"",
+		"Previous round output:",
+		"",
+		"```",
+		prev.reviewerText,
+		"```",
+		"",
+		"## Instructions for this round",
+		"1. Re-disposition EVERY Critical/Important finding from the previous round: mark it confirmed-still-present (cite current evidence), fixed (cite the current delta that resolves it), or a previously-misjudged false positive (cite evidence).",
+		"2. Treat the previous round's confirmed evidence for unchanged code as still valid — do NOT re-derive the full coverage matrix or re-verify unchanged files from scratch. Re-verify only the files in the delta above and todos whose status/notes changed.",
+		"3. Report genuinely new findings as normal findings.",
+		"4. End with exactly ONE REVIEW_VERDICT: PASS|FAIL line as usual.",
+	].join("\n");
+}
+
 // ── Task builders ───────────────────────────────────────────────────────────
 
 /**
@@ -215,6 +285,7 @@ export function buildApprovedReviewTask(opts: {
 	approvedTodos: TodoItem[] | undefined;
 	currentTodos: TodoItem[];
 	ocr: OcrContext;
+	previousRound?: PreviousReviewRoundInput;
 }): string {
 	const requirements = opts.requirements.length
 		? opts.requirements.map((r) => r.trim()).join("\n\n---\n\n")
@@ -224,6 +295,7 @@ export function buildApprovedReviewTask(opts: {
 			? "\n\n⚠️ Approved todo snapshot is MISSING (older session). Compare the Final Plan against the current todos directly and flag this as a Minor coverage gap."
 			: "";
 	const ocrSection = renderOcrSection(opts.ocr);
+	const previousRoundSection = formatPreviousReviewRound(opts.previousRound);
 	return [
 		"# 1. Authoritative User Requirements",
 		"",
@@ -243,6 +315,7 @@ export function buildApprovedReviewTask(opts: {
 		"",
 		ocrSection,
 		"",
+		...(previousRoundSection ? [previousRoundSection, ""] : []),
 		"# Review Assignment",
 		"",
 		`Verify the Work agent's implementation of the Final Plan above against the Authoritative User Requirements, the Approved Todo Snapshot, and the Current Todo List.${snapshotGap}`,
@@ -260,11 +333,13 @@ export function buildDirectReviewTask(opts: {
 	requirements: string[];
 	currentTodos: TodoItem[];
 	ocr: OcrContext;
+	previousRound?: PreviousReviewRoundInput;
 }): string {
 	const requirements = opts.requirements.length
 		? opts.requirements.map((r) => r.trim()).join("\n\n---\n\n")
 		: "(none captured — Direct Work had no scorable user requirements; verify the current todos are genuinely complete and flag the gap if material)";
 	const ocrSection = renderOcrSection(opts.ocr);
+	const previousRoundSection = formatPreviousReviewRound(opts.previousRound);
 	return [
 		"# 1. Authoritative User Requirements (this Work lifecycle)",
 		"",
@@ -276,6 +351,7 @@ export function buildDirectReviewTask(opts: {
 		"",
 		ocrSection,
 		"",
+		...(previousRoundSection ? [previousRoundSection, ""] : []),
 		"# Review Assignment",
 		"",
 		"This is a Direct Work run (no approved plan). Verify the Work agent's implementation of the Current Todo List against the Authoritative User Requirements.",
@@ -304,10 +380,14 @@ function renderOcrSection(ocr: OcrContext): string {
 					? ` — by severity: ${Object.entries(ocr.counts).map(([k, n]) => `${k}=${n}`).join(", ")}`
 					: "")
 			: "no findings";
+	const sourceNote =
+		ocr.cachedFromRound !== undefined
+			? ` OCR findings reused from round ${ocr.cachedFromRound} (workspace diff unchanged).`
+			: "";
 	return [
 		"# OCR Workspace Findings",
 		"",
-		`OCR reviewed the workspace changes (raw JSON: ${ocr.rawPath ?? "(unavailable)"}). ${summary}.`,
+		`OCR reviewed the workspace changes (raw JSON: ${ocr.rawPath ?? "(unavailable)"}). ${summary}.${sourceNote}`,
 		"",
 		formatOcrFindings(ocr.findings),
 		...(ocr.findings.length === 0
@@ -346,6 +426,7 @@ Do NOT trust the Work agent's completion claims or summaries. Verify against evi
 - Verification: were the plan's acceptance checks actually run? Cite the command and its observed output.
 - Error/recovery paths: are plan-specified error handling and recovery branches present?
 - OCR findings: for each finding, confirm or refute it with repository evidence. Confirmed Critical/Important findings contribute to FAIL.
+- Prior-round continuity (when a Previous Review Round section is present): reuse the previous round's confirmed evidence for unchanged code, re-disposition each prior Critical/Important finding (still present / fixed / false positive — with current evidence), and concentrate fresh verification on the listed changed files and changed todos. Do not re-derive the full coverage matrix from scratch.
 
 ## Constraints (HARD — do not violate)
 - You are READ-ONLY for project files. Do NOT modify project files, config, memory, skills, or settings.
@@ -388,6 +469,7 @@ REVIEW_VERDICT: PASS
 
 ## Rules
 - Ground every finding in concrete repository evidence: cite file paths, line ranges, API signatures, config, or command output you actually inspected.
+- When a Previous Review Round section is present, you may reference that round's confirmed evidence instead of re-deriving it, but any conclusion you rely on must still hold against the repository as it stands now.
 - Do not fabricate findings to seem thorough. Only flag genuine concerns.
 - If you could not verify something, state it explicitly as an unverified assumption.
 - PASS requires that every todo marked done has real implementation evidence AND no Critical findings AND no plan-coverage gaps AND no unconfirmed Critical/Important OCR findings. Any gap or unverifiable done claim → FAIL.
@@ -409,6 +491,9 @@ export interface ReviewResult extends PlanReviewAgentResult {
 		counts: Record<string, number>;
 		rawPath?: string;
 	};
+	/** Normalized OCR findings of this round (empty when disabled). Persisted
+	 *  to the review history so unchanged-diff rounds can reuse them. */
+	ocrFindingsList: OcrFinding[];
 }
 
 // ── Runner ──────────────────────────────────────────────────────────────────
@@ -444,6 +529,17 @@ export interface RunReviewAgentOptions {
 	primaryCwd: string;
 	/** Whether to run workspace OCR and feed findings into the reviewer task. */
 	includeOcr: boolean;
+	/** Previous review round context (findings/evidence/delta) carried into this
+	 *  round so the reviewer re-dispositions instead of re-deriving. */
+	previousRound?: PreviousReviewRoundInput;
+	/** Cached normalized OCR findings to reuse instead of re-running `ocr review`
+	 *  (the workspace diff fingerprint is unchanged since the cached round). */
+	cachedOcr?: {
+		findings: OcrFinding[];
+		counts: Record<string, number>;
+		rawPath?: string;
+		fromRound: number;
+	};
 	/** Parent tool AbortSignal (user cancellation / turn abort). */
 	parentSignal?: AbortSignal;
 	/** Streaming progress callback. */
@@ -492,55 +588,67 @@ export async function runReviewAgent(
 	// ── Optional OCR workspace review ──
 	let ocrContext: OcrContext;
 	if (includeOcr) {
-		if (!checkOcrAvailable(OCR_BINARY)) {
-			throw new Error(
-				"ocr CLI not found. " +
-					"Install alibaba/open-code-review: npm i -g @alibaba-group/open-code-review\n" +
-					"Then configure LLM with ocr config set llm.url / llm.auth_token / llm.model.",
-			);
+		if (opts.cachedOcr) {
+			// Workspace diff fingerprint is unchanged since the cached round — the
+			// findings are identical, so skip the expensive `ocr review` run.
+			ocrContext = {
+				enabled: true,
+				findings: opts.cachedOcr.findings,
+				counts: opts.cachedOcr.counts,
+				rawPath: opts.cachedOcr.rawPath,
+				cachedFromRound: opts.cachedOcr.fromRound,
+			};
+		} else {
+			if (!checkOcrAvailable(OCR_BINARY)) {
+				throw new Error(
+					"ocr CLI not found. " +
+						"Install alibaba/open-code-review: npm i -g @alibaba-group/open-code-review\n" +
+						"Then configure LLM with ocr config set llm.url / llm.auth_token / llm.model.",
+				);
+			}
+			const background = buildOcrBackground();
+			const argv = buildReviewArgv(background);
+			const cmdSummary = ocrCommandSummary(OCR_BINARY, argv);
+			opts.onProgress?.("[review] running workspace OCR review");
+			let rawOutput: string;
+			try {
+				rawOutput = await runOcrReview(OCR_BINARY, reviewCwd, argv, OCR_TIMEOUT_MS, opts.parentSignal);
+			} catch (err) {
+				// AbortError from cancelled signal — rethrow so the platform handles cancellation.
+				if (err instanceof Error && err.name === "AbortError") throw err;
+				const errMsg = err instanceof Error ? err.message : String(err);
+				const stderr =
+					typeof err === "object" && err !== null && "stderr" in err
+						? (err as { stderr?: unknown }).stderr
+						: "";
+				throw new Error(
+					`ocr review failed.\n\n` +
+						`Command: ${cmdSummary}\n` +
+						`Error: ${errMsg}\n` +
+						`stderr: ${String(stderr).slice(0, 2000)}\n\n` +
+						`Check ocr config and LLM connectivity: ocr llm test`,
+				);
+			}
+			let result;
+			try {
+				result = parseOcrReviewJson(rawOutput);
+			} catch (parseErr) {
+				const rawPath = parseErr instanceof OcrParseError ? parseErr.rawPath : "";
+				const errMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+				throw new Error(
+					`Code review output could not be processed.` +
+						(rawPath ? `\nRaw output saved to: ${rawPath}` : "") +
+						`\nError: ${errMsg}` +
+						`\n\nCommand: ${cmdSummary}`,
+				);
+			}
+			ocrContext = {
+				enabled: true,
+				findings: result.findings,
+				counts: result.counts,
+				rawPath: result.rawPath,
+			};
 		}
-		const background = buildOcrBackground();
-		const argv = buildReviewArgv(background);
-		const cmdSummary = ocrCommandSummary(OCR_BINARY, argv);
-		opts.onProgress?.("[review] running workspace OCR review");
-		let rawOutput: string;
-		try {
-			rawOutput = await runOcrReview(OCR_BINARY, reviewCwd, argv, OCR_TIMEOUT_MS, opts.parentSignal);
-		} catch (err) {
-			// AbortError from cancelled signal — rethrow so the platform handles cancellation.
-			if (err instanceof Error && err.name === "AbortError") throw err;
-			const errMsg = err instanceof Error ? err.message : String(err);
-			const stderr =
-				typeof err === "object" && err !== null && "stderr" in err
-					? (err as { stderr?: unknown }).stderr
-					: "";
-			throw new Error(
-				`ocr review failed.\n\n` +
-					`Command: ${cmdSummary}\n` +
-					`Error: ${errMsg}\n` +
-					`stderr: ${String(stderr).slice(0, 2000)}\n\n` +
-					`Check ocr config and LLM connectivity: ocr llm test`,
-			);
-		}
-		let result;
-		try {
-			result = parseOcrReviewJson(rawOutput);
-		} catch (parseErr) {
-			const rawPath = parseErr instanceof OcrParseError ? parseErr.rawPath : "";
-			const errMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
-			throw new Error(
-				`Code review output could not be processed.` +
-					(rawPath ? `\nRaw output saved to: ${rawPath}` : "") +
-					`\nError: ${errMsg}` +
-					`\n\nCommand: ${cmdSummary}`,
-			);
-		}
-		ocrContext = {
-			enabled: true,
-			findings: result.findings,
-			counts: result.counts,
-			rawPath: result.rawPath,
-		};
 	} else {
 		ocrContext = {
 			enabled: false,
@@ -559,12 +667,14 @@ export async function runReviewAgent(
 			approvedTodos,
 			currentTodos,
 			ocr: ocrContext,
+			previousRound: opts.previousRound,
 		});
 	} else {
 		task = buildDirectReviewTask({
 			requirements,
 			currentTodos,
 			ocr: ocrContext,
+			previousRound: opts.previousRound,
 		});
 	}
 
@@ -602,5 +712,6 @@ export async function runReviewAgent(
 			counts: ocrContext.counts,
 			rawPath: ocrContext.rawPath,
 		},
+		ocrFindingsList: ocrContext.findings,
 	};
 }

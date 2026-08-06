@@ -34,10 +34,23 @@ import {
 import type { TodoStatus, WorkflowState } from "./types.js";
 import {
 	runPlanReviewAgent,
+	extractUserRequirements,
 } from "./plan-review-agent.js";
 import {
 	runReviewAgent,
+	type PreviousReviewRoundInput,
+	type ReviewResult,
 } from "./review-agent.js";
+import {
+	PREVIOUS_ROUND_TEXT_BUDGET,
+	boundedHeadTail,
+	computeTaskInputHash,
+	computeTodoHash,
+	computeWorkspaceDiffSnapshot,
+	filesChangedSince,
+	loadReviewHistory,
+	saveReviewRound,
+} from "./review-history.js";
 import { transitionWorkflowMode } from "./mode.js";
 import {
 	WORK_APPROVAL_CUSTOM_TYPE,
@@ -1040,47 +1053,188 @@ export function registerReviewTool(
 			// OCR findings into the reviewer task. It does not gate the tool itself.
 			const includeOcr = config.codeReview.enabled;
 
-			let result;
-			try {
-				result = await runReviewAgent({
-					ctx,
-					pi,
-					modelSpec: config.models.review,
-					branch: ctx.sessionManager?.getBranch?.(),
-					planStartEntryId: state.planStartEntryId,
-					workStartEntryId: state.workStartEntryId,
-					planMarkdown,
-					approvedTodos: state.approvedTodos,
-					currentTodos: state.todos,
-					reviewCwd,
-					primaryCwd,
-					includeOcr,
-					parentSignal: signal,
-					onProgress: (text) => {
-						onUpdate?.({
-							content: [{ type: "text", text }],
-							details: {},
-						});
+			// ── Review round continuity ──
+			// The reviewer is a FRESH agent every round and cannot see the previous
+			// round's findings, so it re-derives the whole review from scratch each
+			// time. Persist each round (verdict + output + OCR findings + diff
+			// fingerprint + task-input hash) so the next round can re-disposition
+			// prior findings instead of re-deriving, reuse cached OCR findings when
+			// the diff is unchanged, and short-circuit a review whose inputs + diff
+			// are identical to the last round. The verdict stays transient: this
+			// lives in a session-scoped file, never in WorkflowState.
+			const branch = ctx.sessionManager?.getBranch?.();
+			const requirements = isApprovedWork
+				? extractUserRequirements(branch, state.planStartEntryId)
+				: extractUserRequirements(branch, state.workStartEntryId);
+			const diffSnapshot = computeWorkspaceDiffSnapshot(reviewCwd);
+			const todoHash = computeTodoHash(state.todos);
+			const reviewModel = `${config.models.review.provider}/${config.models.review.model}`;
+			const taskInputHash = computeTaskInputHash({
+				requirements,
+				planMarkdown,
+				approvedTodos: state.approvedTodos,
+				todos: state.todos,
+				includeOcr,
+				reviewModel,
+			});
+			const history = loadReviewHistory(ctx.cwd, sessionKey);
+			const lastRound =
+				history && history.workRunId === state.workRunId
+					? history.rounds[history.rounds.length - 1]
+					: undefined;
+			const nextRound = (lastRound?.round ?? 0) + 1;
+
+			const diffUnchanged =
+				lastRound !== undefined &&
+				!lastRound.deltaUnknown &&
+				!diffSnapshot.unknown &&
+				lastRound.diffFingerprint === diffSnapshot.fingerprint;
+
+			let result: ReviewResult;
+			let shortCircuited = false;
+			let ocrCachedRound: number | undefined;
+			if (diffUnchanged && lastRound.taskInputHash === taskInputHash) {
+				// Same diff + same authoritative inputs as the last round — the
+				// reviewer would reach the same verdict, so reuse it instead of
+				// burning minutes on an identical re-review.
+				shortCircuited = true;
+				const prev = lastRound;
+				result = {
+					text:
+						`⚠️ Short-circuited: the workspace diff and all review inputs are unchanged since review round ${prev.round} (verdict ${prev.verdict}). ` +
+						`Re-running the independent reviewer would produce the same outcome, so this round reuses round ${prev.round}'s verdict without a new review.\n\n` +
+						`Round ${prev.round} output:\n\n${prev.reviewerText}`,
+					reviewerModel: prev.model,
+					elapsedMs: 0,
+					turns: prev.turns,
+					toolCalls: prev.toolCalls,
+					requestedTools: [],
+					// No repository tools ran this round — do not fabricate usage.
+					activeTools: [],
+					unavailableTools: [],
+					stopReason: "stop",
+					verdict: prev.verdict,
+					verdictReason: prev.verdictReason,
+					madeRepoToolCall: prev.madeRepoToolCall,
+					ocr: {
+						enabled: includeOcr,
+						findings: prev.ocrCount,
+						counts: prev.ocrCounts,
+						rawPath: prev.ocrRawPath,
 					},
-				});
-			} catch (err) {
-				// Reviewer/OCR run failure (CLI missing, OCR exec failure, JSON parse
-				// failure, timeout/abort/model error) surfaces as an explicit tool
-				// error so the review loop does not treat it as success. No verdict is
-				// produced. AbortError from a cancelled signal is rethrown so the
-				// platform handles cancellation.
-				if (err instanceof Error && err.name === "AbortError") throw err;
-				const reason = err instanceof Error ? err.message : String(err);
-				return {
-					isError: true,
-					content: [
-						{
-							type: "text",
-							text: `Review failed: ${reason}`,
-						},
-					],
-					details: { ocrEnabled: includeOcr, error: true, reason },
+					ocrFindingsList: prev.ocrFindings,
 				};
+			} else {
+				// OCR cache: when the diff is unchanged since the previous round, the
+				// OCR findings are identical — reuse them instead of re-running the
+				// expensive `ocr review` CLI.
+				const cachedOcr =
+					includeOcr && diffUnchanged && lastRound?.ocrEnabled
+						? {
+								findings: lastRound.ocrFindings,
+								counts: lastRound.ocrCounts,
+								rawPath: lastRound.ocrRawPath,
+								fromRound: lastRound.round,
+							}
+						: undefined;
+				ocrCachedRound = cachedOcr?.fromRound;
+
+				const previousRound: PreviousReviewRoundInput | undefined = lastRound
+					? {
+							round: lastRound.round,
+							verdict: lastRound.verdict,
+							reviewerText: boundedHeadTail(
+								lastRound.reviewerText,
+								PREVIOUS_ROUND_TEXT_BUDGET,
+							),
+							changedFiles:
+								lastRound.deltaUnknown || diffSnapshot.unknown
+									? []
+									: filesChangedSince(lastRound, diffSnapshot),
+							deltaUnknown: lastRound.deltaUnknown || diffSnapshot.unknown,
+							todosChanged: lastRound.todoHash !== todoHash,
+							ocrCached: !!cachedOcr,
+							ocrFindings: lastRound.ocrCount,
+						}
+					: undefined;
+
+				try {
+					result = await runReviewAgent({
+						ctx,
+						pi,
+						modelSpec: config.models.review,
+						branch,
+						planStartEntryId: state.planStartEntryId,
+						workStartEntryId: state.workStartEntryId,
+						planMarkdown,
+						approvedTodos: state.approvedTodos,
+						currentTodos: state.todos,
+						reviewCwd,
+						primaryCwd,
+						includeOcr,
+						previousRound,
+						cachedOcr,
+						parentSignal: signal,
+						onProgress: (text) => {
+							onUpdate?.({
+								content: [{ type: "text", text }],
+								details: {},
+							});
+						},
+					});
+				} catch (err) {
+					// Reviewer/OCR run failure (CLI missing, OCR exec failure, JSON parse
+					// failure, timeout/abort/model error) surfaces as an explicit tool
+					// error so the review loop does not treat it as success. No verdict is
+					// produced. AbortError from a cancelled signal is rethrown so the
+					// platform handles cancellation.
+					if (err instanceof Error && err.name === "AbortError") throw err;
+					const reason = err instanceof Error ? err.message : String(err);
+					return {
+						isError: true,
+						content: [
+							{
+								type: "text",
+								text: `Review failed: ${reason}`,
+							},
+						],
+						details: { ocrEnabled: includeOcr, error: true, reason },
+					};
+				}
+			}
+
+			// Persist this round so the next workflow_review call can carry its
+			// findings/evidence forward (re-disposition instead of re-derive). A
+			// failed write must not turn a successful review into an error — the
+			// next round simply starts fresh.
+			try {
+				saveReviewRound(ctx.cwd, sessionKey, {
+					workRunId: state.workRunId,
+					round: nextRound,
+					at: new Date().toISOString(),
+					verdict: result.verdict,
+					verdictReason: result.verdictReason,
+					model: result.reviewerModel,
+					elapsedMs: result.elapsedMs,
+					turns: result.turns,
+					toolCalls: result.toolCalls,
+					madeRepoToolCall: result.madeRepoToolCall,
+					reviewerText: result.text,
+					ocrEnabled: includeOcr,
+					ocrCount: result.ocr.findings,
+					ocrCounts: result.ocr.counts,
+					ocrRawPath: result.ocr.rawPath,
+					ocrFindings: result.ocrFindingsList,
+					diffFingerprint: diffSnapshot.fingerprint,
+					deltaUnknown: diffSnapshot.unknown,
+					fileHashes: diffSnapshot.fileHashes,
+					untrackedHashes: diffSnapshot.untrackedHashes,
+					todoHash,
+					taskInputHash,
+					shortCircuited,
+				});
+			} catch {
+				// best-effort history persistence
 			}
 
 			// The verdict is transient: it only signals whether this on-demand
@@ -1094,11 +1248,12 @@ export function registerReviewTool(
 			const elapsedSec = Math.round(result.elapsedMs / 1000);
 			const ops: string[] = [
 				`reviewer: ${result.reviewerModel}${result.thinking ? ` / ${result.thinking}` : ""}`,
+				`round: ${nextRound}${shortCircuited ? " (short-circuited: inputs + diff unchanged)" : ""}`,
 				`elapsed: ${elapsedSec}s`,
 				`turns: ${result.turns}`,
 				`tool calls: ${result.toolCalls}`,
 				`repo tool used: ${result.madeRepoToolCall ? "yes" : "NO"}`,
-				`ocr: ${result.ocr.enabled ? `enabled (${result.ocr.findings} findings)` : "disabled"}`,
+				`ocr: ${result.ocr.enabled ? `enabled (${result.ocr.findings} findings${ocrCachedRound !== undefined ? `, cached from round ${ocrCachedRound}` : ""})` : "disabled"}`,
 				`verdict: ${result.verdict}${result.verdictReason ? ` (${result.verdictReason})` : ""}`,
 			];
 			if (result.unavailableTools.length) {
@@ -1142,6 +1297,9 @@ export function registerReviewTool(
 					verdictReason: result.verdictReason,
 					madeRepoToolCall: result.madeRepoToolCall,
 					ocr: result.ocr,
+					round: nextRound,
+					shortCircuited,
+					ocrCachedRound,
 				},
 				usage: result.usage,
 			};
