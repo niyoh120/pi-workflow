@@ -34,7 +34,7 @@ idle → explore → plan → work → [/review loop] → commit → idle
 - **Mode context**: the current mode prompt and worktree notice are injected into the stable system prompt (via `before_agent_start`), and the Approved-Plan Work handoff is isolated via a canonical marker so Plan→Work transitions within the same agent run always see the latest mode. Dynamic state (todos, run IDs) comes from tool results, not the system prompt.
 - **Explore Mode**: Default landing after `/wf`. Read-only codebase exploration and Q&A (same permissions as Plan Mode). Explore exposes no workflow tools; a preserved plan is read in Plan Mode. Use `/plan` when ready to design.
 - **Plan Review** (optional): Model-initiated `workflow_plan_review` tool call — the plan agent may invoke it after saving a plan. Spawns a fresh, isolated in-memory AgentSession that inherits the parent Plan session's information-tool surface (minus workflow tools), independently explores the repository and active external tools, and returns structured Critical/Important/Minor/Summary findings grounded in repository evidence. Not a separate mode; runs within Plan Mode under a single 30-minute total timeout.
-- **Unified Review** (on-demand, configurable): `/review` (or a direct `workflow_review` call) in Work Mode launches a fresh, isolated in-memory AgentSession that independently reviews the implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work) by exploring the actual checkout/worktree itself — it does NOT receive the Work agent's execution summary, diffs, or test claims. When `codeReview.enabled` is true, a workspace `ocr review` runs first and its normalized findings are injected into the reviewer task (each finding must be dispositioned with repository evidence). It emits a coverage matrix, correctness/verification findings, OCR dispositions, and a machine-parseable `REVIEW_VERDICT: PASS|FAIL` line. The verdict is **transient**: it only signals whether this on-demand review loop can end — it is never written to workflow state and never gates `/commit`. Disable via `review.enabled: false` to hide `/review` and the tool; set `codeReview.enabled: false` to review without OCR.
+- **Unified Review** (on-demand, configurable): `/review` (or a direct `workflow_review` call) in Work Mode launches a fresh, isolated in-memory AgentSession that independently reviews the implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work) by exploring the actual checkout/worktree itself — it does NOT receive the Work agent's execution summary, diffs, or test claims. The single explicit exception is an optional `feedback` argument the Work agent may pass to respond to a prior round's disputed findings — it is injected as a clearly-labeled UNTRUSTED section that the reviewer must independently verify against the repository before it carries any weight. When `codeReview.enabled` is true, a workspace `ocr review` runs first and its normalized findings are injected into the reviewer task (each finding must be dispositioned with repository evidence). It emits a coverage matrix, correctness/verification findings, OCR dispositions, and a machine-parseable `REVIEW_VERDICT: PASS|FAIL` line. The verdict is **transient**: it only signals whether this on-demand review loop can end — it is never written to workflow state and never gates `/commit`. Disable via `review.enabled: false` to hide `/review` and the tool; set `codeReview.enabled: false` to review without OCR.
 
 ## Modes
 
@@ -136,7 +136,7 @@ The reviewer is a **fresh, independent AgentSession** (no subprocess, no RPC): `
 - Approved Work: original user requirements (plan lifecycle) + Final Plan + approved todo snapshot + current todos
 - Direct Work: Work-lifecycle user requirements + current todos
 
-The Work agent's reasoning, thinking, tool results, execution summaries, diffs, and test claims are **excluded by construction** — the reviewer re-derives its own view by exploring the repository.
+The Work agent's reasoning, thinking, tool results, execution summaries, diffs, and test claims are **excluded by construction** — the reviewer re-derives its own view by exploring the repository. The single exception is the optional `feedback` argument: a free-text response to a prior round's disputed findings that the reviewer treats as UNTRUSTED and must independently verify against the repository before it can influence a finding's disposition or the verdict.
 
 **When OCR is enabled**, the reviewer first runs a workspace `ocr review` with a **fixed, bounded code-review `--background`** (a constant constraint card — no requirements/plan/todo text, no file paths) and receives the normalized findings. It must disposition **every** finding: confirm a real issue or refute a false positive, both backed by repository evidence. Confirmed Critical/Important findings contribute to the unified FAIL. The authoritative requirements/plan/todos go only to the independent reviewer, never to OCR.
 
@@ -146,7 +146,7 @@ The Work agent's reasoning, thinking, tool results, execution summaries, diffs, 
 
 **Runtime budget.** A single 30-minute total timeout (`1_800_000ms`) bounds the reviewer run, combined with the parent turn's AbortSignal. OCR shares the same parent signal. The child session is always disposed in `finally`; timeout or user cancellation aborts the active AgentSession and returns an explicit tool error.
 
-**Result.** The tool is zero-argument; the reviewer task is assembled from workflow state. The final text keeps the `Critical / Important / Minor / Summary` structure with concrete repository evidence, and the result carries aggregated nested usage on its top-level `usage` field plus operational metadata (reviewer model/thinking, elapsed time, turns, tool-call count, requested/active/unavailable tools, OCR enabled/counts/rawPath, verdict, stop reason/error). The verdict is **transient**: PASS means the review loop can end; it is never written to workflow state and never gates `/commit`.
+**Result.** The tool takes a single optional `feedback` argument (free text responding to a prior round's disputed findings); the reviewer task is otherwise assembled from workflow state. The final text keeps the `Critical / Important / Minor / Summary` structure with concrete repository evidence, and the result carries aggregated nested usage on its top-level `usage` field plus operational metadata (reviewer model/thinking, elapsed time, turns, tool-call count, requested/active/unavailable tools, OCR enabled/counts/rawPath, verdict, stop reason/error). The verdict is **transient**: PASS means the review loop can end; it is never written to workflow state and never gates `/commit`.
 
 ### Unified review (on-demand tool)
 
@@ -365,7 +365,7 @@ Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) ar
 | `workflow_plan_clear` | Clear workflow state and return to idle mode |
 | `workflow_grill_record` | Record grilling decisions (batch `decisions[]`; legacy single fields accepted) |
 | `workflow_plan_review` | Launch the independent plan-reviewer agent (zero-argument, optional) |
-| `workflow_review` | Launch the on-demand unified reviewer agent (zero-argument, Work Mode; folds in workspace OCR when `codeReview.enabled`) |
+| `workflow_review` | Launch the on-demand unified reviewer agent (optional `feedback`, Work Mode; folds in workspace OCR when `codeReview.enabled`) |
 
 ### workflow_plan_review
 
@@ -375,10 +375,11 @@ Legacy `task` / `context` / `instructions` fields carried by resumed sessions ar
 
 ### workflow_review
 
-Launch the on-demand unified reviewer agent (available in Work Mode when `review.enabled: true`). Zero-argument: the reviewer task is assembled from workflow state.
+Launch the on-demand unified reviewer agent (available in Work Mode when `review.enabled: true`). The reviewer task is assembled from workflow state, plus a single optional `feedback` argument (free text).
 
 - **Approved Work** input: plan-lifecycle user requirements + Final Plan + approved todo snapshot + current todos.
 - **Direct Work** input: Work-lifecycle user requirements + current todos.
+- **`feedback` (optional)**: a free-text response to a prior round's disputed Critical/Important findings. It is the only Work-agent-provided channel into the task, injected as a clearly-labeled **UNTRUSTED** section; the reviewer must independently verify each claim against the repository before it can influence a finding's disposition or the verdict. Requirements/plan/todos remain the authoritative inputs. A blank or omitted `feedback` is equivalent.
 - When `codeReview.enabled` is true, a workspace `ocr review` runs first and its normalized findings are injected; the reviewer dispositions every finding.
 - Returns a coverage matrix, Implementation Correctness / Verification findings, OCR dispositions (when OCR ran), Critical/Important/Minor, and a final `REVIEW_VERDICT: PASS|FAIL` line.
 - PASS requires both a PASS verdict AND at least one repository tool call (fail-closed otherwise).

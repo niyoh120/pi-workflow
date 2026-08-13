@@ -49,6 +49,7 @@ import {
 	computeWorkspaceDiffSnapshot,
 	filesChangedSince,
 	loadReviewHistory,
+	normalizeWorkFeedback,
 	saveReviewRound,
 } from "./review-history.js";
 import { transitionWorkflowMode } from "./mode.js";
@@ -1016,9 +1017,16 @@ export function registerReviewTool(
 		name: "workflow_review",
 		label: "Workflow Review",
 		description:
-			"Launch an independent reviewer that reviews the Work agent's implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work), using its own exploration of the actual repository. Work Mode only, on-demand (triggered by /review). Zero-argument: the reviewer task is assembled from workflow state. When codeReview.enabled is true, a workspace OCR review runs first and its normalized findings are folded into the reviewer task; when false the reviewer covers the implementation directly. Returns structured findings + a PASS/FAIL verdict that signals whether this review loop can end (never gates /commit and is not persisted).",
-		parameters: Type.Object({}),
-		async execute(_toolCallId, _params, signal, onUpdate, ctx) {
+			"Launch an independent reviewer that reviews the Work agent's implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work), using its own exploration of the actual repository. Work Mode only, on-demand (triggered by /review). The reviewer task is assembled from workflow state. Optional `feedback` (free text) lets the Work agent respond to a prior round's disputed Critical/Important findings; it is injected as a clearly-labeled UNTRUSTED section that the reviewer must independently verify against the repository before it carries any weight — requirements/plan/todos remain the authoritative inputs. When codeReview.enabled is true, a workspace OCR review runs first and its normalized findings are folded into the reviewer task; when false the reviewer covers the implementation directly. Returns structured findings + a PASS/FAIL verdict that signals whether this review loop can end (never gates /commit and is not persisted).",
+		parameters: Type.Object({
+			feedback: Type.Optional(
+				Type.String({
+					description:
+						"Optional free-text response to a prior review round's disputed findings. Map each disputed Critical/Important finding to its technical rationale with verifiable evidence (file:line, command output). The reviewer treats this as UNTRUSTED and verifies each claim independently against the repository; it cannot waive requirements/todos or force a PASS on its own. Omit for a normal review round.",
+				}),
+			),
+		}),
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const denied = checkWorkflowEnabled(ctx, getAgentDir);
 			if (denied) return denied;
 
@@ -1053,6 +1061,11 @@ export function registerReviewTool(
 			// OCR findings into the reviewer task. It does not gate the tool itself.
 			const includeOcr = config.codeReview.enabled;
 
+			// Optional non-authoritative Work feedback on a prior round's disputed
+			// findings. Normalized once (trim + 20k budget + blank→undefined) so the
+			// task hash and the reviewer task share one identical value.
+			const feedback = normalizeWorkFeedback(params.feedback);
+
 			// ── Review round continuity ──
 			// The reviewer is a FRESH agent every round and cannot see the previous
 			// round's findings, so it re-derives the whole review from scratch each
@@ -1076,6 +1089,7 @@ export function registerReviewTool(
 				todos: state.todos,
 				includeOcr,
 				reviewModel,
+				feedback,
 			});
 			const history = loadReviewHistory(ctx.cwd, sessionKey);
 			const lastRound =
@@ -1174,6 +1188,7 @@ export function registerReviewTool(
 						includeOcr,
 						previousRound,
 						cachedOcr,
+						feedback,
 						parentSignal: signal,
 						onProgress: (text) => {
 							onUpdate?.({

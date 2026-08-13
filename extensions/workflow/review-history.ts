@@ -7,7 +7,8 @@
  * whole review from scratch and re-runs the expensive workspace OCR even when
  * the diff barely changed. This module persists each round's verdict + full
  * reviewer output + normalized OCR findings + a workspace diff fingerprint +
- * a hash of every authoritative task input, keyed by work run, so the next
+ * a hash of every review task input (authoritative inputs plus any present
+ * non-authoritative Work feedback), keyed by work run, so the next
  * round can:
  *
  *  1. inject the previous round's findings/evidence into the new reviewer
@@ -36,6 +37,10 @@ export const MAX_REVIEW_ROUNDS = 3;
 /** Budget for the previous round's reviewer text injected into the new task.
  *  Head (coverage matrix) and tail (findings + verdict) are retained. */
 export const PREVIOUS_ROUND_TEXT_BUDGET = 60_000;
+/** Character budget for a Work agent's free-text review feedback. Bounds the
+ *  non-authoritative feedback so a disputed-finding response cannot dominate
+ *  the reviewer's context. */
+export const WORK_FEEDBACK_TEXT_BUDGET = 20_000;
 /** Untracked-file hashing bounds. Beyond these the diff fingerprint is marked
  *  unknown so OCR caching/short-circuit are skipped (a stale cache is worse
  *  than none). */
@@ -83,8 +88,9 @@ export interface ReviewRoundRecord {
 	fileHashes: Record<string, string>;
 	untrackedHashes: Record<string, string>;
 	todoHash: string;
-	/** Hash of every authoritative reviewer input (requirements/plan/todos/OCR
-	 *  flag/model). Identical inputs + identical diff ⇒ same verdict. */
+	/** Hash of the authoritative reviewer inputs (requirements/plan/todos/OCR
+	 *  flag/model) plus any present non-authoritative Work feedback. Identical
+	 *  inputs + identical diff ⇒ same verdict. */
 	taskInputHash: string;
 	/** True when this round was short-circuited (reused the previous round). */
 	shortCircuited: boolean;
@@ -398,10 +404,38 @@ export function boundedHeadTail(text: string, max: number): string {
 }
 
 /**
- * Hash of every authoritative reviewer input: requirements, plan, approved +
- * current todos, the OCR flag, and the configured review model. Two rounds
- * with the same hash AND the same diff fingerprint receive the same verdict.
- * Pure.
+ * Normalize a Work agent's free-text response to a prior review round's
+ * disputed findings. Accepts the unknown boundary value from tool/runner
+ * call sites, trims leading/trailing whitespace, maps blank strings to
+ * undefined, and bounds the length with the same head/tail policy used for
+ * the previous round's reviewer text.
+ *
+ * Reuses the generic boundedHeadTail truncation to preserve the feedback's
+ * opening (problem location) and tail (supporting evidence). The 40/60 split
+ * carries the same generic head/tail retention intent — it expresses NO
+ * reviewer-output coverage/verdict semantics.
+ *
+ * Idempotent: the bounded result is within budget, so re-applying the
+ * function is a no-op; tool, task builder, and task hash can all share one
+ * normalized value. Pure.
+ */
+export function normalizeWorkFeedback(raw: unknown): string | undefined {
+	if (typeof raw !== "string") return undefined;
+	const trimmed = raw.trim();
+	if (!trimmed) return undefined;
+	return boundedHeadTail(trimmed, WORK_FEEDBACK_TEXT_BUDGET);
+}
+
+/**
+ * Hash of every reviewer task input: authoritative inputs (requirements,
+ * plan, approved + current todos, the OCR flag, the configured review model)
+ * plus, when present, the non-authoritative Work feedback. Two rounds with
+ * the same hash AND the same diff fingerprint receive the same verdict.
+ *
+ * Feedback is idempotently re-normalized here so future call sites cannot
+ * drift; a missing/blank feedback contributes NO key, keeping the hash body
+ * byte-identical to the pre-feedback algorithm so pre-upgrade review history
+ * still short-circuits on a no-feedback call. Pure.
  */
 export function computeTaskInputHash(input: {
 	requirements: string[];
@@ -410,7 +444,10 @@ export function computeTaskInputHash(input: {
 	todos: TodoItem[];
 	includeOcr: boolean;
 	reviewModel: string;
+	/** Optional non-authoritative Work feedback on prior-round findings. */
+	feedback?: string;
 }): string {
+	const feedback = normalizeWorkFeedback(input.feedback);
 	const body = {
 		requirements: input.requirements,
 		planMarkdown: input.planMarkdown ?? "",
@@ -423,6 +460,7 @@ export function computeTaskInputHash(input: {
 		todos: input.todos.map((t) => [t.id, t.title, t.status, t.notes ?? ""]),
 		includeOcr: input.includeOcr,
 		reviewModel: input.reviewModel,
+		...(feedback !== undefined ? { feedback } : {}),
 	};
 	return crypto.createHash("sha1").update(JSON.stringify(body)).digest("hex");
 }

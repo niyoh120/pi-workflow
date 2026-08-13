@@ -105,6 +105,7 @@ export const WORK_PROMPT = `
 - Direct Work（由 /work 进入）：以本次 Work 生命周期内的原始用户请求和 workflow_todo 为权威输入。手动测试后发现需要追加的小任务，继续通过 workflow_todo 新增 todo 留在当前 Work。
 - 开始或恢复 Work 时，近期上下文缺少完整 todo snapshot 则先调用 workflow_todo(action="list") 读取状态；按 workflow_todo 和实际依赖推进，每次保持一个 in_progress 项。
 - 修改后运行能验证改动的检查（项目测试或其他命令）。
+- 当你认为上一轮 review 的某个 Critical/Important finding 是误判、超出范围、无需修改或与项目约束冲突时，可在下一轮调用 \`workflow_review({ feedback: "..." })\` 提交技术理由。feedback 须逐条对应争议 finding，详细说明技术理由，附 \`file:line\` / 命令输出等可复核证据，并保持事实准确；reviewer 会独立复核，编造事实无益。
 - 实现完成后，可提示用户用 \`/review\` 触发统一 Review（可选，适合复杂改动）；\`/commit\` 始终直接可用，不要求 Review。
 `;
 

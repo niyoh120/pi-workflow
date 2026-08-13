@@ -761,7 +761,19 @@ console.log("\n=== Check 7: Code review tooling ===");
 	const reviewToolEnd = toolsTs.indexOf("// ── Bulk registration", reviewToolStart);
 	assert(reviewToolStart >= 0 && reviewToolEnd > reviewToolStart, "tools.ts: unified review tool block anchors exist");
 	const reviewToolBlock = toolsTs.slice(reviewToolStart, reviewToolEnd);
-	assert(/parameters:\s*Type\.Object\(\s*\{\s*\}\)/.test(reviewToolBlock), "tools.ts: workflow_review is zero-argument");
+	// The unified tool takes a single OPTIONAL feedback field; workflow_review()
+	// with no args stays valid.
+	const reviewParamsMatch = reviewToolBlock.match(/parameters:\s*Type\.Object\(\s*\{([\s\S]*?)\}\s*\)/);
+	assert(reviewParamsMatch !== null, "tools.ts: workflow_review parameters object found");
+	const reviewParamsBody = reviewParamsMatch[1];
+	assert(/^\s*feedback:\s*Type\.Optional\(\s*Type\.String\(/m.test(reviewParamsBody), "tools.ts: workflow_review feedback is Type.Optional(Type.String(...))");
+	// Exactly one property (feedback), each property line starts with `name: Type.`.
+	const reviewPropLines = reviewParamsBody.split("\n").filter((l) => /^\s*[A-Za-z_]\w*\s*:\s*Type\./.test(l));
+	assert(reviewPropLines.length === 1 && reviewPropLines[0].includes("feedback"), "tools.ts: workflow_review has exactly one property (feedback), and it is optional");
+	// Wiring: normalize once, pass to task hash and runReviewAgent.
+	assert(reviewToolBlock.includes("normalizeWorkFeedback(params.feedback)"), "tools.ts: workflow_review reads params.feedback via normalizeWorkFeedback");
+	assert(/computeTaskInputHash\(\{[\s\S]*?feedback/.test(reviewToolBlock), "tools.ts: workflow_review passes feedback into computeTaskInputHash");
+	assert(/runReviewAgent\(\{[\s\S]*?feedback/.test(reviewToolBlock), "tools.ts: workflow_review passes feedback into runReviewAgent");
 	assert(reviewToolBlock.includes("runReviewAgent("), "tools.ts: workflow_review invokes runReviewAgent");
 	assert(reviewToolBlock.includes("config.codeReview.enabled"), "tools.ts: workflow_review passes config.codeReview.enabled as includeOcr");
 	assert(reviewToolBlock.includes("config.models.review"), "tools.ts: workflow_review uses config.models.review");
@@ -917,6 +929,24 @@ console.log("\n=== Check 7: Code review tooling ===");
 		/对确认存在的问题进行修复/.test(reviewCmdBlock) &&
 			/review → fix → re-review/.test(reviewCmdBlock),
 		"/review kickoff prompt describes review → fix → re-review with workflow_review()",
+	);
+	// /review kickoff routes disputed findings through the feedback channel.
+	assert(
+		/workflow_review\(\{\s*feedback/.test(reviewCmdBlock),
+		"/review kickoff instructs workflow_review({ feedback }) for disputed findings",
+	);
+	assert(
+		/逐条|对应/.test(reviewCmdBlock) && /file:line|命令输出|命令证据/.test(reviewCmdBlock),
+		"/review kickoff requires feedback to map to disputed findings with verifiable evidence",
+	);
+	// WORK_PROMPT teaches the optional feedback channel.
+	assert(
+		/workflow_review\(\{\s*feedback/.test(workPromptBlock),
+		"prompts.ts: WORK_PROMPT documents the workflow_review({ feedback }) channel",
+	);
+	assert(
+		/workflow_review\(\{\s*feedback[\s\S]*?file:line/.test(workPromptBlock),
+		"prompts.ts: WORK_PROMPT ties feedback to verifiable file:line evidence",
 	);
 	assertNotContains(
 		workPromptBlock,
