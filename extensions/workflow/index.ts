@@ -13,6 +13,11 @@
  * (review-history.ts) so the next round re-dispositions the previous round's
  * findings instead of re-deriving everything, reuses cached OCR findings when
  * the workspace diff is unchanged, and short-circuits identical re-reviews.
+ * Plan review rounds are persisted per plan run (plan-review-history.ts) so
+ * repeated workflow_plan_review calls reuse identical rounds, run incremental
+ * re-reviews focused on changed plan sections / new confirmed decisions, and
+ * answer disputed findings via an optional UNTRUSTED feedback argument; its
+ * transient PLAN_REVIEW_VERDICT never gates approval (always user-confirmed).
  * No external extension dependency required.
  *
  * Workflow commands and tools are gated behind /wf by default.

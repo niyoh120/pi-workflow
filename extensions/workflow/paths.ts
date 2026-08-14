@@ -53,6 +53,16 @@ export function reviewHistoryPath(cwd: string, sessionKey: string): string {
 }
 
 /**
+ * Session-scoped plan-review round history path. Separate from state.json so
+ * the transient plan-review verdict stays out of WorkflowState (approval is
+ * always user-confirmed). Managed exclusively by the workflow_plan_review
+ * tool. Does NOT create directories.
+ */
+export function planReviewHistoryPath(cwd: string, sessionKey: string): string {
+  return path.join(sessionDir(cwd, sessionKey), "plan-review-history.json");
+}
+
+/**
  * Derive a safe session key for filesystem use.
  * Hashes the session identity so raw ids/paths never become path segments directly.
  */

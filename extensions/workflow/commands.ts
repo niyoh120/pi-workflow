@@ -19,7 +19,7 @@ import {
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
-import { planDir, reviewHistoryPath } from "./paths.js";
+import { planDir, planReviewHistoryPath, reviewHistoryPath } from "./paths.js";
 import { loadConfigForContext, resolveConfigSources } from "./config.js";
 import { PASEO_VERIFIED_VERSION } from "./todo-compat.js";
 import {
@@ -1291,6 +1291,9 @@ export function registerWfResetCommand(pi: ExtensionAPI): void {
 
 			// Drop the review-round history (session-scoped per-work-run cache).
 			fs.rmSync(reviewHistoryPath(ctx.cwd, sessionKey), { force: true });
+			// Drop the plan-review round history too (session-scoped per-plan-run
+			// cache powering reuse/incremental rounds).
+			fs.rmSync(planReviewHistoryPath(ctx.cwd, sessionKey), { force: true });
 
 			ctx.ui.setStatus("lite-sp", undefined);
 			ctx.ui.notify("已清空 workflow 状态。", "info");

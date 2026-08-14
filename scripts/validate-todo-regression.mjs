@@ -1043,7 +1043,8 @@ console.log("\n=== Check 7: Code review tooling ===");
 			planReviewAgentTs.includes("unavailableTools"),
 		"plan-review-agent.ts: returns usage + tool diagnostics",
 	);
-	// The tool is now zero-argument and discards legacy sidecall fields.
+	// The tool takes a single optional feedback string and discards legacy
+	// sidecall fields.
 	const planReviewToolStart = toolsTs.indexOf(
 		"// ── workflow_plan_review tool (independent reviewer agent)",
 	);
@@ -1057,8 +1058,12 @@ console.log("\n=== Check 7: Code review tooling ===");
 	);
 	const planReviewToolBlock = toolsTs.slice(planReviewToolStart, planReviewToolEnd);
 	assert(
-		/parameters:\s*Type\.Object\(\{\s*\}\)/.test(planReviewToolBlock),
-		"tools.ts: workflow_plan_review is zero-argument",
+		/parameters:\s*Type\.Object\(\{\s*feedback:\s*Type\.Optional\(\s*Type\.String\(/.test(planReviewToolBlock),
+		"tools.ts: workflow_plan_review takes a single optional feedback string",
+	);
+	assert(
+		!/Type\.Object\(\{\s*\}\)/.test(planReviewToolBlock),
+		"tools.ts: workflow_plan_review no longer declares a zero-argument schema",
 	);
 	assert(
 		planReviewToolBlock.includes("prepareArguments: preparePlanReviewArguments"),
@@ -1069,6 +1074,10 @@ console.log("\n=== Check 7: Code review tooling ===");
 			planReviewToolBlock.includes("void a.context") &&
 			planReviewToolBlock.includes("void a.instructions"),
 		"tools.ts: preparePlanReviewArguments discards legacy task/context/instructions",
+	);
+	assert(
+		planReviewToolBlock.includes("typeof a.feedback === \"string\""),
+		"tools.ts: preparePlanReviewArguments keeps the feedback field",
 	);
 	assert(
 		planReviewToolBlock.includes("runPlanReviewAgent("),

@@ -35,7 +35,24 @@ import type { TodoStatus, WorkflowState } from "./types.js";
 import {
 	runPlanReviewAgent,
 	extractUserRequirements,
+	buildPlanReviewProtocolText,
+	reconstructReviewerToolSurface,
+	type PlanReviewResult,
 } from "./plan-review-agent.js";
+import {
+	boundPreviousRoundText,
+	buildReuseDiagnostics,
+	computePlanDecisionHash,
+	computePlanHash,
+	computePlanReviewBasisHash,
+	computePlanReviewTaskInputHash,
+	computePlanSectionDelta,
+	computePlanSectionHashes,
+	decidePlanReviewMode,
+	loadPlanReviewHistory,
+	normalizePlanReviewFeedback,
+	savePlanReviewRound,
+} from "./plan-review-history.js";
 import {
 	runReviewAgent,
 	type PreviousReviewRoundInput,
@@ -890,22 +907,23 @@ export function registerGrillRecordTool(
 
 // ── workflow_plan_review tool (independent reviewer agent) ──────────
 
-/** Normalize legacy sidecall arguments carried in resumed sessions.
+/** Normalize plan-review arguments carried in resumed sessions.
  *
- *  The tool is now zero-argument: the reviewer task is assembled from
- *  authoritative state (requirements, decisions, saved plan). Older sessions
- *  may still replay `task` / `context` / `instructions` fields; accept and
- *  discard them so resumed tool calls do not fail validation. */
+ *  The tool accepts one optional `feedback` string (a response to a prior
+ *  round's disputed findings). Older sessions may still replay the legacy
+ *  sidecall fields `task` / `context` / `instructions`; accept and discard
+ *  them so resumed tool calls do not fail validation. */
 function preparePlanReviewArguments(
 	args: unknown,
-): object {
+): { feedback?: string } {
 	// Intentionally discards legacy fields. Kept explicit so future arg
 	// additions are deliberate.
 	const a = (args ?? {}) as Record<string, unknown>;
 	void a.task;
 	void a.context;
 	void a.instructions;
-	return {};
+	const feedback = typeof a.feedback === "string" ? a.feedback : undefined;
+	return feedback === undefined ? {} : { feedback };
 }
 
 export function registerPlanReviewTool(
@@ -916,10 +934,17 @@ export function registerPlanReviewTool(
 		name: "workflow_plan_review",
 		label: "Workflow Plan Review",
 		description:
-			"Launch an independent reviewer agent that re-validates the saved Final Plan against the authoritative user requirements and confirmed decisions, using its own exploration of the repository and active information tools. Plan Mode only. Zero-argument: the reviewer task is assembled from workflow state. Returns structured feedback (Critical/Important/Minor/Summary) with concrete repository evidence.",
-		parameters: Type.Object({}),
+			"Launch an independent reviewer agent that re-validates the saved Final Plan against the authoritative user requirements and confirmed decisions, using its own exploration of the repository and active information tools. Plan Mode only. The reviewer task is assembled from workflow state. Repeated calls are efficient: identical inputs (plan + decisions + repository + reviewer baseline) reuse the cached round; a revised plan or new confirmed decisions run an INCREMENTAL review focused on the changed sections; changed requirements/model/tools/repository force a full review. Optional `feedback` (free text) responds to the previous round's disputed Critical/Important findings; the reviewer verifies it independently. Returns structured feedback (Critical/Important/Minor/Summary) plus a transient PLAN_REVIEW_VERDICT: PASS|FAIL evaluation signal for the planner — it never gates approval, which stays user-confirmed via workflow_plan_approve.",
+		parameters: Type.Object({
+			feedback: Type.Optional(
+				Type.String({
+					description:
+						"Optional free-text response to the previous plan-review round's disputed findings. Map each disputed Critical/Important finding to its technical rationale with verifiable evidence (file:line, command output). Only valid once this plan has a prior review round; the reviewer verifies every claim independently. Omit for a normal review.",
+				}),
+			),
+		}),
 		prepareArguments: preparePlanReviewArguments,
-		async execute(_toolCallId, _params, signal, onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const denied = checkWorkflowEnabled(ctx, getAgentDir);
 			if (denied) return denied;
 
@@ -941,37 +966,244 @@ export function registerPlanReviewTool(
 				);
 			}
 
+			// Old-session self-heal: a planPath recorded before planRunId existed
+			// (or a state file that lost it) gets a fresh id persisted immediately,
+			// BEFORE any fingerprint/hash/reviewer orchestration. This plan run
+			// starts from a full review; later rounds gain isolation + deltas.
+			if (!state.planRunId) {
+				state.planRunId = crypto.randomUUID();
+				saveState(ctx.cwd, sessionKey, state);
+			}
+			const planRunId = state.planRunId;
+
 			const planMarkdown = requirePlanMarkdown(ctx.cwd, state.planPath);
 			const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
+			const decisions = state.planReviewDecisions ?? [];
 
-			// Active session branch powers authoritative requirement extraction,
-			// scoped to the current Plan lifecycle via planStartEntryId.
+			// ── Single snapshots shared by hashes and the child runner ──
+			// Requirements, tool surface, and protocol text are each computed ONCE
+			// so the cache decision and the actual reviewer inputs cannot drift.
 			const branch = ctx.sessionManager?.getBranch?.();
+			const requirements = extractUserRequirements(branch, state.planStartEntryId);
+			const toolSurface = reconstructReviewerToolSurface(pi);
+			const protocolText = buildPlanReviewProtocolText();
+			const reviewerModel = `${config.models.planReview.provider}/${config.models.planReview.model}`;
 
-			const result = await runPlanReviewAgent({
-				ctx,
-				pi,
-				modelSpec: config.models.planReview,
-				planMarkdown,
-				decisions: state.planReviewDecisions ?? [],
-				branch,
-				planStartEntryId: state.planStartEntryId,
-				parentSignal: signal,
-				onProgress: (text) => {
-					onUpdate?.({
-						content: [{ type: "text", text }],
-						details: {},
-					});
-				},
+			// Optional non-authoritative planner feedback on a prior round's
+			// disputed findings. Accepted only when this plan run already has an
+			// actual review round; a first-round feedback is an explicit error.
+			const feedback = normalizePlanReviewFeedback(params.feedback);
+			const history = loadPlanReviewHistory(ctx.cwd, sessionKey);
+			const lastRound =
+				history && history.planRunId === planRunId
+					? history.rounds[history.rounds.length - 1]
+					: undefined;
+			if (feedback && !lastRound) {
+				return {
+					isError: true,
+					content: [
+						{
+							type: "text",
+							text: "当前 Plan 尚无上一轮 finding；移除 feedback 后重新调用 workflow_plan_review()。",
+						},
+					],
+					details: { feedbackRejected: true, reason: "no previous round" },
+				};
+			}
+
+			// ── Repository fingerprint + hashes ──
+			const diffSnapshot = computeWorkspaceDiffSnapshot(ctx.cwd);
+			const reviewBasisHash = computePlanReviewBasisHash({
+				requirements,
+				reviewerModel,
+				thinking: config.models.planReview.thinking,
+				requestedTools: toolSurface.requestedTools,
+				extensionPaths: toolSurface.extensionPaths,
+				protocolText,
 			});
+			const decisionHash = computePlanDecisionHash(decisions);
+			const planHash = computePlanHash(planMarkdown);
+			const sectionHashes = computePlanSectionHashes(planMarkdown);
+			const taskInputHash = computePlanReviewTaskInputHash({
+				basisHash: reviewBasisHash,
+				planMarkdown,
+				decisions,
+				feedback,
+			});
+
+			const cache = decidePlanReviewMode({
+				history,
+				planRunId,
+				diffFingerprint: diffSnapshot.fingerprint,
+				deltaUnknown: diffSnapshot.unknown,
+				reviewBasisHash,
+				taskInputHash,
+			});
+			const nextRound = (lastRound?.round ?? 0) + 1;
+
+			// ── Reused path: identical repository + basis + task input ──
+			// Returns the cached canonical output and effective verdict with zero
+			// this-round cost. No new history round is appended (bounded history,
+			// no nested output growth) — unlike Implementation Review, which
+			// persists its short-circuited rounds.
+			if (cache.mode === "reused" && lastRound) {
+				const reuse = buildReuseDiagnostics(lastRound);
+				const ops = [
+					`reviewer: ${lastRound.model}`,
+					`round: ${reuse.round} (mode: reused — repo evidence reused from round ${reuse.reusedFromRound}; inputs + repository unchanged)`,
+					`elapsed: 0s (no reviewer run)`,
+					`turns: 0 | tool calls: 0 | usage: 0 (cached)`,
+					`successful repo inspection: ${reuse.hasSuccessfulRepoInspection ? "yes" : "NO"}`,
+					`cache: ${cache.reason}`,
+					`verdict: ${lastRound.effectiveVerdict}${lastRound.verdictReason ? ` (${lastRound.verdictReason})` : ""}`,
+				];
+				const verdictNotice =
+					lastRound.effectiveVerdict === "PASS"
+						? "\n\n✅ Plan review PASS (reused). Evaluation signal for the planner; approval remains user-confirmed via workflow_plan_approve."
+						: "\n\n❌ Plan review FAIL (reused). Address the Critical/Important findings, then revise the plan and re-run workflow_plan_review().";
+				return {
+					content: [
+						{
+							type: "text",
+							text: `♻️ Reused: repository, review basis, and all task inputs are unchanged since review round ${reuse.reusedFromRound}. No new reviewer run.\n\n${lastRound.reviewerText}${verdictNotice}\n\n---\n${ops.join(" | ")}`,
+						},
+					],
+					details: {
+						reviewerModel: lastRound.model,
+						round: reuse.round,
+						reusedFromRound: reuse.reusedFromRound,
+						mode: "reused",
+						elapsedMs: reuse.elapsedMs,
+						turns: reuse.turns,
+						toolCalls: reuse.toolCalls,
+						successfulToolNames: reuse.successfulToolNames,
+						hasSuccessfulRepoInspection: reuse.hasSuccessfulRepoInspection,
+						effectiveVerdict: lastRound.effectiveVerdict,
+						verdictReason: lastRound.verdictReason,
+						cacheReason: cache.reason,
+					},
+				};
+			}
+
+			// ── Full / incremental reviewer run ──
+			const incremental = cache.mode === "incremental" && !!lastRound;
+			const previousRound = incremental && lastRound
+				? {
+						round: lastRound.round,
+						effectiveVerdict: lastRound.effectiveVerdict,
+						reviewerText: boundPreviousRoundText(lastRound.reviewerText),
+						deltaUnknown: lastRound.deltaUnknown || diffSnapshot.unknown,
+					}
+				: undefined;
+			const sectionDelta = incremental && lastRound
+				? computePlanSectionDelta(lastRound.sectionHashes, sectionHashes)
+				: undefined;
+			const decisionsChanged = incremental && lastRound
+				? lastRound.decisionHash !== decisionHash
+				: undefined;
+
+			let result: PlanReviewResult;
+			try {
+				result = await runPlanReviewAgent({
+					ctx,
+					pi,
+					modelSpec: config.models.planReview,
+					planMarkdown,
+					decisions,
+					requirements,
+					toolSurface,
+					previousRound,
+					sectionDelta,
+					decisionsChanged,
+					feedback,
+					parentSignal: signal,
+					onProgress: (text) => {
+						onUpdate?.({
+							content: [{ type: "text", text }],
+							details: {},
+						});
+					},
+				});
+			} catch (err) {
+				// AbortError from a cancelled signal is rethrown so the platform
+				// handles cancellation; everything else becomes an explicit tool
+				// error (no verdict produced, no history round written).
+				if (err instanceof Error && err.name === "AbortError") throw err;
+				const reason = err instanceof Error ? err.message : String(err);
+				return {
+					isError: true,
+					content: [{ type: "text", text: `Plan review failed: ${reason}` }],
+					details: { error: true, reason, mode: cache.mode, round: nextRound },
+				};
+			}
+
+			// ── Effective verdict ──
+			// Parsed FAIL stays FAIL. A parsed PASS requires successful builtin
+			// repo inspection evidence (finalized tool_execution_end results);
+			// without it the round is downgraded to FAIL so the planner treats it
+			// as insufficient evidence rather than approval clearance.
+			let effectiveVerdict = result.verdict;
+			let verdictReason = result.verdictReason;
+			if (result.verdict === "PASS" && !result.hasSuccessfulRepoInspection) {
+				effectiveVerdict = "FAIL";
+				verdictReason = "reviewer produced PASS without successful repository inspection";
+			}
+
+			// Persist this ACTUAL reviewer round so later calls can reuse or
+			// increment against it. Best-effort: the review result stands even
+			// when the write fails — the diagnostics flag that the next round
+			// will full review.
+			let historyPersisted = true;
+			try {
+				savePlanReviewRound(ctx.cwd, sessionKey, {
+					planRunId,
+					round: nextRound,
+					at: new Date().toISOString(),
+					model: result.reviewerModel,
+					thinking: result.thinking,
+					elapsedMs: result.elapsedMs,
+					turns: result.turns,
+					toolCalls: result.toolCalls,
+					reviewerText: result.text,
+					effectiveVerdict,
+					verdictReason,
+					hasSuccessfulRepoInspection: result.hasSuccessfulRepoInspection,
+					successfulToolNames: result.successfulToolNames ?? [],
+					diffFingerprint: diffSnapshot.fingerprint,
+					deltaUnknown: diffSnapshot.unknown,
+					reviewBasisHash,
+					taskInputHash,
+					planHash,
+					decisionHash,
+					sectionHashes,
+					mode: incremental ? "incremental" : "full",
+					reusedFromRound: previousRound?.round,
+				});
+			} catch {
+				historyPersisted = false;
+			}
 
 			const elapsedSec = Math.round(result.elapsedMs / 1000);
 			const ops: string[] = [
 				`reviewer: ${result.reviewerModel}${result.thinking ? ` / ${result.thinking}` : ""}`,
+				`round: ${nextRound} (mode: ${cache.mode}${incremental && previousRound ? `, building on round ${previousRound.round}` : ""}${historyPersisted ? "" : "; history write failed — next round will full review"})`,
+				`cache decision: ${cache.reason}`,
+			];
+			if (sectionDelta) {
+				ops.push(
+					`changed sections: added ${sectionDelta.added.length}, changed ${sectionDelta.changed.length}, removed ${sectionDelta.removed.length}`,
+				);
+			}
+			if (decisionsChanged !== undefined) {
+				ops.push(`decisions changed: ${decisionsChanged ? "yes" : "no"}`);
+			}
+			ops.push(
 				`elapsed: ${elapsedSec}s`,
 				`turns: ${result.turns}`,
 				`tool calls: ${result.toolCalls}`,
-			];
+				`successful repo inspection: ${result.hasSuccessfulRepoInspection ? "yes" : "NO"}`,
+				`verdict: ${effectiveVerdict}${verdictReason ? ` (${verdictReason})` : ""}`,
+			);
 			if (result.unavailableTools.length) {
 				ops.push(`unavailable tools: ${result.unavailableTools.join(", ")}`);
 			}
@@ -982,11 +1214,16 @@ export function registerPlanReviewTool(
 				ops.push(`error: ${result.errorMessage}`);
 			}
 
+			const verdictNotice =
+				effectiveVerdict === "PASS"
+					? "\n\n✅ Plan review PASS. Evaluation signal for the planner; approval remains user-confirmed via workflow_plan_approve."
+					: "\n\n❌ Plan review FAIL. Address the Critical/Important findings, revise the plan (workflow_plan_save), and re-run workflow_plan_review(). workflow_plan_approve remains available once the user explicitly confirms.";
+
 			return {
 				content: [
 					{
 						type: "text",
-						text: `${result.text}\n\n---\n${ops.join(" | ")}`,
+						text: `${result.text}${verdictNotice}\n\n---\n${ops.join(" | ")}`,
 					},
 				],
 				details: {
@@ -998,8 +1235,17 @@ export function registerPlanReviewTool(
 					requestedTools: result.requestedTools,
 					activeTools: result.activeTools,
 					unavailableTools: result.unavailableTools,
+					successfulToolNames: result.successfulToolNames ?? [],
+					hasSuccessfulRepoInspection: result.hasSuccessfulRepoInspection,
 					stopReason: result.stopReason,
 					errorMessage: result.errorMessage,
+					verdict: result.verdict,
+					effectiveVerdict,
+					verdictReason,
+					round: nextRound,
+					mode: cache.mode,
+					reusedFromRound: previousRound?.round,
+					historyPersisted,
 				},
 				usage: result.usage,
 			};
