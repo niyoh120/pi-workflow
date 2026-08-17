@@ -55,6 +55,7 @@ import {
 } from "./plan-review-history.js";
 import {
 	runReviewAgent,
+	buildImplementationReviewProtocolText,
 	type PreviousReviewRoundInput,
 	type ReviewResult,
 } from "./review-agent.js";
@@ -934,7 +935,7 @@ export function registerPlanReviewTool(
 		name: "workflow_plan_review",
 		label: "Workflow Plan Review",
 		description:
-			"Launch an independent reviewer agent that re-validates the saved Final Plan against the authoritative user requirements and confirmed decisions, using its own exploration of the repository and active information tools. Plan Mode only. The reviewer task is assembled from workflow state. Repeated calls are efficient: identical inputs (plan + decisions + repository + reviewer baseline) reuse the cached round; a revised plan or new confirmed decisions run an INCREMENTAL review focused on the changed sections; changed requirements/model/tools/repository force a full review. Optional `feedback` (free text) responds to the previous round's disputed Critical/Important findings; the reviewer verifies it independently. Returns structured feedback (Critical/Important/Minor/Summary) plus a transient PLAN_REVIEW_VERDICT: PASS|FAIL evaluation signal for the planner — it never gates approval, which stays user-confirmed via workflow_plan_approve.",
+			"Launch an independent reviewer agent that re-validates the saved Final Plan against the authoritative user requirements and confirmed decisions, using its own exploration of the repository and active information tools. Plan Mode only. The reviewer task is assembled from workflow state. Repeated calls are efficient: identical inputs (plan + decisions + repository + reviewer baseline) reuse the cached round; a revised plan or new confirmed decisions run an INCREMENTAL review focused on the changed sections; changed requirements/model/tools/repository force a full review. Optional `feedback` (free text) responds to the previous round's disputed Critical/Important findings; the reviewer verifies it independently. Returns structured feedback (Critical/Important/Minor/Summary) plus a transient PASS/FAIL evaluation signal — the reviewer submits the verdict through its own terminating review_submit tool call, and a missing submission resolves fail-closed to FAIL. The signal never gates approval, which stays user-confirmed via workflow_plan_approve.",
 		parameters: Type.Object({
 			feedback: Type.Optional(
 				Type.String({
@@ -1138,10 +1139,10 @@ export function registerPlanReviewTool(
 			}
 
 			// ── Effective verdict ──
-			// Parsed FAIL stays FAIL. A parsed PASS requires successful builtin
-			// repo inspection evidence (finalized tool_execution_end results);
-			// without it the round is downgraded to FAIL so the planner treats it
-			// as insufficient evidence rather than approval clearance.
+			// A submitted FAIL stays FAIL. A submitted PASS requires successful
+			// builtin repo inspection evidence (finalized tool_execution_end
+			// results); without it the round is downgraded to FAIL so the planner
+			// treats it as insufficient evidence rather than approval clearance.
 			let effectiveVerdict = result.verdict;
 			let verdictReason = result.verdictReason;
 			if (result.verdict === "PASS" && !result.hasSuccessfulRepoInspection) {
@@ -1328,6 +1329,11 @@ export function registerReviewTool(
 			const diffSnapshot = computeWorkspaceDiffSnapshot(reviewCwd);
 			const todoHash = computeTodoHash(state.todos);
 			const reviewModel = `${config.models.review.provider}/${config.models.review.model}`;
+			// Snapshot the reviewer protocol text ONCE so the task-input hash and
+			// the reviewer run share the same behavioral baseline; a protocol change
+			// (e.g. the review_submit verdict migration) invalidates reuse of
+			// rounds produced under the older protocol.
+			const protocolText = buildImplementationReviewProtocolText();
 			const taskInputHash = computeTaskInputHash({
 				requirements,
 				planMarkdown,
@@ -1335,6 +1341,7 @@ export function registerReviewTool(
 				todos: state.todos,
 				includeOcr,
 				reviewModel,
+				protocolText,
 				feedback,
 			});
 			const history = loadReviewHistory(ctx.cwd, sessionKey);

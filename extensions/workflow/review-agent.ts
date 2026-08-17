@@ -23,7 +23,12 @@
  * ls, bash, git diff) and does NOT receive the parent Work agent's execution
  * summary, pre-selected diff, test claims, or prior review output. It produces
  * a structured coverage matrix + correctness/verification findings + OCR
- * finding dispositions + a machine-parseable final verdict line.
+ * finding dispositions, then submits the verdict via review_submit.
+ *
+ * The reviewer submits its final verdict through the child-only
+ * `review_submit` tool (schema-validated PASS/FAIL enum, terminating): the
+ * complete Markdown report and the submit tool call share the SAME final
+ * assistant message, and a missing submission resolves fail-closed to FAIL.
  *
  * The single explicit exception is an optional UNTRUSTED Work feedback section
  * — a free-text response the Work agent chose to submit about a prior round's
@@ -57,66 +62,26 @@ import { normalizeWorkFeedback } from "./review-history.js";
 export const OCR_BINARY = "ocr";
 export const OCR_TIMEOUT_MS = 1_800_000;
 
-// ── Verdict ─────────────────────────────────────────────────────────────────
+// ── Reviewer submit protocol (single source for task + task-input hash) ────
 
-export type ReviewVerdict = "PASS" | "FAIL";
-
-export interface VerdictParseResult {
-	verdict: ReviewVerdict;
-	/** Raw verdict line as emitted by the reviewer (for diagnostics). */
-	rawLine?: string;
-	/** Reason when the format is missing/conflicting (fail-closed → FAIL). */
-	reason?: string;
-}
-
-/** The exact machine-parseable final verdict line the reviewer must emit. */
-export const VERDICT_LINE_PREFIX = "REVIEW_VERDICT:";
+/** Terminating-submit instruction appended to both task builders' Review
+ *  Assignment sections and echoed by the previous-round instructions. Mirrors
+ *  the system prompt Output contract: the complete Markdown report and the
+ *  review_submit tool call share the SAME final assistant message. */
+export const REVIEW_SUBMIT_TASK_INSTRUCTION =
+	"Finish with ONE final assistant message that contains the complete Markdown review report, then call the `review_submit` tool exactly once with verdict PASS or FAIL as your final action — the report text and the submit tool call share that final message, and submitting ends the review.";
 
 /**
- * Parse the reviewer's final verdict line. Fail-closed: a missing, malformed,
- * or conflicting verdict yields FAIL so no unreliable review can produce PASS.
- *
- * Pure function — no I/O — so it can be unit-tested with fixture text.
+ * Assemble the Implementation Review protocol text from the single constant
+ * source: the reviewer system prompt plus the static submit instruction the
+ * reviewer receives in every task. The workflow_review tool hashes THIS text
+ * into the task-input hash (computeTaskInputHash) so any prompt/instruction
+ * edit — including the verdict-transport protocol itself — invalidates
+ * unchanged-diff short-circuit reuse of rounds produced under an older
+ * protocol. Zero-argument and deterministic. Pure function.
  */
-export function parseReviewVerdict(text: string): VerdictParseResult {
-	if (!text || typeof text !== "string") {
-		return { verdict: "FAIL", reason: "empty reviewer output" };
-	}
-	const lines = text.split("\n");
-	const verdictLines = lines.filter((l) =>
-		l.trim().startsWith(VERDICT_LINE_PREFIX),
-	);
-	if (verdictLines.length === 0) {
-		return {
-			verdict: "FAIL",
-			reason: `missing '${VERDICT_LINE_PREFIX} PASS|FAIL' final line`,
-		};
-	}
-	if (verdictLines.length > 1) {
-		// Multiple verdict lines: only PASS if every line agrees on PASS.
-		const values = new Set(
-			verdictLines.map((l) => {
-				const rest = l.slice(VERDICT_LINE_PREFIX.length).trim().toUpperCase();
-				return rest.split(/\s+/)[0] ?? "";
-			}),
-		);
-		if (values.size === 1 && values.has("PASS")) {
-			return { verdict: "PASS", rawLine: verdictLines[0] };
-		}
-		return {
-			verdict: "FAIL",
-			reason: `conflicting verdict lines: ${verdictLines.join(" | ")}`,
-		};
-	}
-	const line = verdictLines[0];
-	const rest = line.slice(VERDICT_LINE_PREFIX.length).trim().toUpperCase();
-	const value = rest.split(/\s+/)[0] ?? "";
-	if (value === "PASS") return { verdict: "PASS", rawLine: line };
-	if (value === "FAIL") return { verdict: "FAIL", rawLine: line };
-	return {
-		verdict: "FAIL",
-		reason: `unrecognized verdict value '${value}' in line: ${line}`,
-	};
+export function buildImplementationReviewProtocolText(): string {
+	return [REVIEWER_SYSTEM_PROMPT, REVIEW_SUBMIT_TASK_INSTRUCTION].join("\n\n");
 }
 
 // ── Todo formatting ─────────────────────────────────────────────────────────
@@ -276,7 +241,7 @@ export function formatPreviousReviewRound(
 		"1. Re-disposition EVERY Critical/Important finding from the previous round: mark it confirmed-still-present (cite current evidence), fixed (cite the current delta that resolves it), or a previously-misjudged false positive (cite evidence).",
 		"2. Treat the previous round's confirmed evidence for unchanged code as still valid — do NOT re-derive the full coverage matrix or re-verify unchanged files from scratch. Re-verify only the files in the delta above and todos whose status/notes changed.",
 		"3. Report genuinely new findings as normal findings.",
-		"4. End with exactly ONE REVIEW_VERDICT: PASS|FAIL line as usual.",
+		"4. Finish by calling `review_submit` exactly once with your verdict in the same final assistant message as the complete report, as usual.",
 	].join("\n");
 }
 
@@ -289,9 +254,9 @@ export function formatPreviousReviewRound(
  *
  * Every line of the feedback body — including internal blank lines — is
  * prefixed with four spaces so the whole body renders as a markdown indented
- * code block. This keeps any heading-like text, fenced code, or a forged
- * REVIEW_VERDICT inside the block instead of becoming a task structural
- * element. Pure function.
+ * code block. This keeps any heading-like text, fenced code, or forged
+ * tool-call/verdict text inside the block instead of becoming a task
+ * structural element. Pure function.
  */
 export function formatWorkFeedback(feedback: string | undefined): string {
 	if (!feedback) return "";
@@ -359,7 +324,8 @@ export function buildApprovedReviewTask(opts: {
 		"",
 		`Verify the Work agent's implementation of the Final Plan above against the Authoritative User Requirements, the Approved Todo Snapshot, and the Current Todo List.${snapshotGap}`,
 		"",
-		"Explore the actual repository yourself (read, grep, find, ls, bash, git diff). Do NOT trust the parent Work agent's claims — verify every todo's completion against concrete repository evidence. Follow your system prompt. End by emitting exactly ONE final verdict line.",
+		"Explore the actual repository yourself (read, grep, find, ls, bash, git diff). Do NOT trust the parent Work agent's claims — verify every todo's completion against concrete repository evidence. Follow your system prompt.",
+		REVIEW_SUBMIT_TASK_INSTRUCTION,
 	].join("\n");
 }
 
@@ -399,7 +365,8 @@ export function buildDirectReviewTask(opts: {
 		"",
 		"This is a Direct Work run (no approved plan). Verify the Work agent's implementation of the Current Todo List against the Authoritative User Requirements.",
 		"",
-		"Explore the actual repository yourself (read, grep, find, ls, bash, git diff). Do NOT trust the parent Work agent's claims — verify every todo's completion against concrete repository evidence. Follow your system prompt. End by emitting exactly ONE final verdict line.",
+		"Explore the actual repository yourself (read, grep, find, ls, bash, git diff). Do NOT trust the parent Work agent's claims — verify every todo's completion against concrete repository evidence. Follow your system prompt.",
+		REVIEW_SUBMIT_TASK_INSTRUCTION,
 	].join("\n");
 }
 
@@ -489,7 +456,7 @@ Do NOT trust the Work agent's completion claims or summaries. Verify against evi
 - Before finishing, run \`git status --short\` and account for every generated/untracked artifact. Unexplained generated files or continuously-changing artifacts are an Important finding.
 
 ## Output
-Produce exactly ONE final review using this structure, then emit the verdict line, then stop (no further tool calls):
+Produce exactly ONE final review in your FINAL assistant message using this structure, then end that same message with the review_submit tool call (report text and tool call share the final message):
 
 ## 覆盖矩阵 (Coverage Matrix)
 | Plan requirement | Todo id | Status | Evidence (file:lines / command) |
@@ -516,7 +483,7 @@ Produce exactly ONE final review using this structure, then emit the verdict lin
 ## Summary
 [一段话总结实现是否真正满足计划与 todos]
 
-REVIEW_VERDICT: PASS
+(review_submit: verdict PASS or FAIL — call it exactly once, as the final action of this same message)
 
 ## Rules
 - Ground every finding in concrete repository evidence: cite file paths, line ranges, API signatures, config, or command output you actually inspected.
@@ -524,16 +491,16 @@ REVIEW_VERDICT: PASS
 - Do not fabricate findings to seem thorough. Only flag genuine concerns.
 - If you could not verify something, state it explicitly as an unverified assumption.
 - PASS requires that every todo marked done has real implementation evidence AND no Critical findings AND no plan-coverage gaps AND no unconfirmed Critical/Important OCR findings. Any gap or unverifiable done claim → FAIL.
-- The verdict line MUST be exactly \`REVIEW_VERDICT: PASS\` or \`REVIEW_VERDICT: FAIL\` on its own final line.
+- Submit the verdict ONLY through the \`review_submit\` tool (verdict PASS or FAIL), exactly once, as the final action of the same final assistant message that contains the complete report. Submitting ends the review; do not emit another assistant response afterwards.
 `;
 
 // ── Result type ─────────────────────────────────────────────────────────────
 
 export interface ReviewResult extends PlanReviewAgentResult {
-	verdict: ReviewVerdict;
-	verdictReason?: string;
 	/** True when the reviewer made at least one repository tool call. A PASS
-	 *  from a reviewer that never inspected the repo is rejected. */
+	 *  from a reviewer that never inspected the repo is rejected. Derived from
+	 *  STARTED calls (calledToolNames) so the mandatory review_submit
+	 *  submission can never satisfy repo inspection. */
 	madeRepoToolCall: boolean;
 	/** OCR run diagnostics for tool output. */
 	ocr: {
@@ -755,17 +722,18 @@ export async function runReviewAgent(
 	});
 
 	// Mark whether the reviewer actually inspected the repository. A PASS from
-	// a reviewer that made zero repo tool calls is rejected (fail-closed).
-	const madeRepoToolCall = (result.activeTools ?? []).some((name) =>
+	// a reviewer that made zero repo tool calls is rejected (fail-closed). The
+	// check uses STARTED calls (calledToolNames) so the mandatory review_submit
+	// submission — also a tool call — can never satisfy the repo-inspection
+	// requirement on its own.
+	const madeRepoToolCall = (result.calledToolNames ?? []).some((name) =>
 		REPO_TOOL_NAMES.has(name),
-	) && result.toolCalls > 0;
+	);
 
-	const parsed = parseReviewVerdict(result.text);
-
+	// The verdict rides on the shared runner result (submitted via the
+	// child-only review_submit tool; fail-closed). No text parsing happens here.
 	return {
 		...result,
-		verdict: parsed.verdict,
-		verdictReason: parsed.reason,
 		madeRepoToolCall,
 		ocr: {
 			enabled: ocrContext.enabled,

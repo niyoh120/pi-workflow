@@ -16,10 +16,11 @@
  *     to [] (additive field, backward compatible).
  *  6. Source-level wiring: 30-minute total timeout, finally-dispose, nested
  *     usage propagation, single-optional-feedback tool contract.
- *  7. Plan Review round continuity: history persistence + hashes + section
+ *  7. review-agent pure functions + the terminating review_submit verdict
+ *     contract (schema enum, collector last-success-wins / fail-closed).
+ *  7b. Plan Review round continuity: history persistence + hashes + section
  *     delta + mode decision (pure fixtures), protocol single-source (task +
- *     protocol hash share one constant source), fail-closed verdict parsers
- *     locked together by one VERDICT_CASES array, strict successful-tool
+ *     protocol hash share one constant source), strict successful-tool
  *     evidence, effective-verdict downgrade, short-circuit wiring, and the
  *     /wf-reset / prompt / README wiring.
  *
@@ -100,6 +101,15 @@ function extractConst(src, anchor) {
 	return src.slice(start, end + 1) + ";";
 }
 
+/** Extract a `export const NAME = ...;` single-statement source up to its
+ *  terminating semicolon (string/template consts of any shape). */
+function extractConstDecl(src, anchor) {
+	const start = src.indexOf(anchor);
+	if (start < 0) return "";
+	const end = src.indexOf(";\n", start);
+	return end < 0 ? "" : src.slice(start, end + 1);
+}
+
 /** Write source to a temp .ts module and import it (Node 24 type stripping). */
 async function loadTsModule(src) {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pr-review-ts-"));
@@ -107,6 +117,21 @@ async function loadTsModule(src) {
 	fs.writeFileSync(file, src, "utf8");
 	try {
 		// Cache-bust query so repeated runs in the same process re-evaluate.
+		return await import(pathToFileURL(file).href + "?t=" + Date.now());
+	} finally {
+		fs.rmSync(tmp, { recursive: true, force: true });
+	}
+}
+
+/** Like loadTsModule, but the temp module lives under the REPO root so bare
+ *  specifiers (typebox, @earendil-works/*) resolve against the project's
+ *  node_modules. Node type stripping skips node_modules itself, so the
+ *  directory sits at the repo top level and is always removed afterwards. */
+async function loadTsModuleInRepo(src) {
+	const tmp = fs.mkdtempSync(path.join(root, ".pr-review-ts-"));
+	const file = path.join(tmp, "mod.ts");
+	fs.writeFileSync(file, src, "utf8");
+	try {
 		return await import(pathToFileURL(file).href + "?t=" + Date.now());
 	} finally {
 		fs.rmSync(tmp, { recursive: true, force: true });
@@ -475,13 +500,13 @@ console.log("\n=== Part 7: review-agent pure functions ===");
 	const reviewTs = read("extensions/workflow/review-agent.ts");
 	assert(reviewTs.includes("export async function runReviewAgent"), "review-agent.ts exports runReviewAgent");
 	assert(reviewTs.includes("REVIEWER_SYSTEM_PROMPT"), "review-agent.ts defines its own system prompt");
-	assert(reviewTs.includes("VERDICT_LINE_PREFIX"), "review-agent.ts exports VERDICT_LINE_PREFIX");
+	assert(!/VERDICT_LINE_PREFIX|parseReviewVerdict/.test(reviewTs), "review-agent.ts no longer declares a text verdict prefix/parser");
 	assert(reviewTs.includes("runIndependentReviewer"), "review-agent.ts delegates to the shared runner");
 	assert(reviewTs.includes("reviewCwd"), "review-agent.ts runs in the validated review cwd");
 	assert(reviewTs.includes("primaryCwd"), "review-agent.ts passes primaryCwd for dual-root guard");
 	assert(reviewTs.includes("madeRepoToolCall"), "review-agent.ts tracks whether the reviewer inspected the repo");
 	assert(reviewTs.includes("REPO_TOOL_NAMES"), "review-agent.ts defines REPO_TOOL_NAMES for repo-inspection detection");
-	assert(/REVIEW_VERDICT: PASS/.test(reviewTs), "review-agent.ts system prompt includes the PASS verdict example matching VERDICT_LINE_PREFIX");
+	assert(/review_submit/.test(reviewTs), "review-agent.ts carries the review_submit verdict transport");
 	// OCR wiring: enabled branch runs OCR + parse; disabled branch skips.
 	assert(reviewTs.includes("includeOcr"), "review-agent.ts takes an includeOcr flag");
 	assert(/runOcrReview\(/.test(reviewTs), "review-agent.ts enabled branch calls runOcrReview");
@@ -498,27 +523,61 @@ console.log("\n=== Part 7: review-agent pure functions ===");
 	assert(/cannot waive requirements|cannot.*waive a requirement/i.test(reviewTs), "REVIEWER_SYSTEM_PROMPT: feedback cannot waive requirements");
 	assert(/support a PASS on its own|justify a PASS by itself|cannot.*support PASS/i.test(reviewTs), "REVIEWER_SYSTEM_PROMPT: feedback cannot support PASS alone");
 
-	// ── verdict parser (pure fixture) ──
-	const vpFn = extractDecl(reviewTs, "export function parseReviewVerdict(");
-	assert(vpFn.length > 0, "Part 7: parseReviewVerdict extracted");
-	const vpMod = await loadTsModule([
-		'export const VERDICT_LINE_PREFIX = "REVIEW_VERDICT:";',
-		vpFn,
+	// ── terminating review_submit verdict contract (behavioral fixture) ──
+	const submitNameDecl = extractConstDecl(agentTs, "export const REVIEW_SUBMIT_TOOL_NAME");
+	// review-agent re-exports nothing; the submit machinery lives in the shared
+	// runner module (plan-review-agent.ts). Load the REAL declarations with the
+	// REAL typebox + StringEnum so the schema assertion exercises the actual
+	// rendering, not a stub.
+	const submitMod = await loadTsModuleInRepo([
+		'import { StringEnum } from "@earendil-works/pi-ai";',
+		'import { Type } from "typebox";',
+		submitNameDecl,
+		extractDecl(agentTs, "export const ReviewSubmitVerdictSchema"),
+		"export type ReviewerVerdict = \"PASS\" | \"FAIL\";",
+		extractDecl(agentTs, "export interface ReviewSubmitCollector"),
+		extractDecl(agentTs, "export function createReviewSubmitCollector"),
+		extractDecl(agentTs, "export function createReviewSubmitExtension"),
 	].join("\n\n"));
 
-	const passText = "## Summary\nok\nREVIEW_VERDICT: PASS";
-	assert(vpMod.parseReviewVerdict(passText).verdict === "PASS", "verdict parser: exact PASS line → PASS");
-	const failText = "## Summary\nissues found\nREVIEW_VERDICT: FAIL";
-	assert(vpMod.parseReviewVerdict(failText).verdict === "FAIL", "verdict parser: exact FAIL line → FAIL");
-	const noVerdict = vpMod.parseReviewVerdict("## Summary\nno verdict here");
-	assert(noVerdict.verdict === "FAIL" && noVerdict.reason, "verdict parser: missing verdict line → FAIL with reason");
-	assert(vpMod.parseReviewVerdict("").verdict === "FAIL", "verdict parser: empty text → FAIL");
-	const conflicting = vpMod.parseReviewVerdict("REVIEW_VERDICT: PASS\nREVIEW_VERDICT: FAIL");
-	assert(conflicting.verdict === "FAIL", "verdict parser: conflicting verdict lines → FAIL");
-	const multiPass = vpMod.parseReviewVerdict("REVIEW_VERDICT: PASS\nREVIEW_VERDICT: PASS");
-	assert(multiPass.verdict === "PASS", "verdict parser: multiple agreeing PASS lines → PASS");
-	const badValue = vpMod.parseReviewVerdict("REVIEW_VERDICT: MAYBE");
-	assert(badValue.verdict === "FAIL", "verdict parser: unrecognized verdict value → FAIL");
+	assert(submitMod.REVIEW_SUBMIT_TOOL_NAME === "review_submit", "review_submit is the shared submit tool name");
+
+	// Collector: fail-closed on zero submissions, last-success-wins on repeats.
+	const empty = submitMod.createReviewSubmitCollector().resolve();
+	assert(empty.verdict === "FAIL" && empty.verdictReason === "reviewer did not call review_submit", "collector: zero submissions → FAIL with explicit reason");
+	const passOnly = submitMod.createReviewSubmitCollector();
+	passOnly.submit("PASS");
+	const passRes = passOnly.resolve();
+	assert(passRes.verdict === "PASS" && passRes.verdictReason === undefined, "collector: single PASS submission → PASS without reason");
+	const repeat = submitMod.createReviewSubmitCollector();
+	repeat.submit("PASS");
+	repeat.submit("FAIL");
+	assert(repeat.resolve().verdict === "FAIL", "collector: repeated submissions — last success wins (PASS then FAIL → FAIL)");
+	const repeatBack = submitMod.createReviewSubmitCollector();
+	repeatBack.submit("FAIL");
+	repeatBack.submit("PASS");
+	assert(repeatBack.resolve().verdict === "PASS", "collector: repeated submissions — last success wins (FAIL then PASS → PASS)");
+
+	// Extension: registers the terminating tool wired to the collector.
+	let capturedTool = null;
+	const fakeSubmitPi = { registerTool: (def) => { capturedTool = def; } };
+	const collectorForExt = submitMod.createReviewSubmitCollector();
+	submitMod.createReviewSubmitExtension(collectorForExt).factory(fakeSubmitPi);
+	assert(capturedTool && capturedTool.name === submitMod.REVIEW_SUBMIT_TOOL_NAME, "submit extension registers the review_submit tool");
+	assert(capturedTool.executionMode === "sequential", "review_submit executes sequentially");
+	// Schema: real TypeBox + StringEnum render a plain string enum limited to PASS/FAIL.
+	const verdictSchema = capturedTool.parameters.properties.verdict;
+	assert(verdictSchema && verdictSchema.type === "string", "review_submit verdict parameter is a string enum");
+	assert(JSON.stringify(verdictSchema.enum) === JSON.stringify(["PASS", "FAIL"]), "review_submit verdict enum is exactly PASS|FAIL");
+	assert(JSON.stringify(capturedTool.parameters.required) === JSON.stringify(["verdict"]), "verdict is the single required parameter");
+	// execute → terminate + collector write.
+	const passResult = await capturedTool.execute("tc-1", { verdict: "PASS" }, undefined, undefined, {});
+	assert(passResult.terminate === true, "review_submit result terminates the agent loop");
+	assert(passResult.details && passResult.details.verdict === "PASS", "review_submit result details carry the verdict");
+	assert(passResult.content && passResult.content[0].type === "text", "review_submit returns text content");
+	assert(collectorForExt.resolve().verdict === "PASS", "execute routes the submission into the runner-owned collector");
+	const failResult = await capturedTool.execute("tc-2", { verdict: "FAIL" }, undefined, undefined, {});
+	assert(failResult.terminate === true && collectorForExt.resolve().verdict === "FAIL", "a later FAIL submission overwrites the earlier PASS (last-success-wins)");
 
 	// ── OCR context + task builders (pure fixture) ──
 	const approvedFn = extractDecl(reviewTs, "export function buildApprovedReviewTask(");
@@ -551,7 +610,9 @@ console.log("\n=== Part 7: review-agent pure functions ===");
 	};
 
 	// Approved task builder fixture — OCR enabled with findings.
-	const approvedMod = await loadTsModule(fmtFn + "\n\n" + fmtFindingsFn + "\n\n" + renderOcrFn + "\n\n" + prevRoundFn + "\n\n" + fmtFeedbackFn + "\n\n" + approvedFn);
+	const submitInstrDecl = extractConstDecl(reviewTs, "export const REVIEW_SUBMIT_TASK_INSTRUCTION");
+	assert(submitInstrDecl.length > 0, "Part 7: REVIEW_SUBMIT_TASK_INSTRUCTION extracted");
+	const approvedMod = await loadTsModule(submitInstrDecl + "\n\n" + fmtFn + "\n\n" + fmtFindingsFn + "\n\n" + renderOcrFn + "\n\n" + prevRoundFn + "\n\n" + fmtFeedbackFn + "\n\n" + approvedFn);
 	const approvedTaskOcr = approvedMod.buildApprovedReviewTask({
 		requirements: ["build feature X"],
 		planMarkdown: "# Final Plan\n## Goal\nDo X",
@@ -566,6 +627,7 @@ console.log("\n=== Part 7: review-agent pure functions ===");
 	assert(approvedTaskOcr.includes("OCR Workspace Findings"), "Approved task includes OCR findings section (enabled)");
 	assert(approvedTaskOcr.includes("NPE risk"), "Approved task embeds the OCR finding message");
 	assert(approvedTaskOcr.includes("Disposition EVERY OCR finding"), "Approved task requires per-finding disposition");
+	assert(/review_submit/.test(approvedTaskOcr) && /exactly once/.test(approvedTaskOcr), "Approved task ends with the review_submit final-action instruction");
 	assert(approvedTaskOcr.includes("false positive"), "Approved task requires false-positive evidence");
 	// Isolation: no parent diff/summary/test claims.
 	assert(!/Parent Execution Summary|Parent Diff|Test Results Claim|passed tests:/i.test(approvedTaskOcr), "Approved task excludes parent execution summary / diff output / test claims");
@@ -591,7 +653,7 @@ console.log("\n=== Part 7: review-agent pure functions ===");
 	assert(gapTask.includes("Approved todo snapshot is MISSING"), "Approved task flags missing snapshot gap");
 
 	// Direct task builder fixture — OCR enabled.
-	const directMod = await loadTsModule(fmtFn + "\n\n" + fmtFindingsFn + "\n\n" + renderOcrFn + "\n\n" + prevRoundFn + "\n\n" + fmtFeedbackFn + "\n\n" + directFn);
+	const directMod = await loadTsModule(submitInstrDecl + "\n\n" + fmtFn + "\n\n" + fmtFindingsFn + "\n\n" + renderOcrFn + "\n\n" + prevRoundFn + "\n\n" + fmtFeedbackFn + "\n\n" + directFn);
 	const directTaskOcr = directMod.buildDirectReviewTask({
 		requirements: ["fix bug Y"],
 		currentTodos: [{ id: "T1", title: "fix Y", status: "done" }],
@@ -602,6 +664,7 @@ console.log("\n=== Part 7: review-agent pure functions ===");
 	assert(!directTaskOcr.includes("Final Plan"), "Direct task does NOT include a Final Plan");
 	assert(!directTaskOcr.includes("Approved Todo Snapshot"), "Direct task does NOT include approved todo snapshot");
 	assert(directTaskOcr.includes("Disposition EVERY OCR finding"), "Direct task requires per-finding disposition when OCR enabled");
+	assert(/review_submit/.test(directTaskOcr), "Direct task ends with the review_submit final-action instruction");
 
 	// ── Work feedback formatter + builder injection (pure fixture) ──
 	assert(approvedMod.formatWorkFeedback(undefined) === "", "formatWorkFeedback(undefined) returns empty string");
@@ -665,7 +728,7 @@ console.log("\n=== Part 7: review-agent pure functions ===");
 	assert(prevSection.includes("Verdict: FAIL"), "previous round section carries the previous verdict");
 	assert(prevSection.includes("src/a.ts"), "previous round section lists the changed files");
 	assert(prevSection.includes("Re-disposition EVERY Critical/Important"), "previous round section requires re-disposition of prior findings");
-	assert(prevSection.includes("REVIEW_VERDICT: PASS|FAIL"), "previous round section keeps the verdict-line requirement");
+	assert(/review_submit/.test(prevSection) && /exactly once/.test(prevSection), "previous round section keeps the review_submit final-action requirement");
 	const unknownSection = approvedMod.formatPreviousReviewRound({
 		round: 2,
 		verdict: "FAIL",
@@ -798,6 +861,8 @@ console.log("\n=== Part 8b: review-round history helpers ===");
 	assert(pathsTs.includes("export function reviewHistoryPath"), "paths.ts exports reviewHistoryPath");
 	assert(toolsTs.includes("saveReviewRound("), "workflow_review persists each review round");
 	assert(toolsTs.includes("computeWorkspaceDiffSnapshot("), "workflow_review computes the workspace diff snapshot");
+	assert(/const protocolText = buildImplementationReviewProtocolText\(\);/.test(toolsTs), "workflow_review snapshots the implementation reviewer protocol text once");
+	assert(/computeTaskInputHash\(\{[\s\S]*?protocolText,/.test(toolsTs), "the protocol text feeds the review task-input hash");
 	assert(toolsTs.includes("loadReviewHistory("), "workflow_review loads prior round history");
 	assert(toolsTs.includes("shortCircuited"), "workflow_review short-circuits identical rounds");
 	assert(toolsTs.includes("cachedOcr"), "workflow_review reuses cached OCR findings on unchanged diffs");
@@ -852,11 +917,14 @@ console.log("\n=== Part 8b: review-round history helpers ===");
 	assert(bounded.startsWith("HEAD-") && bounded.endsWith("-TAIL"), "boundedHeadTail keeps head and tail");
 	assert(histMod.boundedHeadTail("short", 200) === "short", "boundedHeadTail passes through short text unchanged");
 
-	const taskA = histMod.computeTaskInputHash({ requirements: ["r"], todos: todosA, includeOcr: true, reviewModel: "p/m", planMarkdown: "# P" });
-	const taskB = histMod.computeTaskInputHash({ requirements: ["r"], todos: todosA, includeOcr: true, reviewModel: "p/m", planMarkdown: "# P" });
-	const taskC = histMod.computeTaskInputHash({ requirements: ["r2"], todos: todosA, includeOcr: true, reviewModel: "p/m", planMarkdown: "# P" });
+	const taskBaseInput = { requirements: ["r"], todos: todosA, includeOcr: true, reviewModel: "p/m", planMarkdown: "# P", protocolText: "PROTO-V1" };
+	const taskA = histMod.computeTaskInputHash(taskBaseInput);
+	const taskB = histMod.computeTaskInputHash({ ...taskBaseInput });
+	const taskC = histMod.computeTaskInputHash({ ...taskBaseInput, requirements: ["r2"] });
+	const taskProto = histMod.computeTaskInputHash({ ...taskBaseInput, protocolText: "PROTO-V2" });
 	assert(taskA === taskB, "task input hash is stable for equal inputs");
 	assert(taskA !== taskC, "task input hash changes when a requirement changes");
+	assert(taskA !== taskProto, "task input hash changes when the reviewer protocol text changes (old-protocol caches invalidate)");
 
 	// ── normalizeWorkFeedback + feedback-aware task hash ──
 	assert(histMod.normalizeWorkFeedback(undefined) === undefined, "normalizeWorkFeedback(undefined) → undefined");
@@ -873,10 +941,11 @@ console.log("\n=== Part 8b: review-round history helpers ===");
 	// Idempotent: re-normalizing a bounded result is a no-op.
 	assert(histMod.normalizeWorkFeedback(boundedFeedback) === boundedFeedback, "normalizeWorkFeedback is idempotent");
 
-	const hashBase = { requirements: ["r"], todos: todosA, includeOcr: true, reviewModel: "p/m", planMarkdown: "# P" };
+	const hashBase = { requirements: ["r"], todos: todosA, includeOcr: true, reviewModel: "p/m", planMarkdown: "# P", protocolText: "PROTO-V1" };
 	const noFeedbackHash = histMod.computeTaskInputHash(hashBase);
-	// Legacy (pre-feedback) body algorithm: no feedback key at all. The new
-	// computeTaskInputHash MUST reproduce it byte-for-byte for a no-feedback call.
+	// The body algorithm is the pre-feedback algorithm PLUS the protocolText
+	// key: a no-feedback call stays byte-identical to that shape, so the ONLY
+	// intentional hash break across this upgrade is the protocol itself.
 	function legacyTaskInputHash(input) {
 		const body = {
 			requirements: input.requirements,
@@ -885,10 +954,11 @@ console.log("\n=== Part 8b: review-round history helpers ===");
 			todos: input.todos.map((t) => [t.id, t.title, t.status, t.notes ?? ""]),
 			includeOcr: input.includeOcr,
 			reviewModel: input.reviewModel,
+			protocolText: input.protocolText,
 		};
 		return crypto.createHash("sha1").update(JSON.stringify(body)).digest("hex");
 	}
-	assert(noFeedbackHash === legacyTaskInputHash(hashBase), "no-feedback hash matches the pre-feedback body algorithm (upgrade-safe)");
+	assert(noFeedbackHash === legacyTaskInputHash(hashBase), "no-feedback hash matches the pre-feedback body algorithm + protocolText key (single intentional break)");
 	// Absent / blank / empty feedback all hash like no feedback (no key added).
 	assert(histMod.computeTaskInputHash({ ...hashBase, feedback: undefined }) === noFeedbackHash, "undefined feedback hashes like no feedback");
 	assert(histMod.computeTaskInputHash({ ...hashBase, feedback: "" }) === noFeedbackHash, "empty feedback hashes like no feedback");
@@ -1431,67 +1501,26 @@ console.log("\n=== Part 11: plan-review history pure functions ===");
 console.log("\n=== Part 12: protocol single source + verdicts + evidence ===");
 
 {
-	// ── one VERDICT_CASES array drives BOTH parsers ──
+	// ── text verdict transport is gone from both reviewers ──
 	const reviewTs = read("extensions/workflow/review-agent.ts");
-	const planParserFn = extractDecl(agentTs, "export function parsePlanReviewVerdict(");
-	const reviewParserFn = extractDecl(reviewTs, "export function parseReviewVerdict(");
-	assert(planParserFn.length > 0 && reviewParserFn.length > 0, "Part 12: both verdict parsers extracted");
-	const planVpMod = await loadTsModule([
-		'export const PLAN_REVIEW_VERDICT_LINE_PREFIX = "PLAN_REVIEW_VERDICT:";',
-		planParserFn,
-	].join("\n\n"));
-	const reviewVpMod = await loadTsModule([
-		'export const VERDICT_LINE_PREFIX = "REVIEW_VERDICT:";',
-		reviewParserFn,
-	].join("\n\n"));
-
-	// The SINGLE fixture array. Each case's text is templated with the parser's
-	// own prefix; any fail-closed rule change must keep both parsers aligned.
-	const VERDICT_CASES = [
-		{ name: "exact PASS line", text: "## Summary\nok\n{P} PASS", expectedVerdict: "PASS" },
-		{ name: "exact FAIL line", text: "## Summary\nissues found\n{P} FAIL", expectedVerdict: "FAIL", expectReason: false },
-		{ name: "missing verdict line", text: "## Summary\nno verdict here", expectedVerdict: "FAIL", expectReason: true },
-		{ name: "empty text", text: "", expectedVerdict: "FAIL", expectReason: true },
-		{ name: "conflicting verdict lines", text: "{P} PASS\n{P} FAIL", expectedVerdict: "FAIL", expectReason: true },
-		{ name: "multiple agreeing PASS lines", text: "{P} PASS\n{P} PASS", expectedVerdict: "PASS" },
-		{ name: "unrecognized verdict value", text: "{P} MAYBE", expectedVerdict: "FAIL", expectReason: true },
-	];
-	for (const parser of [
-		{ label: "plan", mod: planVpMod, prefix: "PLAN_REVIEW_VERDICT:" },
-		{ label: "review", mod: reviewVpMod, prefix: "REVIEW_VERDICT:" },
-	]) {
-		for (const c of VERDICT_CASES) {
-			const out = parser.mod.parsePlanReviewVerdict
-				? parser.mod.parsePlanReviewVerdict(c.text.replaceAll("{P}", parser.prefix))
-				: parser.mod.parseReviewVerdict(c.text.replaceAll("{P}", parser.prefix));
-			assert(out.verdict === c.expectedVerdict, `[${parser.label} parser] ${c.name} → ${c.expectedVerdict}`);
-			if (c.expectReason) {
-				assert(!!out.reason, `[${parser.label} parser] ${c.name} carries a fail-closed reason`);
-			}
-		}
+	assert(!/parsePlanReviewVerdict|parseReviewVerdict|VERDICT_CASES/.test(agentTs), "plan-review-agent.ts has no text verdict parser");
+	assert(!/parseReviewVerdict|VERDICT_CASES/.test(reviewTs), "review-agent.ts has no text verdict parser");
+	for (const file of ["extensions/workflow/plan-review-agent.ts", "extensions/workflow/review-agent.ts", "extensions/workflow/tools.ts", "extensions/workflow/prompts.ts", "extensions/workflow/index.ts"]) {
+		const s = read(file);
+		assert(!/PLAN_REVIEW_VERDICT|REVIEW_VERDICT:/.test(s), `${file} has no old verdict prefix contract`);
 	}
-	// Cross-pollination: the PLAN prefix must not satisfy the Review parser and vice versa.
-	assert(reviewVpMod.parseReviewVerdict("PLAN_REVIEW_VERDICT: PASS").verdict === "FAIL", "REVIEW parser does not accept the PLAN_REVIEW_VERDICT prefix");
-	assert(planVpMod.parsePlanReviewVerdict("REVIEW_VERDICT: PASS").verdict === "FAIL", "PLAN parser does not accept the REVIEW_VERDICT prefix");
 
 	// ── protocol single-source: task + protocol hash share the constants ──
-	function extractConstDecl(src, anchor) {
-		const start = src.indexOf(anchor);
-		if (start < 0) return "";
-		const end = src.indexOf(";\n", start);
-		return end < 0 ? "" : src.slice(start, end + 1);
-	}
 	const protoMod = await loadTsModule(
 		[
 			'import path from "node:path";',
 			'import { tmpdir } from "node:os";',
-			extractConstDecl(agentTs, "export const PLAN_REVIEW_VERDICT_LINE_PREFIX"),
 			extractConstDecl(agentTs, "export const PLAN_REVIEW_TASK_REQUIREMENTS_HEADING"),
 			extractConstDecl(agentTs, "export const PLAN_REVIEW_TASK_DECISIONS_HEADING"),
 			extractConstDecl(agentTs, "export const PLAN_REVIEW_TASK_PLAN_HEADING"),
 			extractConstDecl(agentTs, "export const PLAN_REVIEW_TASK_ASSIGNMENT_HEADING"),
 			extractConstDecl(agentTs, "export const PLAN_REVIEW_ASSIGNMENT_INSTRUCTION"),
-			extractConstDecl(agentTs, "export const PLAN_REVIEW_VERDICT_INSTRUCTION"),
+			extractConstDecl(agentTs, "export const PLAN_REVIEW_SUBMIT_INSTRUCTION"),
 			extractConstDecl(agentTs, "export const PLAN_REVIEW_PREVIOUS_ROUND_HEADING"),
 			extractConstDecl(agentTs, "export const PLAN_REVIEW_INCREMENTAL_INSTRUCTIONS"),
 			extractConstDecl(agentTs, "export const PLAN_REVIEW_FEEDBACK_HEADING"),
@@ -1508,13 +1537,16 @@ console.log("\n=== Part 12: protocol single source + verdicts + evidence ===");
 
 	const protocolText = protoMod.buildPlanReviewProtocolText();
 	assert(typeof protocolText === "string" && protocolText.length > 0, "buildPlanReviewProtocolText returns non-empty text");
+	assert(/review_submit/.test(protocolText), "plan protocol text carries the review_submit submit contract (basis hash invalidates old-protocol rounds)");
+	assert(/exactly once/i.test(protocolText), "plan protocol text requires submitting exactly once");
+	assert(!/PLAN_REVIEW_VERDICT|REVIEW_VERDICT:/.test(protocolText), "plan protocol text has no old verdict-line contract");
 	for (const [name, value] of Object.entries({
 		PLAN_REVIEW_TASK_REQUIREMENTS_HEADING: protoMod.PLAN_REVIEW_TASK_REQUIREMENTS_HEADING,
 		PLAN_REVIEW_TASK_DECISIONS_HEADING: protoMod.PLAN_REVIEW_TASK_DECISIONS_HEADING,
 		PLAN_REVIEW_TASK_PLAN_HEADING: protoMod.PLAN_REVIEW_TASK_PLAN_HEADING,
 		PLAN_REVIEW_TASK_ASSIGNMENT_HEADING: protoMod.PLAN_REVIEW_TASK_ASSIGNMENT_HEADING,
 		PLAN_REVIEW_ASSIGNMENT_INSTRUCTION: protoMod.PLAN_REVIEW_ASSIGNMENT_INSTRUCTION,
-		PLAN_REVIEW_VERDICT_INSTRUCTION: protoMod.PLAN_REVIEW_VERDICT_INSTRUCTION,
+		PLAN_REVIEW_SUBMIT_INSTRUCTION: protoMod.PLAN_REVIEW_SUBMIT_INSTRUCTION,
 		PLAN_REVIEW_PREVIOUS_ROUND_HEADING: protoMod.PLAN_REVIEW_PREVIOUS_ROUND_HEADING,
 		PLAN_REVIEW_INCREMENTAL_INSTRUCTIONS: protoMod.PLAN_REVIEW_INCREMENTAL_INSTRUCTIONS,
 		PLAN_REVIEW_FEEDBACK_HEADING: protoMod.PLAN_REVIEW_FEEDBACK_HEADING,
@@ -1523,6 +1555,25 @@ console.log("\n=== Part 12: protocol single source + verdicts + evidence ===");
 	})) {
 		assert(protocolText.includes(value), `protocol text includes ${name} (single constant source drives the hash)`);
 	}
+
+	// ── Implementation Review protocol text: single construction function ──
+	const implProtoFn = extractDecl(reviewTs, "export function buildImplementationReviewProtocolText(");
+	const implSubmitInstrDecl = extractConstDecl(reviewTs, "export const REVIEW_SUBMIT_TASK_INSTRUCTION");
+	assert(implProtoFn.length > 0 && implSubmitInstrDecl.length > 0, "Part 12: buildImplementationReviewProtocolText + REVIEW_SUBMIT_TASK_INSTRUCTION extracted");
+	const implSysDecl = extractConstDecl(reviewTs, "export const REVIEWER_SYSTEM_PROMPT");
+	const implProtoMod = await loadTsModule([
+		'import path from "node:path";',
+		'import { tmpdir } from "node:os";',
+		implSysDecl,
+		implSubmitInstrDecl,
+		implProtoFn,
+	].join("\n\n"));
+	const implProtocolText = implProtoMod.buildImplementationReviewProtocolText();
+	assert(typeof implProtocolText === "string" && implProtocolText.length > 0, "buildImplementationReviewProtocolText returns non-empty text");
+	assert(/review_submit/.test(implProtocolText), "implementation protocol text carries the review_submit submit contract");
+	assert(/exactly once/i.test(implProtocolText), "implementation protocol text requires submitting exactly once");
+	assert(implProtocolText === implProtoMod.buildImplementationReviewProtocolText(), "implementation protocol text is deterministic");
+	assert(!/REVIEW_VERDICT:/.test(implProtocolText), "implementation protocol text has no old verdict-line contract");
 
 	// Task assembly uses the SAME constants (no inline copies).
 	const firstTask = protoMod.buildReviewerTask({
@@ -1589,35 +1640,53 @@ console.log("\n=== Part 12: protocol single source + verdicts + evidence ===");
 	assert(fbTask.includes(protoMod.PLAN_REVIEW_FEEDBACK_INSTRUCTIONS), "feedback section carries the trust rules constant");
 	assert(fbTask.includes("cannot waive a requirement"), "feedback trust rules forbid waiving requirements");
 
-	// System prompt: final verdict line + PASS conditions.
+	// System prompt: terminating submit contract + PASS conditions.
 	const sys = protoMod.REVIEWER_SYSTEM_PROMPT;
-	assert(sys.includes("PLAN_REVIEW_VERDICT: PASS"), "system prompt shows the PASS verdict example");
-	assert(sys.includes("PLAN_REVIEW_VERDICT: FAIL"), "system prompt shows the FAIL verdict example");
+	assert(/review_submit/.test(sys), "system prompt names the review_submit tool");
+	assert(/exactly once/.test(sys), "system prompt requires submitting exactly once");
+	assert(/final assistant message/i.test(sys), "system prompt requires the report and submit call in the same final assistant message");
 	assert(/inspected the repository yourself/.test(sys), "PASS condition requires the reviewer to have inspected the repository");
-	assert(!/\bREVIEW_VERDICT:/.test(sys), "plan reviewer system prompt uses only the PLAN_REVIEW_VERDICT prefix");
+	assert(!/PLAN_REVIEW_VERDICT|REVIEW_VERDICT:/.test(sys), "plan reviewer system prompt has no text verdict line contract");
 
-	// ── successful-tool evidence (source-level wiring) ──
+	// ── called/successful tool evidence (source-level wiring) ──
+	assert(agentTs.includes("calledToolNames?: string[]"), "PlanReviewAgentResult.calledToolNames is optional (Review short-circuit literals stay compilable)");
 	assert(agentTs.includes("successfulToolNames?: string[]"), "PlanReviewAgentResult.successfulToolNames is optional (Review short-circuit literals stay compilable)");
+	assert(/case "tool_execution_start"[\s\S]*?calledToolNames\.push\(event\.toolName\)/.test(agentTs), "calledToolNames records every STARTED tool execution");
 	assert(agentTs.includes('case "tool_execution_end"'), "shared runner subscribes to tool_execution_end");
 	assert(/if \(event\.isError === false\) successfulToolNames\.push\(event\.toolName\)/.test(agentTs), "successfulToolNames collects only isError === false completions (blocked/errored calls excluded)");
 	assert(/opts\.toolSurface \?\? reconstructReviewerToolSurface\(pi\)/.test(agentTs), "shared runner falls back to internal tool-surface reconstruction when toolSurface omitted");
-	assert(agentTs.includes("PLAN_REPO_TOOL_NAMES"), "PLAN_REPO_TOOL_NAMES defined for strict repo-evidence detection");
-	const repoNamesConst = extractConst(agentTs, "const PLAN_REPO_TOOL_NAMES = new Set(");
-	assert(repoNamesConst.length > 0, "Part 12: PLAN_REPO_TOOL_NAMES extracted");
+	assert(agentTs.includes("tools: [...requestedTools, REVIEW_SUBMIT_TOOL_NAME]"), "child tools allowlist appends the review_submit tool (extension tools are allowlist-gated)");
+	assert(!/requestedTools,\s*\n\s*activeTools[\s\S]{0,200}review_submit/.test(agentTs), "requestedTools diagnostics describe only the inherited information surface");
+	assert(agentTs.includes("verdict: submitted.verdict"), "shared runner returns the fail-closed submitted verdict");
+	assert(/const submitted = submitCollector\.resolve\(\);/.test(agentTs), "runner resolves the collector after the child session settles");
+
+	// Repo-evidence sets exclude review_submit (behavioral, real sets).
+	const planRepoMod = await loadTsModule(extractConst(agentTs, "const PLAN_REPO_TOOL_NAMES = new Set(").replace("const ", "export const "));
+	assert(planRepoMod.PLAN_REPO_TOOL_NAMES instanceof Set, "Part 12: PLAN_REPO_TOOL_NAMES extracted");
 	for (const t of ["read", "bash", "grep", "find", "ls"]) {
-		assert(repoNamesConst.includes(`"${t}"`), `PLAN_REPO_TOOL_NAMES includes '${t}'`);
+		assert(planRepoMod.PLAN_REPO_TOOL_NAMES.has(t), `PLAN_REPO_TOOL_NAMES includes '${t}'`);
 	}
-	assert(!repoNamesConst.includes('"edit"') && !repoNamesConst.includes('"write"'), "PLAN_REPO_TOOL_NAMES excludes mutating tools");
+	assert(!planRepoMod.PLAN_REPO_TOOL_NAMES.has("edit") && !planRepoMod.PLAN_REPO_TOOL_NAMES.has("write"), "PLAN_REPO_TOOL_NAMES excludes mutating tools");
+	assert(!planRepoMod.PLAN_REPO_TOOL_NAMES.has("review_submit"), "PLAN_REPO_TOOL_NAMES excludes review_submit (submit never satisfies Plan evidence)");
+	const implRepoMod = await loadTsModule(extractConst(reviewTs, "const REPO_TOOL_NAMES = new Set(").replace("const ", "export const "));
+	assert(implRepoMod.REPO_TOOL_NAMES instanceof Set, "Part 12: REPO_TOOL_NAMES extracted");
+	assert(!implRepoMod.REPO_TOOL_NAMES.has("review_submit"), "REPO_TOOL_NAMES excludes review_submit (mandatory submit never satisfies Implementation evidence)");
+	// Behavioral evidence judgments mirror the shipped expressions.
+	assert(!["review_submit"].some((n) => implRepoMod.REPO_TOOL_NAMES.has(n)), "submit-only tool calls do NOT satisfy Implementation repo evidence");
+	assert(["read"].some((n) => implRepoMod.REPO_TOOL_NAMES.has(n)), "a started repo tool satisfies Implementation repo evidence");
+	assert(!["review_submit"].some((n) => planRepoMod.PLAN_REPO_TOOL_NAMES.has(n)), "submit-only completions do NOT satisfy Plan repo evidence");
+	assert(["read"].every((n) => planRepoMod.PLAN_REPO_TOOL_NAMES.has(n)), "a successful repo tool completion satisfies Plan repo evidence");
+	assert(/madeRepoToolCall = \(result\.calledToolNames \?\? \[\]\)\.some\(\(name\) =>\s*REPO_TOOL_NAMES\.has\(name\)/.test(reviewTs), "Implementation madeRepoToolCall derives from calledToolNames ∩ REPO_TOOL_NAMES");
 	assert(/hasSuccessfulRepoInspection = successful\.some\(\(name\) =>\s*PLAN_REPO_TOOL_NAMES\.has\(name\)/.test(agentTs), "runPlanReviewAgent derives hasSuccessfulRepoInspection from successfulToolNames ∩ PLAN_REPO_TOOL_NAMES");
 	assert(agentTs.includes("export interface PlanReviewResult extends PlanReviewAgentResult"), "PlanReviewResult extends the shared runner result");
-	assert(/verdict: PlanReviewVerdictValue/.test(agentTs), "PlanReviewResult carries the parsed verdict");
-	assert(agentTs.includes("parsePlanReviewVerdict(result.text)"), "runPlanReviewAgent parses the verdict from the final text");
+	assert(/verdict: ReviewerVerdict;/.test(agentTs), "shared runner result carries the submitted verdict");
+	assert(!/parsePlanReviewVerdict|parseReviewVerdict/.test(agentTs + reviewTs), "neither review entry parses verdict text anymore");
 	assert(!/branch[?]?:\s*ReviewBranchEntry/.test(extractDecl(agentTs, "export interface RunPlanReviewAgentOptions")), "RunPlanReviewAgentOptions no longer takes branch/planStartEntryId (requirements extracted by the tool layer)");
 	assert(/requirements: string\[\];/.test(extractDecl(agentTs, "export interface RunPlanReviewAgentOptions")), "RunPlanReviewAgentOptions takes precomputed requirements");
 
 	// ── effective verdict + feedback + first-round wiring in tools.ts ──
 	const toolsTsNow = read("extensions/workflow/tools.ts");
-	assert(toolsTsNow.includes("reviewer produced PASS without successful repository inspection"), "tools.ts downgrades parsed PASS without successful repo inspection to FAIL");
+	assert(toolsTsNow.includes("reviewer produced PASS without successful repository inspection"), "tools.ts downgrades a submitted PASS without successful repo inspection to FAIL");
 	assert(/effectiveVerdict = "FAIL"/.test(toolsTsNow), "downgrade writes an explicit effective FAIL");
 	assert(toolsTsNow.includes("当前 Plan 尚无上一轮 finding；移除 feedback 后重新调用 workflow_plan_review()。"), "first-round feedback is rejected with an explicit recovery hint");
 	assert(toolsTsNow.includes("normalizePlanReviewFeedback(params.feedback)"), "tool layer normalizes feedback via the shared alias");
@@ -1670,12 +1739,12 @@ console.log("\n=== Part 13: plan-review tool wiring ===");
 
 	// Prompt + README: incremental behavior, feedback, verdict semantics,
 	// strict evidence, round-strategy difference, approval semantics.
-	assert(promptsSrc.includes("PLAN_REVIEW_VERDICT"), "plan prompt mentions the PLAN_REVIEW_VERDICT signal");
+	assert(promptsSrc.includes("review_submit"), "plan prompt mentions the review_submit verdict signal");
 	assert(promptsSrc.includes("feedback"), "plan prompt documents the optional feedback argument");
 	assert(/用户明确确认后 workflow_plan_approve 始终可调用|workflow_plan_approve 始终可调用/.test(promptsSrc), "plan prompt states approval stays user-confirmed");
 	assert(/successful repo inspection: NO|证据不足/.test(promptsSrc), "plan prompt explains the inspection-evidence gap signal");
-	assert(readme.includes("PLAN_REVIEW_VERDICT: PASS|FAIL"), "README documents the PLAN_REVIEW_VERDICT prefix");
-	assert(readme.includes("REVIEW_VERDICT: PASS|FAIL"), "README keeps the REVIEW_VERDICT prefix for Implementation Review");
+	assert(/review_submit/.test(readme), "README documents the review_submit verdict transport");
+	assert(!/PLAN_REVIEW_VERDICT|REVIEW_VERDICT: PASS\|FAIL/.test(readme), "README has no old verdict-prefix contract");
 	assert(readme.includes("plan-review-history.json"), "README documents the plan-review round history");
 	assert(readme.includes("isError === false"), "README documents the strict finalized repo-evidence rule");
 	assert(/short-circuited calls append NO new history round/.test(readme), "README documents the round-strategy difference between the two reviewers");

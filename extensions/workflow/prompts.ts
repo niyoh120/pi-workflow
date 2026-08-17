@@ -62,7 +62,7 @@ export const PLAN_PROMPT = `
 调用规则：
 - 调用 workflow_plan_review()，无参数（可选 feedback 见下）。
 - 重复调用高效：相同计划、决策、仓库与 reviewer 基线会直接复用上一轮结论；计划或 confirmed decisions 修订后自动进入增量复核，聚焦变化章节；需求/模型/工具面/仓库变化则完整重审。
-- 输出尾部带有瞬时 \`PLAN_REVIEW_VERDICT: PASS|FAIL\`：这是给你的评估信号，帮助判断计划是否达成共识；用户明确确认后 workflow_plan_approve 始终可调用，approval 由用户驱动，不受 verdict 门禁。
+- 工具结果尾部带有瞬时 verdict（PASS/FAIL，由 reviewer 在最终 assistant message 末尾通过其专属的 review_submit 工具提交；缺失提交时 fail-closed 为 FAIL）：这是给你的评估信号，帮助判断计划是否达成共识；用户明确确认后 workflow_plan_approve 始终可调用，approval 由用户驱动，不受 verdict 门禁。
 - PASS 但诊断标记缺少成功仓库检查（successful repo inspection: NO）时，视为证据不足信号，重新调用 workflow_plan_review 完成内建仓库检查。
 - 收到 review 结果后，逐条技术评估 reviewer 提出的每个问题，结合你自己的仓库证据。对合理的问题修订计划并重新 workflow_plan_save（保存后重新 review 会获得增量复核）；对不成立的问题（误判、超出范围、与技术事实不符）在下一轮调用 workflow_plan_review({ feedback: "..." }) 提交逐条技术理由，附 file:line / 命令输出等可复核证据；reviewer 会独立复核，保持事实准确。首次 review 之前不接受 feedback。
 - Critical/Important 问题导致方案发生实质修改时重新调用 workflow_plan_review 审查修订版。

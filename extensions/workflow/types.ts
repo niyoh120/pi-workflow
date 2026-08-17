@@ -2,6 +2,12 @@ import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 
 export type Thinking = ModelThinkingLevel;
 
+/** Reviewer verdict submitted through the child-session-only `review_submit`
+ *  tool. Shared by the independent reviewer runner result, both review
+ *  result interfaces, and the persisted history rounds (which keep their own
+ *  structurally identical local aliases). */
+export type ReviewerVerdict = "PASS" | "FAIL";
+
 /** Workflow roles — only the ones we actively configure models for. */
 export type Role =
 	| "explore"

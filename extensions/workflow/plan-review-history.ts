@@ -110,7 +110,7 @@ export interface PlanReviewRoundRecord {
 	toolCalls: number;
 	/** Canonical reviewer output as surfaced by workflow_plan_review. */
 	reviewerText: string;
-	/** Effective verdict: parsed FAIL stays FAIL; parsed PASS without
+	/** Effective verdict: a submitted FAIL stays FAIL; a submitted PASS without
 	 *  successful repo inspection evidence is downgraded to FAIL. */
 	effectiveVerdict: PlanReviewVerdictValue;
 	verdictReason?: string;

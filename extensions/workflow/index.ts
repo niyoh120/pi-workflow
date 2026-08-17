@@ -17,7 +17,8 @@
  * repeated workflow_plan_review calls reuse identical rounds, run incremental
  * re-reviews focused on changed plan sections / new confirmed decisions, and
  * answer disputed findings via an optional UNTRUSTED feedback argument; its
- * transient PLAN_REVIEW_VERDICT never gates approval (always user-confirmed).
+ * transient submitted verdict (child-only review_submit tool, fail-closed)
+ * never gates approval (always user-confirmed).
  * No external extension dependency required.
  *
  * Workflow commands and tools are gated behind /wf by default.

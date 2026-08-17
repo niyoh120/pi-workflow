@@ -11,6 +11,12 @@
  *    reconstructed from their owning extension source paths. pi-workflow
  *    itself is never loaded into the child (its only non-workflow override,
  *    bash, is treated as builtin).
+ *  - Gets a child-only `review_submit` tool (schema-validated PASS/FAIL enum,
+ *    terminating) the reviewer must call exactly once at the end of its final
+ *    assistant message; the runner-owned collector resolves the verdict
+ *    fail-closed (zero submissions → FAIL) with last-success-wins on abnormal
+ *    repeats. The tool is appended to the child `tools` allowlist and never
+ *    enters the inherited-surface diagnostics or any repo-evidence set.
  *  - Receives authoritative inputs only: original user requirements (scoped
  *    to the current Plan lifecycle), confirmed grilling decisions, and the
  *    saved Final Plan. Planner reasoning, thinking, tool results, and prior
@@ -41,18 +47,24 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { StringEnum } from "@earendil-works/pi-ai";
 import type {
 	StopReason,
 	ThinkingLevel,
 	Usage,
 } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import type { GrillTurn, ModelSpec, Thinking } from "./types.js";
+import type {
+	GrillTurn,
+	ModelSpec,
+	ReviewerVerdict,
+	Thinking,
+} from "./types.js";
 import { workflowManagedToolNames } from "./mode.js";
 import { isAllowedPlanScratchPath, isWorkflowDataPath } from "./guards.js";
 import type {
-	PlanReviewVerdictValue,
 	PlanSectionDelta,
 	PreviousPlanReviewRoundInput,
 } from "./plan-review-history.js";
@@ -79,10 +91,113 @@ const BUILTIN_TOOL_NAMES = new Set([
 	"ls",
 ]);
 
+// ── Reviewer verdict submission (child-only terminating tool) ───────────────
+
+/** Name of the verdict-submission tool registered in every reviewer child
+ *  session. Both Plan Review and Implementation Review reviewers end their
+ *  final assistant message by calling it exactly once; the terminating tool
+ *  result ends the child agent loop without an extra follow-up turn. The
+ *  verdict travels ONLY through this schema-validated tool call — there is no
+ *  machine-parsed text line anymore. */
+export const REVIEW_SUBMIT_TOOL_NAME = "review_submit";
+
+/** Verdict enum schema for review_submit. StringEnum renders a plain
+ *  string-enum JSON schema, which every provider tool-call API accepts. */
+export const ReviewSubmitVerdictSchema = StringEnum(["PASS", "FAIL"] as const, {
+	description: "Final review verdict: PASS or FAIL.",
+});
+
+/** Runner-owned collector for verdicts submitted through review_submit. */
+export interface ReviewSubmitCollector {
+	/** Record one successful schema-validated submission (last one wins). */
+	submit(verdict: ReviewerVerdict): void;
+	/** Final fail-closed resolution once the child session has settled. */
+	resolve(): { verdict: ReviewerVerdict; verdictReason?: string };
+}
+
+/**
+ * Create the runner-owned submission collector.
+ *
+ * - Every schema-validated tool execution records the submitted verdict; a
+ *   later successful submission overwrites an earlier one (last-success-wins)
+ *   so the outcome stays deterministic after an abnormal mixed tool batch,
+ *   while the reviewer prompts still mandate submitting exactly once.
+ * - Zero successful submissions resolve fail-closed to FAIL so no unreliable
+ *   review can produce PASS.
+ *
+ * Pure bookkeeping — no I/O — so it can be unit-tested directly.
+ */
+export function createReviewSubmitCollector(): ReviewSubmitCollector {
+	let submitted: ReviewerVerdict | undefined;
+	return {
+		submit(verdict) {
+			submitted = verdict;
+		},
+		resolve() {
+			if (submitted === undefined) {
+				return {
+					verdict: "FAIL",
+					verdictReason: `reviewer did not call ${REVIEW_SUBMIT_TOOL_NAME}`,
+				};
+			}
+			return { verdict: submitted };
+		},
+	};
+}
+
+/**
+ * Build the inline child-runtime extension that registers the
+ * `review_submit` tool. The tool is child-session-only: it exists solely to
+ * carry the final verdict out of the reviewer loop as a schema-validated
+ * structured value and to terminate the loop via its tool result.
+ *
+ * `executionMode: "sequential"` keeps the submission serialized with any
+ * concurrent tool batch; `terminate: true` ends the agent loop after the
+ * result. The submitted value is written into the runner-owned collector the
+ * shared runner resolves after the child session settles.
+ */
+export function createReviewSubmitExtension(
+	collector: ReviewSubmitCollector,
+): InlineExtension {
+	return {
+		name: "review-submit",
+		factory: (pi: ExtensionAPI) => {
+			pi.registerTool({
+				name: REVIEW_SUBMIT_TOOL_NAME,
+				label: "Submit Review Verdict",
+				description:
+					"Submit the final review verdict (PASS or FAIL). Call this exactly ONCE, as your FINAL action, in the SAME final assistant message that contains the complete Markdown review report. Submitting ends the review.",
+				parameters: Type.Object({
+					verdict: ReviewSubmitVerdictSchema,
+				}),
+				executionMode: "sequential",
+				async execute(_toolCallId, params) {
+					collector.submit(params.verdict);
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Verdict recorded: ${params.verdict}. The review loop ends here; do not submit again.`,
+							},
+						],
+						details: { verdict: params.verdict },
+						terminate: true,
+					};
+				},
+			});
+		},
+	};
+}
+
 // ── Result type ──────────────────────────────────────────────────────────────
 
 export interface PlanReviewAgentResult {
 	text: string;
+	/** Verdict submitted through the child-only review_submit tool.
+	 *  Fail-closed: zero successful submissions resolve to FAIL with a
+	 *  verdictReason. */
+	verdict: ReviewerVerdict;
+	verdictReason?: string;
 	reviewerModel: string;
 	thinking?: Thinking;
 	usage?: Usage;
@@ -94,6 +209,11 @@ export interface PlanReviewAgentResult {
 	requestedTools: string[];
 	activeTools: string[];
 	unavailableTools: string[];
+	/** Tool names whose executions were actually STARTED
+	 *  (tool_execution_start). Optional + additive so the Implementation
+	 *  Review short-circuit object literals stay compilable; the shared
+	 *  runner always fills it on a normal return. */
+	calledToolNames?: string[];
 	/** Tool names whose executions COMPLETED successfully
 	 *  (tool_execution_end with isError === false). Optional + additive so the
 	 *  Implementation Review short-circuit object literals stay compilable;
@@ -102,7 +222,7 @@ export interface PlanReviewAgentResult {
 }
 
 /** Builtin repository-inspection tool names. A Plan Review round is
- *  cacheable (and its parsed PASS effective) only when at least one of these
+ *  cacheable (and its submitted PASS effective) only when at least one of these
  *  COMPLETED successfully — finalized evidence, stricter than the active
  *  tools judgment used by Implementation Review. */
 const PLAN_REPO_TOOL_NAMES = new Set([
@@ -113,13 +233,11 @@ const PLAN_REPO_TOOL_NAMES = new Set([
 	"ls",
 ]);
 
-/** Plan Review operational result: the shared runner result plus the parsed
- *  verdict and the strict finalized repo-inspection evidence flag. The tool
- *  layer combines them into the effective verdict it persists and reports. */
+/** Plan Review operational result: the shared runner result (carrying the
+ *  submitted verdict) plus the strict finalized repo-inspection evidence
+ *  flag. The tool layer combines them into the effective verdict it
+ *  persists and reports. */
 export interface PlanReviewResult extends PlanReviewAgentResult {
-	/** Parsed PLAN_REVIEW_VERDICT (fail-closed FAIL on missing/conflicting). */
-	verdict: PlanReviewVerdictValue;
-	verdictReason?: string;
 	/** True when at least one builtin repo tool completed successfully.
 	 *  STRICT finalized-evidence semantics (see PLAN_REPO_TOOL_NAMES). */
 	hasSuccessfulRepoInspection: boolean;
@@ -236,10 +354,6 @@ export function formatConfirmedDecisions(
 
 // ── Reviewer protocol constants (single source for task + protocol hash) ────
 
-/** Exact machine-parseable final verdict line the Plan Reviewer must emit.
- *  Distinct from Implementation Review's REVIEW_VERDICT: prefix. */
-export const PLAN_REVIEW_VERDICT_LINE_PREFIX = "PLAN_REVIEW_VERDICT:";
-
 /** Task section headings. buildReviewerTask assembles the task from these
  *  constants ONLY; editing a heading here changes both the task and the
  *  protocol hash, invalidating stale caches automatically. */
@@ -252,13 +366,16 @@ export const PLAN_REVIEW_TASK_ASSIGNMENT_HEADING = "# 4. Review Assignment";
 /** Static review-assignment instruction shared by every round (full and
  *  incremental alike). */
 export const PLAN_REVIEW_ASSIGNMENT_INSTRUCTION =
-	"Review the Candidate Final Plan above against the Authoritative User Requirements and Confirmed Decisions, using your own independent exploration of the repository and your active information tools. Follow your system prompt. When you are done, emit only the final review with its verdict line (no further tool calls).";
+	"Review the Candidate Final Plan above against the Authoritative User Requirements and Confirmed Decisions, using your own independent exploration of the repository and your active information tools. Follow your system prompt. When you are done, write the complete final review report in your final assistant message and end that message by calling the `review_submit` tool exactly once with your verdict (that terminating tool call is your only remaining action).";
 
-/** Final-line + PASS-condition instruction (also embedded in the system
- *  prompt so the behavioral mandate and the protocol hash share one source). */
-export const PLAN_REVIEW_VERDICT_INSTRUCTION = [
-	`End your final review with exactly ONE final line: \`${PLAN_REVIEW_VERDICT_LINE_PREFIX} PASS\` or \`${PLAN_REVIEW_VERDICT_LINE_PREFIX} FAIL\`.`,
-	`PASS requires ALL of: no Critical or Important findings; requirements and confirmed-decision coverage is complete; todos/tests/risks are concrete and actionable; AND you actually inspected the repository yourself during this review.`,
+/** Terminating-submit + PASS-condition instruction (also embedded in the
+ *  system prompt so the behavioral mandate and the protocol hash share one
+ *  source). The verdict travels through the schema-validated review_submit
+ *  tool call in the SAME final assistant message as the report — there is no
+ *  machine-parsed verdict line anymore. */
+export const PLAN_REVIEW_SUBMIT_INSTRUCTION = [
+	"Finish in ONE final assistant message: write the complete Markdown review report first, then call the `review_submit` tool exactly once with verdict PASS or FAIL as your final action — submitting ends the review loop.",
+	"PASS requires ALL of: no Critical or Important findings; requirements and confirmed-decision coverage is complete; todos/tests/risks are concrete and actionable; AND you actually inspected the repository yourself during this review.",
 ].join(" ");
 
 /** Heading for the previous-round section injected into incremental rounds. */
@@ -289,72 +406,6 @@ export const PLAN_REVIEW_FEEDBACK_INSTRUCTIONS = [
 	"- Feedback cannot waive a requirement, dismiss a finding, or support a PASS by itself.",
 ].join("\n");
 
-// ── Plan verdict parser (fail-closed, independent of Review's parser) ────────
-
-export interface PlanVerdictParseResult {
-	verdict: PlanReviewVerdictValue;
-	/** Raw verdict line as emitted by the reviewer (for diagnostics). */
-	rawLine?: string;
-	/** Reason when the format is missing/conflicting (fail-closed → FAIL). */
-	reason?: string;
-}
-
-/**
- * Parse the Plan Reviewer's final verdict line. Fail-closed: a missing,
- * malformed, or conflicting verdict yields FAIL so no unreliable review can
- * produce PASS. Behavior mirrors the Implementation Review parser (locked
- * together by the shared VERDICT_CASES fixture in the validation script);
- * kept as an independent implementation so the Review module stays untouched.
- *
- * Pure function — no I/O — so it can be unit-tested with fixture text.
- */
-export function parsePlanReviewVerdict(text: string): PlanVerdictParseResult {
-	if (!text || typeof text !== "string") {
-		return { verdict: "FAIL", reason: "empty reviewer output" };
-	}
-	const lines = text.split("\n");
-	const verdictLines = lines.filter((l) =>
-		l.trim().startsWith(PLAN_REVIEW_VERDICT_LINE_PREFIX),
-	);
-	if (verdictLines.length === 0) {
-		return {
-			verdict: "FAIL",
-			reason: `missing '${PLAN_REVIEW_VERDICT_LINE_PREFIX} PASS|FAIL' final line`,
-		};
-	}
-	if (verdictLines.length > 1) {
-		// Multiple verdict lines: only PASS if every line agrees on PASS.
-		const values = new Set(
-			verdictLines.map((l) => {
-				const rest = l
-					.slice(PLAN_REVIEW_VERDICT_LINE_PREFIX.length)
-					.trim()
-					.toUpperCase();
-				return rest.split(/\s+/)[0] ?? "";
-			}),
-		);
-		if (values.size === 1 && values.has("PASS")) {
-			return { verdict: "PASS", rawLine: verdictLines[0] };
-		}
-		return {
-			verdict: "FAIL",
-			reason: `conflicting verdict lines: ${verdictLines.join(" | ")}`,
-		};
-	}
-	const line = verdictLines[0];
-	const rest = line
-		.slice(PLAN_REVIEW_VERDICT_LINE_PREFIX.length)
-		.trim()
-		.toUpperCase();
-	const value = rest.split(/\s+/)[0] ?? "";
-	if (value === "PASS") return { verdict: "PASS", rawLine: line };
-	if (value === "FAIL") return { verdict: "FAIL", rawLine: line };
-	return {
-		verdict: "FAIL",
-		reason: `unrecognized verdict value '${value}' in line: ${line}`,
-	};
-}
-
 // ── Reviewer prompts ─────────────────────────────────────────────────────────
 
 export const REVIEWER_SYSTEM_PROMPT = `# Independent Plan Reviewer
@@ -381,7 +432,7 @@ Independently validate that the plan is correct, complete, and feasible by inspe
 - Direct reads of .pi/workflow/ are blocked by the runtime; rely on the plan text provided plus your own exploration.
 
 ## Output
-Produce exactly ONE final review using this structure, then emit the verdict line, then stop (no further tool calls):
+Produce exactly ONE final review in your FINAL assistant message using this structure, then end that same message with the review_submit tool call (report text and tool call share the final message):
 
 ## 审查结果
 
@@ -397,7 +448,7 @@ Produce exactly ONE final review using this structure, then emit the verdict lin
 ### Summary
 整体评估：[一段话总结]
 
-${PLAN_REVIEW_VERDICT_INSTRUCTION}
+${PLAN_REVIEW_SUBMIT_INSTRUCTION}
 
 ## Rules
 - Ground every issue in concrete repository evidence: cite file paths, line ranges, API signatures, config, or documentation you actually inspected.
@@ -405,7 +456,7 @@ ${PLAN_REVIEW_VERDICT_INSTRUCTION}
 - If you could not verify something, state it explicitly as an unverified assumption rather than asserting it.
 - Each issue must have a concrete description and a suggested revision.
 - Leave a severity section empty if there are no genuine issues at that level.
-- ${PLAN_REVIEW_VERDICT_INSTRUCTION}
+- ${PLAN_REVIEW_SUBMIT_INSTRUCTION}
 `;
 
 /**
@@ -423,7 +474,7 @@ export function buildPlanReviewProtocolText(): string {
 		PLAN_REVIEW_TASK_PLAN_HEADING,
 		PLAN_REVIEW_TASK_ASSIGNMENT_HEADING,
 		PLAN_REVIEW_ASSIGNMENT_INSTRUCTION,
-		PLAN_REVIEW_VERDICT_INSTRUCTION,
+		PLAN_REVIEW_SUBMIT_INSTRUCTION,
 		PLAN_REVIEW_PREVIOUS_ROUND_HEADING,
 		PLAN_REVIEW_INCREMENTAL_INSTRUCTIONS,
 		PLAN_REVIEW_FEEDBACK_HEADING,
@@ -869,6 +920,12 @@ export async function runIndependentReviewer(
 	const { requestedTools, extensionPaths } =
 		opts.toolSurface ?? reconstructReviewerToolSurface(pi);
 
+	// ── Verdict submission ──
+	// The child-only review_submit tool writes into this runner-owned
+	// collector; the final fail-closed resolution happens after the child
+	// session settles (last successful submission wins).
+	const submitCollector = createReviewSubmitCollector();
+
 	// ── Model / auth ──
 	const agentDir = getAgentDir();
 	const childRuntime = await createChildModelRuntime(ctx, agentDir);
@@ -901,7 +958,10 @@ export async function runIndependentReviewer(
 		settingsManager,
 		noExtensions: true,
 		additionalExtensionPaths: extensionPaths,
-		extensionFactories: [createReviewerSafetyExtension(safetyRoots)],
+		extensionFactories: [
+			createReviewerSafetyExtension(safetyRoots),
+			createReviewSubmitExtension(submitCollector),
+		],
 		// Inject the reviewer behavioral mandate (read-only constraint, output
 		// format, evidence-grounding, scratch-write policy) into the child
 		// session's system prompt. Appended after the project context (AGENTS.md
@@ -914,13 +974,18 @@ export async function runIndependentReviewer(
 	});
 
 	// ── Child AgentSession ──
+	// The explicit `tools` allowlist ALSO gates extension-registered tools, so
+	// the child-only review_submit tool must be appended for the model to see
+	// it. requestedTools / unavailableTools keep describing ONLY the inherited
+	// information-tool surface; review_submit is runner machinery, not part of
+	// the inherited surface or its basis hash.
 	const { session } = await createAgentSession({
 		cwd: reviewCwd,
 		agentDir,
 		modelRuntime: childRuntime,
 		model,
 		thinkingLevel,
-		tools: requestedTools,
+		tools: [...requestedTools, REVIEW_SUBMIT_TOOL_NAME],
 		resourceLoader,
 		sessionManager: SessionManager.inMemory(reviewCwd),
 		sessionStartEvent: { type: "session_start", reason: "new" },
@@ -932,6 +997,11 @@ export async function runIndependentReviewer(
 	const usage = emptyUsageAccumulator();
 	let stopReason: StopReason | undefined;
 	let errorMessage: string | undefined;
+	// Started-call evidence: every tool execution that actually began,
+	// regardless of outcome. Implementation Review uses this (intersected with
+	// its repo tool names) so the mandatory review_submit submission can never
+	// satisfy its repo-inspection requirement.
+	const calledToolNames: string[] = [];
 	// Finalized tool evidence: a name lands here only when its execution
 	// COMPLETED with isError === false. Blocked calls never satisfy that
 	// condition (they either emit no completion or end with an error), and
@@ -946,6 +1016,7 @@ export async function runIndependentReviewer(
 				return;
 			case "tool_execution_start": {
 				toolCalls += 1;
+				calledToolNames.push(event.toolName);
 				opts.onProgress?.(
 					`[reviewer] turn ${turns} · tool #${toolCalls}: ${event.toolName}`,
 				);
@@ -1085,8 +1156,17 @@ export async function runIndependentReviewer(
 		);
 	}
 
+	// Resolve the submitted verdict only after the child session has fully
+	// settled (all submissions recorded, last success wins, fail-closed on
+	// zero submissions).
+	const submitted = submitCollector.resolve();
+
 	return {
 		text,
+		// Fail-closed submitted verdict: zero successful review_submit calls
+		// resolve to FAIL with an explicit reason (see createReviewSubmitCollector).
+		verdict: submitted.verdict,
+		verdictReason: submitted.verdictReason,
 		reviewerModel: reviewerLabel,
 		thinking: modelSpec.thinking,
 		usage,
@@ -1098,6 +1178,7 @@ export async function runIndependentReviewer(
 		requestedTools,
 		activeTools,
 		unavailableTools,
+		calledToolNames,
 		successfulToolNames,
 	};
 }
@@ -1108,9 +1189,10 @@ export async function runIndependentReviewer(
  * feedback sections for incremental rounds) and delegates to the shared
  * independent reviewer runner running in the parent session cwd.
  *
- * Returns the PARSED verdict plus the strict repo-inspection evidence flag;
- * the tool layer derives the effective verdict (a parsed PASS without
- * successful repo inspection is downgraded there).
+ * Returns the SUBMITTED verdict (via the child-only review_submit tool,
+ * fail-closed) plus the strict repo-inspection evidence flag; the tool layer
+ * derives the effective verdict (a submitted PASS without successful repo
+ * inspection is downgraded there).
  *
  * Always disposes the child session. Timeout or parent cancellation aborts the
  * active AgentSession before throwing an explicit error.
@@ -1147,19 +1229,17 @@ export async function runPlanReviewAgent(
 
 	// Strict finalized-evidence semantics: cacheability (and an effective
 	// PASS) requires at least one SUCCESSFULLY COMPLETED builtin repository
-	// tool. Distinct from Implementation Review's active-tools madeRepoToolCall
-	// judgment, which stays unchanged.
+	// tool. Distinct from Implementation Review's calledToolNames-based
+	// madeRepoToolCall judgment (started calls), which stays looser by design.
 	const successful = result.successfulToolNames ?? [];
 	const hasSuccessfulRepoInspection = successful.some((name) =>
 		PLAN_REPO_TOOL_NAMES.has(name),
 	);
 
-	const parsed = parsePlanReviewVerdict(result.text);
-
+	// The verdict rides on the shared runner result (submitted via
+	// review_submit; fail-closed). No text parsing happens here.
 	return {
 		...result,
-		verdict: parsed.verdict,
-		verdictReason: parsed.reason,
 		hasSuccessfulRepoInspection,
 	};
 }

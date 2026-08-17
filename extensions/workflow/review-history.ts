@@ -428,14 +428,22 @@ export function normalizeWorkFeedback(raw: unknown): string | undefined {
 
 /**
  * Hash of every reviewer task input: authoritative inputs (requirements,
- * plan, approved + current todos, the OCR flag, the configured review model)
- * plus, when present, the non-authoritative Work feedback. Two rounds with
- * the same hash AND the same diff fingerprint receive the same verdict.
+ * plan, approved + current todos, the OCR flag, the configured review model,
+ * the current reviewer protocol text) plus, when present, the non-authoritative
+ * Work feedback. Two rounds with the same hash AND the same diff fingerprint
+ * receive the same verdict.
+ *
+ * `protocolText` comes from buildImplementationReviewProtocolText() — the
+ * single constant source of the reviewer's behavioral protocol — so a
+ * protocol change (e.g. the verdict-transport migration to review_submit)
+ * invalidates unchanged-diff reuse of rounds produced under the older
+ * protocol in one shot.
  *
  * Feedback is idempotently re-normalized here so future call sites cannot
  * drift; a missing/blank feedback contributes NO key, keeping the hash body
- * byte-identical to the pre-feedback algorithm so pre-upgrade review history
- * still short-circuits on a no-feedback call. Pure.
+ * byte-identical to the pre-feedback algorithm (modulo the protocolText key)
+ * so pre-upgrade no-feedback review history still short-circuits only when
+ * the protocol is also unchanged. Pure.
  */
 export function computeTaskInputHash(input: {
 	requirements: string[];
@@ -444,6 +452,8 @@ export function computeTaskInputHash(input: {
 	todos: TodoItem[];
 	includeOcr: boolean;
 	reviewModel: string;
+	/** Current Implementation Review protocol text (single constant source). */
+	protocolText: string;
 	/** Optional non-authoritative Work feedback on prior-round findings. */
 	feedback?: string;
 }): string {
@@ -460,6 +470,7 @@ export function computeTaskInputHash(input: {
 		todos: input.todos.map((t) => [t.id, t.title, t.status, t.notes ?? ""]),
 		includeOcr: input.includeOcr,
 		reviewModel: input.reviewModel,
+		protocolText: input.protocolText,
 		...(feedback !== undefined ? { feedback } : {}),
 	};
 	return crypto.createHash("sha1").update(JSON.stringify(body)).digest("hex");
