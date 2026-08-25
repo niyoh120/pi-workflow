@@ -18,10 +18,19 @@ export type Role =
 	| "commit";
 
 /**
- * Simplified mode: idle plus explore/init/plan/work/commit workflow states.
+ * Simplified mode: idle plus explore/init/plan/work/merge/commit workflow states.
  * `init` is a scoped write-only-for-AGENTS.md mode used by /wf-init.
+ * `merge` is the user-triggered Git-integration mode used by /wf-merge; it
+ * reuses the `work` model role and adds the branch-integration capability.
  */
-export type Mode = "idle" | "explore" | "init" | "plan" | "work" | "commit";
+export type Mode =
+	| "idle"
+	| "explore"
+	| "init"
+	| "plan"
+	| "work"
+	| "merge"
+	| "commit";
 
 export type TodoStatus = "pending" | "in_progress" | "done" | "blocked";
 
@@ -82,7 +91,7 @@ export interface WorkflowConfig {
 	 * Mode. The Review Agent independently verifies requirements/plan/todos and,
 	 * when `codeReview.enabled` is true, folds workspace OCR findings into the
 	 * same review. Review output is transient (a tool result); it never gates
-	 * `/commit` and is never persisted to WorkflowState.
+	 * `/wf-commit` and is never persisted to WorkflowState.
 	 */
 	review: {
 		enabled: boolean;
@@ -135,6 +144,49 @@ export interface OcrReviewResult {
 		elapsed?: string;
 	};
 	sessionId?: string;
+}
+
+/**
+ * How the merge source branch is anchored. `workflow-worktree` means the
+ * source is the active workflow worktree branch (bash/read/edit/write keep
+ * targeting the worktree); `ordinary-branch` means the source is the current
+ * checkout of the main repository.
+ */
+export type MergeSourceKind = "workflow-worktree" | "ordinary-branch";
+
+/**
+ * Persistent Merge Mode context, recorded atomically by /wf-merge before
+ * entering Merge Mode and only preserved while `mode === "merge"`.
+ *
+ * The context is the authoritative baseline for the whole merge run: it fixes
+ * the source/target branches, the pre-rebase heads, the source-only commit
+ * count, and the user authorization (raw trailing instructions or the default
+ * strategy). workflow_merge_complete uses it to finalize the default
+ * fast-forward, verify completion, or cancel and restore the source checkout.
+ */
+export interface MergeContext {
+	sourceKind: MergeSourceKind;
+	sourceBranch: string;
+	targetBranch: string;
+	/** Source branch head at merge kickoff (after preflight, before rebase). */
+	sourceHeadBefore: string;
+	/** Target branch head at merge kickoff. */
+	targetHeadBefore: string;
+	/** `git rev-list --count target..source` at kickoff. */
+	sourceOnlyCommitCountBefore: number;
+	/**
+	 * Raw trailing user instructions from /wf-merge (options stripped).
+	 * Undefined for the default strategy. This is the ONLY authorization
+	 * source for high-risk Git actions beyond the default flow.
+	 */
+	instructions?: string;
+	/**
+	 * True when /wf-merge received no trailing instructions (default
+	 * rebase + ff-only strategy). Forces finalize=ff-only.
+	 */
+	defaultStrategy: boolean;
+	/** Mode to restore after the merge completes or is cancelled. */
+	returnMode: "explore" | "plan" | "work" | "commit";
 }
 
 export interface WorkflowState {
@@ -209,6 +261,12 @@ export interface WorkflowState {
 	 * the Work run has started. Used by the agent_settled dispatcher.
 	 */
 	pendingWorkKickoff?: string;
+	/**
+	 * Active Merge Mode context. Only honored when `mode === "merge"`;
+	 * normalization clears it in every other mode so a stale merge baseline
+	 * cannot leak into other workflows. See MergeContext for field semantics.
+	 */
+	mergeContext?: MergeContext;
 	/**
 	 * Session-scoped config overrides — highest-priority config layer.
 	 * Merged on top of DEFAULT ← global ← project when resolving config for

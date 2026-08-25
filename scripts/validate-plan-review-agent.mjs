@@ -212,7 +212,7 @@ console.log("\n=== Part 2: reviewer tool-surface reconstruction ===");
 				"workflow_todo", "workflow_plan_read", "workflow_plan_save",
 				"workflow_plan_approve", "workflow_plan_clear", "workflow_grill_record",
 				"workflow_plan_review", "workflow_review",
-				"workflow_init_complete",
+				"workflow_init_complete", "workflow_merge_complete",
 				"update_plan",
 			]);
 		}
@@ -264,7 +264,7 @@ console.log("\n=== Part 2: reviewer tool-surface reconstruction ===");
 		"workflow_todo", "workflow_plan_read", "workflow_plan_save",
 		"workflow_plan_approve", "workflow_plan_clear", "workflow_grill_record",
 		"workflow_plan_review", "workflow_review",
-		"workflow_init_complete",
+		"workflow_init_complete", "workflow_merge_complete",
 	]);
 	const realGated = new Set(realManagedNames);
 	assert(
@@ -868,7 +868,7 @@ console.log("\n=== Part 8b: review-round history helpers ===");
 	assert(toolsTs.includes("cachedOcr"), "workflow_review reuses cached OCR findings on unchanged diffs");
 	assert(commandsTs.includes("reviewHistoryPath"), "wf-reset removes the review history file");
 	// The review-loop fingerprint is a NEW module — the old worktree helpers
-	// stay gone (Part 8) and nothing gates /commit (Part 9).
+	// stay gone (Part 8) and nothing gates /wf-commit (Part 9).
 	assert(!histTs.includes("computeWorkspaceFingerprint"), "review-history.ts does not resurrect the old fingerprint name");
 
 	// ── pure fixtures (Node 24 type-stripping, same approach as Part 7) ──
@@ -1130,14 +1130,14 @@ console.log("\n=== Part 9: no commit gate + no agent_end PASS + approve snapshot
 	const commandsSrc = read("extensions/workflow/commands.ts");
 	const toolsSrc = read("extensions/workflow/tools.ts");
 
-	// /commit has NO review/implementation gate — it switches Commit Mode directly.
-	const commitStart = commandsSrc.indexOf("export function registerCommitCommand");
+	// /wf-commit has NO review/implementation gate — it switches Commit Mode directly.
+	const commitStart = commandsSrc.indexOf("export function registerWfCommitCommand");
 	const commitEnd = commandsSrc.indexOf("export function registerWfStatusCommand", commitStart);
 	const commitBlock = commandsSrc.slice(commitStart, commitEnd > 0 ? commitEnd : commandsSrc.length);
-	assert(!/implementationReview/.test(commitBlock), "/commit no longer references implementationReview PASS");
-	assert(!/computeWorkspaceFingerprint/.test(commitBlock), "/commit no longer computes a workspace fingerprint");
-	assert(!/workspaceFingerprint/.test(commitBlock), "/commit no longer compares a fingerprint");
-	assert(commitBlock.includes("transitionWorkflowMode"), "/commit switches Commit Mode directly via transitionWorkflowMode");
+	assert(!/implementationReview/.test(commitBlock), "/wf-commit no longer references implementationReview PASS");
+	assert(!/computeWorkspaceFingerprint/.test(commitBlock), "/wf-commit no longer computes a workspace fingerprint");
+	assert(!/workspaceFingerprint/.test(commitBlock), "/wf-commit no longer compares a fingerprint");
+	assert(commitBlock.includes("transitionWorkflowMode"), "/wf-commit switches Commit Mode directly via transitionWorkflowMode");
 
 	// agent_end has no fingerprint/PASS check.
 	const agentEndStart = commandsSrc.indexOf("export function registerAgentEnd");

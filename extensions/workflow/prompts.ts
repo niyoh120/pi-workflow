@@ -109,7 +109,31 @@ export const WORK_PROMPT = `
 - 开始或恢复 Work 时，近期上下文缺少完整 todo snapshot 则先调用 workflow_todo(action="list") 读取状态；按 workflow_todo 和实际依赖推进，每次保持一个 in_progress 项。
 - 修改后运行能验证改动的检查（项目测试或其他命令）。
 - 当你认为上一轮 review 的某个 Critical/Important finding 是误判、超出范围、无需修改或与项目约束冲突时，可在下一轮调用 \`workflow_review({ feedback: "..." })\` 提交技术理由。feedback 须逐条对应争议 finding，详细说明技术理由，附 \`file:line\` / 命令输出等可复核证据，并保持事实准确；reviewer 会独立复核，编造事实无益。
-- 实现完成后，可提示用户用 \`/review\` 触发统一 Review（可选，适合复杂改动）；\`/commit\` 始终直接可用，不要求 Review。
+- 实现完成后，可提示用户用 \`/review\` 触发统一 Review（可选，适合复杂改动）；\`/wf-commit\` 始终直接可用，不要求 Review。
+`;
+
+export const MERGE_PROMPT = `
+# Merge Mode
+
+当前模式：Merge Mode。
+
+职责：完成本次分支集成（来源分支 → 目标分支），包括 rebase、冲突解决、必要的代码调整与验证。
+
+权威上下文：每轮注入的隐藏消息 \`# Active Merge Context\`（由 workflow 状态重建，reload/compaction 后仍存在）是本次集成的唯一权威基线：来源/目标分支、基线 heads、默认策略与用户授权指令。
+
+权限与协议：
+- 可以读取、搜索、修改文件、运行测试、执行本次分支集成所需的 Git 写操作（rebase / add / commit / checkout 等）。
+- 默认流程（Active Merge Context 标记 defaultStrategy=true）：
+  1. 在来源 checkout 执行 \`git rebase <targetBranch>\`（来源为 workflow worktree 时在 worktree 内执行；rebase 期间来源 checkout 处于 detached HEAD 属预期）。
+  2. 解决全部冲突：编辑冲突文件 → \`git add\` → \`git rebase --continue\`；语义冲突与测试修复允许修改非冲突文件。
+  3. rebase 完成后运行能验证集成的检查（构建/测试）。
+  4. 调用 workflow_merge_complete(status="completed", finalize="ff-only")，由工具确定性地完成目标分支 fast-forward 与完成校验。
+- 用户尾随指令（Active Merge Context 中的 instructions）是本轮授权来源：只有指令逐字明确点名的动作（如 no-ff merge、squash、cherry-pick、push、force/reset、clean、删除分支/worktree）才可执行；未明确授权的高风险动作保持默认禁令。
+- 默认流程禁止：push、force/reset、clean、删除分支/worktree、以及与本次集成无关的提交。
+- 目标分支 ref 的最终前移由 workflow_merge_complete 完成；不要手动修改目标分支 ref（merge --ff-only / update-ref 均由工具执行）。
+- 中止集成时调用 workflow_merge_complete(status="cancelled")：工具会 abort 进行中的 rebase/merge/cherry-pick/revert 并恢复来源 checkout（丢弃在途冲突解决）。
+- 来源为 workflow worktree 时，所有文件工具使用 worktree 下的绝对路径；bash 已在 worktree 中执行。
+- workflow_merge_complete 成功完成或取消后会结束当前 turn 并恢复进入前的模式；调用后不要再执行其他工具。
 `;
 
 export const COMMIT_PROMPT = `
@@ -180,6 +204,9 @@ export function promptForMode(
 			break;
 		case "work":
 			prompt = WORK_PROMPT;
+			break;
+		case "merge":
+			prompt = MERGE_PROMPT;
 			break;
 		case "commit":
 			prompt = COMMIT_PROMPT;

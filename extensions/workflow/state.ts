@@ -72,6 +72,70 @@ function normalizeGrillTurns(raw: unknown): WorkflowState["grillTurns"] {
 }
 
 /**
+ * Normalize a raw MergeContext object. Returns undefined for any malformed
+ * shape — a merge context without its full baseline is useless (the default
+ * finalizer and the cancel path both need source/target heads and branches),
+ * so normalization fails closed and forces re-entry via /wf-merge.
+ * Kept annotation-simple so the regression script can extract and eval it.
+ */
+function normalizeMergeContext(raw: unknown): WorkflowState["mergeContext"] {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const c = raw as Record<string, unknown>;
+	const sourceKind =
+		c.sourceKind === "workflow-worktree" || c.sourceKind === "ordinary-branch"
+			? c.sourceKind
+			: undefined;
+	const sourceBranch =
+		typeof c.sourceBranch === "string" ? c.sourceBranch.trim() : "";
+	const targetBranch =
+		typeof c.targetBranch === "string" ? c.targetBranch.trim() : "";
+	const sourceHeadBefore =
+		typeof c.sourceHeadBefore === "string" ? c.sourceHeadBefore.trim() : "";
+	const targetHeadBefore =
+		typeof c.targetHeadBefore === "string" ? c.targetHeadBefore.trim() : "";
+	const count = c.sourceOnlyCommitCountBefore;
+	const sourceOnlyCommitCountBefore =
+		typeof count === "number" && Number.isFinite(count) && count >= 0
+			? Math.floor(count)
+			: undefined;
+	const defaultStrategy =
+		typeof c.defaultStrategy === "boolean" ? c.defaultStrategy : undefined;
+	const returnMode =
+		c.returnMode === "explore" ||
+		c.returnMode === "plan" ||
+		c.returnMode === "work" ||
+		c.returnMode === "commit"
+			? c.returnMode
+			: undefined;
+	if (
+		!sourceKind ||
+		!sourceBranch ||
+		!targetBranch ||
+		!sourceHeadBefore ||
+		!targetHeadBefore ||
+		sourceOnlyCommitCountBefore === undefined ||
+		defaultStrategy === undefined ||
+		!returnMode
+	) {
+		return undefined;
+	}
+	return {
+		sourceKind,
+		sourceBranch,
+		targetBranch,
+		sourceHeadBefore,
+		targetHeadBefore,
+		sourceOnlyCommitCountBefore,
+		instructions:
+			typeof c.instructions === "string" && c.instructions.trim()
+				? c.instructions
+				: undefined,
+		defaultStrategy,
+		returnMode,
+	};
+}
+
+/**
  * Normalize a raw JSON object into a strict WorkflowState shape.
  * Drops unknown/removed keys and fills missing fields from DEFAULT_STATE.
  */
@@ -102,6 +166,7 @@ export function normalizeState(raw: unknown): WorkflowState {
 				obj.mode === "init" ||
 				obj.mode === "plan" ||
 				obj.mode === "work" ||
+				obj.mode === "merge" ||
 				obj.mode === "commit")
 				? obj.mode
 				: DEFAULT_STATE.mode,
@@ -171,6 +236,14 @@ export function normalizeState(raw: unknown): WorkflowState {
 			obj.initTargetPath.trim() &&
 			path.isAbsolute(obj.initTargetPath.trim())
 				? obj.initTargetPath.trim()
+				: undefined,
+		// Merge Mode lifecycle field. Only honored when mode === "merge" and the
+		// full baseline shape survives strict validation; every other mode (and
+		// any malformed context) normalizes to undefined so a stale merge
+		// baseline cannot leak into another workflow.
+		mergeContext:
+			obj.mode === "merge"
+				? normalizeMergeContext(obj.mergeContext)
 				: undefined,
 		// Preserve session config overrides as a plain object, stripping any
 		// dangerous keys (__proto__/constructor/prototype) so a corrupt or

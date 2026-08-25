@@ -39,7 +39,7 @@
  * the sole basis for PASS/FAIL.
  *
  * The verdict is TRANSIENT: it only signals whether this on-demand review loop
- * can end. It is never written to WorkflowState and never gates `/commit`.
+ * can end. It is never written to WorkflowState and never gates `/wf-commit`.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";

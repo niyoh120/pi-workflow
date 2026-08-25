@@ -17,6 +17,7 @@ export const WORKFLOW_GATED_TOOLS = [
 	"workflow_plan_review",
 	"workflow_review",
 	"workflow_init_complete",
+	"workflow_merge_complete",
 ] as const;
 
 export const WORKFLOW_TOOL_CLEANUP_NAMES = [...WORKFLOW_GATED_TOOLS] as const;
@@ -49,14 +50,18 @@ const EXPLORE_WORKFLOW_TOOL_NAMES: string[] = [];
 
 const INIT_WORKFLOW_TOOL_NAMES = ["workflow_init_complete"];
 
+const MERGE_WORKFLOW_TOOL_NAMES = ["workflow_merge_complete"];
+
 /**
  * Modes that may call gated workflow tools. Each mode's allowed set is
  * resolved by computeWorkflowToolNames. Explore exposes no workflow tools;
  * Work exposes todo (+ optional code review); Plan keeps plan read/save and
- * grilling; Init exposes only init_complete.
+ * grilling; Init exposes only init_complete; Merge exposes only
+ * merge_complete (todo/review/plan tools stay off so the merge stays
+ * focused on the branch integration).
  */
 export function isWorkflowToolMode(mode: Mode): boolean {
-	return mode === "plan" || mode === "work" || mode === "init";
+	return mode === "plan" || mode === "work" || mode === "init" || mode === "merge";
 }
 
 /**
@@ -94,6 +99,8 @@ export function computeWorkflowToolNames(
 			return [...EXPLORE_WORKFLOW_TOOL_NAMES];
 		case "init":
 			return [...INIT_WORKFLOW_TOOL_NAMES];
+		case "merge":
+			return [...MERGE_WORKFLOW_TOOL_NAMES];
 		case "idle":
 		case "commit":
 			return [];
@@ -307,8 +314,10 @@ export async function restoreModeRuntime(
 }
 
 /**
- * Mode → model role. `init` reuses the explore model. `idle` has no prompt but
- * also routes through explore to keep a stable default model.
+ * Mode → model role. `init` reuses the explore model. `merge` reuses the work
+ * model (conflict resolution and code fixes need the implementation model;
+ * no separate merge role exists). `idle` has no prompt but also routes through
+ * explore to keep a stable default model.
  */
 export function modeRole(mode: Mode): string {
 	switch (mode) {
@@ -319,6 +328,7 @@ export function modeRole(mode: Mode): string {
 		case "plan":
 			return "plan";
 		case "work":
+		case "merge":
 			return "work";
 		case "commit":
 			return "commit";
@@ -341,6 +351,8 @@ function computeFallbackWorkflowToolNames(
 			return withTodoToolName([...WORK_WORKFLOW_TOOL_NAMES], todoToolName);
 		case "init":
 			return [...INIT_WORKFLOW_TOOL_NAMES];
+		case "merge":
+			return [...MERGE_WORKFLOW_TOOL_NAMES];
 		case "idle":
 		case "commit":
 			return [];

@@ -14,6 +14,8 @@ import {
 	buildModeMessageBody,
 	currentStatusText,
 	isWorkflowActive,
+	buildMergeContextBody,
+	MERGE_CONTEXT_MARKER,
 	WORK_HANDOFF_CUSTOM_TYPE,
 } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
@@ -45,7 +47,14 @@ import {
 	gitStatusInWorktree,
 	removeWorktree,
 	validateWorktreeState,
+	validateMergeWorktreeState,
 } from "./worktree.js";
+import {
+	cancelActiveMergeGit,
+	parseMergeCommandArgs,
+	resolveRepoRoot,
+	runMergePreflight,
+} from "./git-integration.js";
 
 /** Read the session branch. Returns undefined on failure (fail-open). */
 function getSessionBranch(ctx: unknown): any[] | undefined {
@@ -340,6 +349,38 @@ export function registerWorkflowContextInjection(
 				return true;
 			});
 
+			// Step 4: Merge Mode canonical context. Rebuild the hidden context
+			// message from persisted state every provider round (filtering previous
+			// copies, including any persisted from older versions) so the merge
+			// baseline and the user authorization survive reload and compaction.
+			// Raw instructions stay at user priority and are never folded into the
+			// system prompt.
+			messages = messages.filter((message) => {
+				const role = (message as { role?: unknown } | undefined)?.role;
+				const content = (message as { content?: unknown } | undefined)?.content;
+				return !(
+					role === "user" &&
+					typeof content === "string" &&
+					content.startsWith(MERGE_CONTEXT_MARKER)
+				);
+			});
+			if (state.mode === "merge" && state.mergeContext) {
+				const body = buildMergeContextBody(state);
+				if (body) {
+					return {
+						messages: [
+							{
+								role: "user" as const,
+								content: `${MERGE_CONTEXT_MARKER}\n\n${body}`,
+								display: false,
+								timestamp: Date.now(),
+							},
+							...messages,
+						],
+					};
+				}
+			}
+
 			return { messages };
 		} catch (err) {
 			console.error(`[workflow] context injection failed: ${err}`);
@@ -573,9 +614,13 @@ export function registerToolCallGuard(
 			}
 		}
 
-		// Worktree-bound Work Mode: code writes must stay inside the active worktree.
+		// Worktree-bound Work/Merge Mode: code writes must stay inside the active
+		// worktree. Merge Mode shares the Work file boundary but uses the
+		// merge-aware validator so a rebase-in-progress worktree (detached HEAD
+		// with a detectable rebase sequencer, workflow-worktree source) keeps
+		// write/edit usable for conflict resolution; every other state stays strict.
 		if (
-			effectiveMode === "work" &&
+			(effectiveMode === "work" || effectiveMode === "merge") &&
 			state.worktreePath &&
 			(event.toolName === "write" || event.toolName === "edit")
 		) {
@@ -588,7 +633,10 @@ export function registerToolCallGuard(
 				};
 			}
 
-			const validation = validateWorktreeState(ctx.cwd, state);
+			const validation =
+				effectiveMode === "merge"
+					? validateMergeWorktreeState(ctx.cwd, state)
+					: validateWorktreeState(ctx.cwd, state);
 			if (!validation.ok) {
 				return {
 					block: true,
@@ -700,7 +748,7 @@ export function registerWfCommand(
 	getAgentDir: () => string,
 ): void {
 	pi.registerCommand("wf", {
-		description: "进入 workflow 模式，启用 /plan /work /review /commit 等命令",
+		description: "进入 workflow 模式，启用 /plan /work /review /wf-merge /wf-commit 等命令",
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 			const sessionKey = ctxSessionKey(ctx);
@@ -771,13 +819,32 @@ export function registerAllWorkflowCommands(
 	// Register the command definition unconditionally. The handler resolves
 	// codeReview.enabled with the real trusted session context before running.
 	registerReviewCommand(pi, getAgentDir);
-	registerCommitCommand(pi, getAgentDir);
+	registerWfMergeCommand(pi, getAgentDir);
+	registerWfCommitCommand(pi, getAgentDir);
 	registerWfStatusCommand(pi, getAgentDir);
 	registerWfResetCommand(pi);
 	registerWfInitCommand(pi, getAgentDir);
 	registerWfExitCommand(pi);
 
 	_workflowCommandsRegistered.add(pi);
+}
+
+// ── Active merge protection ────────────────────────────────────────────────
+
+/**
+ * Denial notice for mode-switching entries while a merge is active. Mode
+ * commands must not silently drop an active merge baseline — the user closes
+ * the run via workflow_merge_complete (completed/cancelled) or hard-recovers
+ * via /wf-reset.
+ */
+function activeMergeDenial(state: WorkflowState): string | null {
+	if (state.mode !== "merge" || !state.mergeContext) return null;
+	const mc = state.mergeContext;
+	return (
+		`当前存在 active merge：${mc.sourceBranch} → ${mc.targetBranch}（${mc.sourceKind}）。` +
+		"请先在 Merge Mode 中调用 workflow_merge_complete(status=\"completed\" 或 \"cancelled\") 完成或中止本次集成；" +
+		"需要硬恢复时使用 /wf-reset。"
+	);
 }
 
 export function registerExploreCommand(
@@ -791,6 +858,11 @@ export function registerExploreCommand(
 			const sessionKey = ctxSessionKey(ctx);
 
 			const current = loadState(ctx.cwd, sessionKey);
+			const mergeDenial = activeMergeDenial(current);
+			if (mergeDenial) {
+				ctx.ui.notify(mergeDenial, "error");
+				return;
+			}
 			// Non-destructive: switch mode only — preserve plan/todos.
 			// Also enable workflow in case the user ran /wf-exit earlier.
 			const state: WorkflowState = {
@@ -828,6 +900,11 @@ export function registerPlanCommand(
 			const sessionKey = ctxSessionKey(ctx);
 
 			const current = loadState(ctx.cwd, sessionKey);
+			const mergeDenial = activeMergeDenial(current);
+			if (mergeDenial) {
+				ctx.ui.notify(mergeDenial, "error");
+				return;
+			}
 			// Capture the current session leaf so requirement extraction can scope
 			// to this Plan lifecycle (user messages from this discussion only).
 			const planStartEntryId =
@@ -883,6 +960,11 @@ export function registerWorkCommand(
 			const workArgs = args.trim();
 
 			const current = loadState(ctx.cwd, sessionKey);
+			const mergeDenial = activeMergeDenial(current);
+			if (mergeDenial) {
+				ctx.ui.notify(mergeDenial, "error");
+				return;
+			}
 			if (current.worktreePath) {
 				const validation = validateWorktreeState(ctx.cwd, current);
 				if (!validation.ok) {
@@ -960,6 +1042,14 @@ export function registerReviewCommand(
 			await ctx.waitForIdle();
 
 			const sessionKey = ctxSessionKey(ctx);
+			{
+				const current = loadState(ctx.cwd, sessionKey);
+				const mergeDenial = activeMergeDenial(current);
+				if (mergeDenial) {
+					ctx.ui.notify(mergeDenial, "error");
+					return;
+				}
+			}
 			const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
 			if (!config.review.enabled) {
 				ctx.ui.notify(
@@ -1036,18 +1126,21 @@ Review scope: 当前 workspace（含 active worktree）。
 5. 判断某 Critical/Important 问题是误判、超出范围、无需修改或与项目约束冲突时，在下一轮调用 \`workflow_review({ feedback: "..." })\` 提交技术理由。feedback 须逐条对应争议 finding，给出技术理由与 \`file:line\` / 命令输出等可复核证据，保持详细且聚焦，禁止编造事实；reviewer 会独立复核。
 6. 第一轮已经没有 Critical/Important 问题时，可以结束循环。2-3 轮后仍存在分歧时，停止并交给用户裁决。
 7. Minor 问题按价值选择处理，不能阻塞 review 通过。
-8. \`/commit\` 始终直接可用，不要求 Review；review 完成后可随时提交。`;
+8. \`/wf-commit\` 始终直接可用，不要求 Review；review 完成后可随时提交。`;
 	ctx.ui.notify("Starting unified review loop: workspace.", "info");
 	pi.setSessionName("review: workspace");
 	pi.sendUserMessage(promptText);
 }
 
 
-export function registerCommitCommand(
+export function registerWfCommitCommand(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
-	pi.registerCommand("commit", {
+	// Command migrated from /commit to /wf-commit with no compat alias (a
+	// deliberate breaking CLI change). Registered through the same conditional
+	// registration path as all other workflow commands.
+	pi.registerCommand("wf-commit", {
 		description:
 			"切到 commit 模型，根据当前 diff 生成 commit message 并直接提交",
 		handler: async (args, ctx) => {
@@ -1055,6 +1148,11 @@ export function registerCommitCommand(
 			const sessionKey = ctxSessionKey(ctx);
 
 			const current = loadState(ctx.cwd, sessionKey);
+			const mergeDenial = activeMergeDenial(current);
+			if (mergeDenial) {
+				ctx.ui.notify(mergeDenial, "error");
+				return;
+			}
 			if (current.worktreePath) {
 				const validation = validateWorktreeState(ctx.cwd, current);
 				if (!validation.ok) {
@@ -1066,10 +1164,10 @@ export function registerCommitCommand(
 				}
 			}
 
-		const state = {
-			...current,
-			mode: "commit" as const,
-		};
+			const state = {
+				...current,
+				mode: "commit" as const,
+			};
 
 			const result = await transitionWorkflowMode({
 				pi,
@@ -1089,6 +1187,157 @@ export function registerCommitCommand(
 
 			pi.sendUserMessage(
 				`请查看当前 diff，生成合适的 commit message，并直接执行 git add 和 git commit。${extra}`,
+			);
+		},
+	});
+}
+
+// ── /wf-merge command ────────────────────────────────────────────────────────
+
+/**
+ * Register /wf-merge: enter Merge Mode to integrate the source branch (the
+ * active workflow worktree branch, or the current ordinary local branch) into
+ * a target local branch. Default strategy is rebase + ff-only; trailing
+ * natural-language instructions authorize a custom strategy. Syntax:
+ *
+ *   /wf-merge [--target <branch>] [用户自然语言指令]
+ *
+ * Preflight rejects dirty source/target checkouts, detached-HEAD sources,
+ * source==target, and unfinished sequencers; the baseline is then persisted
+ * atomically with mode=merge BEFORE the kickoff message, so a crash mid-merge
+ * never loses the merge context. Re-running /wf-merge with an active context
+ * never overwrites the baseline or the authorization.
+ */
+export function registerWfMergeCommand(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.registerCommand("wf-merge", {
+		description:
+			"进入 Merge Mode：rebase 来源分支到目标分支并 fast-forward（可尾随自定义策略指令）",
+		handler: async (args, ctx) => {
+			await ctx.waitForIdle();
+			const sessionKey = ctxSessionKey(ctx);
+			const current = loadState(ctx.cwd, sessionKey);
+
+			// Init Mode must finish first: switching modes here would clear
+			// initTargetPath/initReturnMode via state normalization and orphan the
+			// init run.
+			if (current.mode === "init") {
+				ctx.ui.notify(
+					"当前处于 Init Mode。请先调用 workflow_init_complete 完成或取消初始化，再执行 /wf-merge。",
+					"error",
+				);
+				return;
+			}
+
+			// Active merge: never overwrite the recorded baseline/authorization.
+			// No args → re-send the current context; new instructions arrive as a
+			// normal user message inside Merge Mode.
+			if (current.mode === "merge" && current.mergeContext) {
+				const trimmed = (args ?? "").trim();
+				if (trimmed) {
+					ctx.ui.notify(
+						"Merge 已在进行中，基线与授权不会被覆盖；新增指令已作为普通用户消息发送给当前 Merge。",
+						"info",
+					);
+					pi.sendUserMessage(trimmed);
+				} else {
+					ctx.ui.notify("Merge 已在进行中；已重发当前上下文。", "info");
+					pi.sendUserMessage(
+						`${MERGE_CONTEXT_MARKER}\n\n${buildMergeContextBody(current)}\n\n请继续按 Active Merge Context 执行本次集成。`,
+					);
+				}
+				return;
+			}
+
+			// Strict worktree validation at entry (the rebase-detached window is
+			// only tolerated mid-merge, never at kickoff).
+			if (current.worktreePath) {
+				const validation = validateWorktreeState(ctx.cwd, current);
+				if (!validation.ok) {
+					ctx.ui.notify(
+						`Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
+						"error",
+					);
+					return;
+				}
+			}
+
+			const parsed = parseMergeCommandArgs(args ?? "");
+			if (!parsed.ok) {
+				ctx.ui.notify(parsed.error, "error");
+				return;
+			}
+
+			const preflight = runMergePreflight(ctx.cwd, {
+				worktreePath: current.worktreePath,
+				worktreeBranch: current.worktreeBranch,
+				worktreeBaseBranch: current.worktreeBaseBranch,
+				targetBranch: parsed.value.targetBranch,
+			});
+			if (!preflight.ok) {
+				ctx.ui.notify(`无法启动 merge：${preflight.error}`, "error");
+				return;
+			}
+			const facts = preflight.value;
+
+			// Only non-idle workflow modes are valid return targets (idle is
+			// auto-promoted to explore on session start; merge cannot return to
+			// itself here because the active-merge branch above already returned).
+			const returnMode: "explore" | "plan" | "work" | "commit" =
+				current.mode === "plan" ||
+				current.mode === "work" ||
+				current.mode === "commit"
+					? current.mode
+					: "explore";
+
+			const nextState: WorkflowState = {
+				...current,
+				mode: "merge",
+				mergeContext: {
+					sourceKind: facts.sourceKind,
+					sourceBranch: facts.sourceBranch,
+					targetBranch: facts.targetBranch,
+					sourceHeadBefore: facts.sourceHeadBefore,
+					targetHeadBefore: facts.targetHeadBefore,
+					sourceOnlyCommitCountBefore: facts.sourceOnlyCommitCountBefore,
+					instructions: parsed.value.instructions,
+					defaultStrategy: !parsed.value.instructions,
+					returnMode,
+				},
+			};
+
+			const result = await transitionWorkflowMode({
+				pi,
+				ctx,
+				sessionKey,
+				nextState,
+				getAgentDir,
+			});
+			if (!result.ok) {
+				ctx.ui.notify(result.reason, "error");
+				return;
+			}
+
+			pi.setSessionName(
+				`merge: ${facts.sourceBranch} → ${facts.targetBranch}`,
+			);
+
+			const kindLabel =
+				facts.sourceKind === "workflow-worktree"
+					? "workflow worktree"
+					: "普通本地分支（当前 checkout）";
+			const strategyLine = parsed.value.instructions
+				? "存在用户授权指令（见本轮注入的 Active Merge Context）；只有指令逐字点名的动作被授权，其余高风险动作保持默认禁令。"
+				: `默认策略：rebase \`${facts.sourceBranch}\` 到 \`${facts.targetBranch}\`，解决冲突并验证后调用 workflow_merge_complete(status="completed", finalize="ff-only")。`;
+			pi.sendUserMessage(
+				[
+					"# Merge Mode 任务",
+					`来源分支 \`${facts.sourceBranch}\` → 目标分支 \`${facts.targetBranch}\`（${kindLabel}）。`,
+					strategyLine,
+					`中止调用 workflow_merge_complete(status="cancelled")。目标分支 ref 的最终前移由 workflow_merge_complete 完成。`,
+				].join("\n\n"),
 			);
 		},
 	});
@@ -1186,6 +1435,11 @@ export function registerWfExitCommand(pi: ExtensionAPI): void {
 			const sessionKey = ctxSessionKey(ctx);
 
 			const state = loadState(ctx.cwd, sessionKey);
+			const mergeDenial = activeMergeDenial(state);
+			if (mergeDenial) {
+				ctx.ui.notify(mergeDenial, "error");
+				return;
+			}
 			state.mode = "idle";
 			state.workflowEnabled = false;
 			state.workflowExplicitlyDisabled = true;
@@ -1221,6 +1475,44 @@ export function registerWfResetCommand(pi: ExtensionAPI): void {
 			const sessionKey = ctxSessionKey(ctx);
 
 			const current = loadState(ctx.cwd, sessionKey);
+			// Active merge: abort in-flight git operations and restore the source
+			// checkout BEFORE clearing state, so the reset never leaves an invisible
+			// half-finished rebase behind. A failed recovery stops the reset.
+			if (current.mode === "merge" && current.mergeContext) {
+				const mc = current.mergeContext;
+				if (mc.sourceKind === "workflow-worktree" && !current.worktreePath) {
+					ctx.ui.notify(
+						"Active merge 的来源 worktree 已不在状态中；请手动恢复后重试 /wf-reset。",
+						"error",
+					);
+					return;
+				}
+				const sourceCheckoutPath =
+					mc.sourceKind === "workflow-worktree"
+						? current.worktreePath!
+						: (() => {
+							const root = resolveRepoRoot(ctx.cwd);
+							if (!root.ok) return ctx.cwd;
+							return root.root;
+						})();
+				const cancel = cancelActiveMergeGit(ctx.cwd, {
+					sourceKind: mc.sourceKind,
+					sourceBranch: mc.sourceBranch,
+					targetBranch: mc.targetBranch,
+					sourceCheckoutPath,
+				});
+				if (!cancel.ok) {
+					ctx.ui.notify(
+						`中止 active merge 失败，已停止 reset：${cancel.error ?? "(unknown)"}\n${cancel.diagnostics.join("\n")}`,
+						"error",
+					);
+					return;
+				}
+				ctx.ui.notify(
+					`已中止 active merge（${mc.sourceBranch} → ${mc.targetBranch}）：${[...cancel.aborted, ...(cancel.reattached ? ["forced-reattach"] : [])].join(", ") || "无需恢复"}`,
+					"info",
+				);
+			}
 			if (current.worktreePath) {
 				const choice = ctx.ui.select
 					? await ctx.ui.select("Active worktree", [
@@ -1331,6 +1623,12 @@ export function registerWfInitCommand(
 			const sessionKey = ctxSessionKey(ctx);
 			const state = loadState(ctx.cwd, sessionKey);
 
+			const mergeDenial = activeMergeDenial(state);
+			if (mergeDenial) {
+				ctx.ui.notify(mergeDenial, "error");
+				return;
+			}
+
 			// Resume an already-active init instead of overwriting the return mode.
 			if (state.mode === "init" && state.initTargetPath) {
 				sendInitTaskMessage(
@@ -1344,10 +1642,12 @@ export function registerWfInitCommand(
 				return;
 			}
 
+			// Active merge was denied above, so "merge" cannot reach here; map it
+			// to explore defensively alongside idle/init.
 			const returnMode: WorkflowState["initReturnMode"] =
-				state.mode === "idle" || state.mode === "init"
-					? "explore"
-					: state.mode;
+				state.mode === "plan" || state.mode === "work" || state.mode === "commit"
+					? state.mode
+					: "explore";
 
 			const nextState: WorkflowState = {
 				...state,

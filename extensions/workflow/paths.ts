@@ -45,7 +45,7 @@ export function sessionStatePath(cwd: string, sessionKey: string): string {
 /**
  * Session-scoped review-round history path. Separate from state.json so the
  * transient review verdict stays out of WorkflowState (it never gates
- * /commit). Managed exclusively by the workflow_review tool. Does NOT create
+ * /wf-commit). Managed exclusively by the workflow_review tool. Does NOT create
  * directories.
  */
 export function reviewHistoryPath(cwd: string, sessionKey: string): string {

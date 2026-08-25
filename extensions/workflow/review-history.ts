@@ -18,7 +18,7 @@
  *     last round (same verdict, no re-run).
  *
  * The verdict remains TRANSIENT: this file lives beside session state but is
- * separate from WorkflowState and never gates /commit. The Work agent's tools
+ * separate from WorkflowState and never gates /wf-commit. The Work agent's tools
  * block direct reads of .pi/workflow/, so the reviewer child only ever sees
  * what the workflow_review tool puts into its task.
  */

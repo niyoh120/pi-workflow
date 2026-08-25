@@ -1,6 +1,6 @@
 # pi-workflow
 
-Lightweight software development workflow extension for pi-coding-agent: plan, optional independent plan-review agent, on-demand unified review (independent reviewer + optional workspace OCR), and commit orchestration.
+Lightweight software development workflow extension for pi-coding-agent: plan, optional independent plan-review agent, on-demand unified review (independent reviewer + optional workspace OCR), user-triggered branch integration (Merge Mode), and commit orchestration.
 
 **Zero external Pi extension dependencies.** Plan review and the unified Review run as fresh, in-memory child AgentSessions that independently re-validate the saved plan and review the implementation. When OCR is enabled, the Review runs the standalone `ocr review` CLI against the workspace and folds the normalized findings into the same reviewer. No `@tintinweb/pi-subagents` required.
 
@@ -26,7 +26,8 @@ pi install .
 ## Architecture
 
 ```
-idle → explore → plan → work → [/review loop] → commit → idle
+idle → explore → plan → work → [/review loop] → wf-commit → idle
+                                                 ↘ /wf-merge (Merge Mode: rebase + ff) → returns to the prior mode
 ```
 
 - **Tool ownership**: pi-workflow manages only its own `workflow_*` tools. Built-in tools and other extension tools preserve their active/inactive state across mode changes; mode permissions apply to every active tool through prompts and stable path guards. There is no special auto-activation of `ask_user_question`.
@@ -34,7 +35,7 @@ idle → explore → plan → work → [/review loop] → commit → idle
 - **Mode context**: the current mode prompt and worktree notice are injected into the stable system prompt (via `before_agent_start`), and the Approved-Plan Work handoff is isolated via a canonical marker so Plan→Work transitions within the same agent run always see the latest mode. Dynamic state (todos, run IDs) comes from tool results, not the system prompt.
 - **Explore Mode**: Default landing after `/wf`. Read-only codebase exploration and Q&A (same permissions as Plan Mode). Explore exposes no workflow tools; a preserved plan is read in Plan Mode. Use `/plan` when ready to design.
 - **Plan Review** (optional): Model-initiated `workflow_plan_review` tool call — the plan agent may invoke it after saving a plan. Spawns a fresh, isolated in-memory AgentSession that inherits the parent Plan session's information-tool surface (minus workflow tools), independently explores the repository and active external tools, and returns structured Critical/Important/Minor/Summary findings grounded in repository evidence plus a transient PASS/FAIL evaluation signal submitted through the reviewer's own terminating `review_submit` tool call — the report and the submit call share the same final assistant message, and a missing submission resolves fail-closed to FAIL (never gates approval). Not a separate mode; runs within Plan Mode under a single 30-minute total timeout. Repeated calls reuse cached rounds for identical inputs and run incremental re-reviews focused on changed plan sections / new confirmed decisions; the planner may answer disputed findings via an optional UNTRUSTED `feedback` argument.
-- **Unified Review** (on-demand, configurable): `/review` (or a direct `workflow_review` call) in Work Mode launches a fresh, isolated in-memory AgentSession that independently reviews the implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work) by exploring the actual checkout/worktree itself — it does NOT receive the Work agent's execution summary, diffs, or test claims. The single explicit exception is an optional `feedback` argument the Work agent may pass to respond to a prior round's disputed findings — it is injected as a clearly-labeled UNTRUSTED section that the reviewer must independently verify against the repository before it carries any weight. When `codeReview.enabled` is true, a workspace `ocr review` runs first and its normalized findings are injected into the reviewer task (each finding must be dispositioned with repository evidence). It emits a coverage matrix, correctness/verification findings, OCR dispositions, and submits the final verdict through its own terminating `review_submit` tool call (report and submit share the same final assistant message; a missing submission resolves fail-closed to FAIL). The verdict is **transient**: it only signals whether this on-demand review loop can end — it is never written to workflow state and never gates `/commit`. Disable via `review.enabled: false` to hide `/review` and the tool; set `codeReview.enabled: false` to review without OCR.
+- **Unified Review** (on-demand, configurable): `/review` (or a direct `workflow_review` call) in Work Mode launches a fresh, isolated in-memory AgentSession that independently reviews the implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work) by exploring the actual checkout/worktree itself — it does NOT receive the Work agent's execution summary, diffs, or test claims. The single explicit exception is an optional `feedback` argument the Work agent may pass to respond to a prior round's disputed findings — it is injected as a clearly-labeled UNTRUSTED section that the reviewer must independently verify against the repository before it carries any weight. When `codeReview.enabled` is true, a workspace `ocr review` runs first and its normalized findings are injected into the reviewer task (each finding must be dispositioned with repository evidence). It emits a coverage matrix, correctness/verification findings, OCR dispositions, and submits the final verdict through its own terminating `review_submit` tool call (report and submit share the same final assistant message; a missing submission resolves fail-closed to FAIL). The verdict is **transient**: it only signals whether this on-demand review loop can end — it is never written to workflow state and never gates `/wf-commit`. Disable via `review.enabled: false` to hide `/review` and the tool; set `codeReview.enabled: false` to review without OCR.
 
 ## Modes
 
@@ -48,7 +49,8 @@ Workflow tools and commands are **opt-in by default**: only `/wf` is visible unt
 | Plan Mode | `/plan` | Brainstorm and produce an implementation plan |
 | Work Mode | `/work` | Implement the approved plan |
 | Review/Fix Loop | `/review` | On-demand unified review of the current workspace (incl. active worktree); folds in workspace OCR when enabled |
-| Commit Mode | `/commit` | Generate and execute a conventional commit (always available, no review gate) |
+| Merge Mode | `/wf-merge [--target <branch>] [指令]` | User-triggered branch integration: default rebase + fast-forward, or a custom strategy authorized by trailing instructions (see Merge Mode below) |
+| Commit Mode | `/wf-commit` | Generate and execute a conventional commit (always available, no review gate) |
 
 ## Configuration
 
@@ -146,7 +148,7 @@ The Work agent's reasoning, thinking, tool results, execution summaries, diffs, 
 
 **Runtime budget.** A single 30-minute total timeout (`1_800_000ms`) bounds the reviewer run, combined with the parent turn's AbortSignal. OCR shares the same parent signal. The child session is always disposed in `finally`; timeout or user cancellation aborts the active AgentSession and returns an explicit tool error.
 
-**Result.** The tool takes a single optional `feedback` argument (free text responding to a prior round's disputed findings); the reviewer task is otherwise assembled from workflow state. The final text keeps the `Critical / Important / Minor / Summary` structure with concrete repository evidence, and the result carries aggregated nested usage on its top-level `usage` field plus operational metadata (reviewer model/thinking, elapsed time, turns, tool-call count, requested/active/unavailable tools, OCR enabled/counts/rawPath, verdict, stop reason/error). The verdict is **transient**: PASS means the review loop can end; it is never written to workflow state and never gates `/commit`.
+**Result.** The tool takes a single optional `feedback` argument (free text responding to a prior round's disputed findings); the reviewer task is otherwise assembled from workflow state. The final text keeps the `Critical / Important / Minor / Summary` structure with concrete repository evidence, and the result carries aggregated nested usage on its top-level `usage` field plus operational metadata (reviewer model/thinking, elapsed time, turns, tool-call count, requested/active/unavailable tools, OCR enabled/counts/rawPath, verdict, stop reason/error). The verdict is **transient**: PASS means the review loop can end; it is never written to workflow state and never gates `/wf-commit`.
 
 ### Unified review (on-demand tool)
 
@@ -264,7 +266,8 @@ This prevents wasting tokens when the user still wants to refine the design.
 | `/go [--force]` | Approve current plan and hand off to Work Mode |
 | `/work [task]` | Skip Plan Mode, go straight to implementation |
 | `/review` | On-demand unified review of the current workspace (incl. active worktree); folds in workspace OCR when `codeReview.enabled` is true |
-| `/commit [notes]` | Generate commit message and commit |
+| `/wf-merge [--target <branch>] [指令]` | Enter Merge Mode: integrate the source branch (active workflow worktree branch, or the current ordinary local branch) into a target local branch |
+| `/wf-commit [notes]` | Generate commit message and commit |
 | `/wf-status` | Show current workflow state (mode, active runtime model/thinking vs configured role, plan path, run IDs) |
 | `/wf-exit` | Exit workflow mode |
 | `/wf-reset` | Clear workflow state and plan directory |
@@ -299,11 +302,26 @@ The unified Review runs an **on-demand, user-triggered** independent reviewer ov
 - **Bounded** — one 30-minute total timeout; uses `models.review`.
 - **Configurable** — set `models.review` for the reviewer model/thinking, `review.enabled` (default `true`) to toggle `/review` + the tool, and `codeReview.enabled` to toggle the OCR pass.
 - **Machine verdict** — submitted through the child-session-only `review_submit` tool (schema-validated PASS/FAIL enum, terminating) as the final action of the same assistant message that carries the complete report; fail-closed on a missing submission. The mandatory submit call never counts as repository inspection evidence.
-- **Transient verdict** — PASS means the review loop can end. It is never written to workflow state and never gates `/commit`.
+- **Transient verdict** — PASS means the review loop can end. It is never written to workflow state and never gates `/wf-commit`.
 
 ### Flow to commit
 
-- Implement → optionally `/review` (with or without OCR) → fix → re-review → `/commit` (always available, no review gate).
+- Implement → optionally `/review` (with or without OCR) → fix → re-review → `/wf-commit` (always available, no review gate).
+
+## Merge Mode (`/wf-merge`)
+
+`/wf-merge` is the user-triggered Git integration entry. It works for both kinds of local source branches and enters a dedicated **Merge Mode** that reuses the `work` model role (no new model config):
+
+```text
+/wf-merge [--target <local-branch>] [用户自然语言指令]
+```
+
+- **Source resolution (fixed priority)** — with an active workflow worktree in session state, the source is always that worktree branch (bash/read/edit/write keep targeting the worktree); without one, the source is the current checkout of the main repository. Detached HEAD, `source == target`, dirty source/target checkouts (no auto-stash), and unfinished rebase/merge/cherry-pick/revert operations are rejected up front.
+- **Target resolution** — explicit `--target` (must be a local branch) wins; omitted, a workflow-worktree source uses its recorded base branch; an ordinary source infers locally-available `origin/HEAD` mapping → `master` → `main`; otherwise the command asks for `--target`.
+- **Default strategy (no trailing instructions)** — rebase the source branch onto the target, resolve conflicts (the model may edit any file in the source checkout — a rebase-in-progress worktree is accepted in a detached-HEAD window backed by a detectable rebase sequencer), run verification, then call `workflow_merge_complete(status="completed", finalize="ff-only")`. The tool deterministically fast-forwards the target: inside the worktree that has the target checked out via `git merge --ff-only`, otherwise via an ancestor-checked `git update-ref` with expected-old CAS that never touches the current source checkout. Default flow forbids push, force/reset, clean, branch/worktree deletion, and unrelated commits; everything (source branch, worktree, checkout) is retained and you stay on the source branch.
+- **Custom strategy (trailing instructions)** — the raw trailing instructions are the only authorization source for this run: only actions the instructions literally name (no-ff merge, squash, cherry-pick, push, force/reset, clean, branch/worktree deletion, …) may be executed. Once the target integration is done, `finalize="already-integrated"` runs strategy-independent repository health checks and reports the actual state; a user-deleted workflow worktree clears the corresponding state fields. Custom runs may also pick `finalize="ff-only"` to reuse the deterministic finalizer.
+- **Cancellation & recovery** — `workflow_merge_complete(status="cancelled")` aborts in-flight rebase/merge/cherry-pick/revert and reattaches a detached source checkout with a guarded `git checkout -f <sourceBranch>` (in-flight conflict resolution is discarded by design, matching `rebase --abort` semantics). Refs already moved by a custom strategy are reported, never rolled back implicitly. `/wf-reset` reuses the same recovery before clearing state and stops if recovery fails.
+- **Hard guarantees** — the persisted `mergeContext` baseline (source/target, pre-rebase heads, commit counts, authorization) is saved atomically before the kickoff and rebuilt into the provider context every round, so reload/compaction cannot lose it. A `defaultStrategy` run can never degrade into the looser custom completion checks. Work Mode keeps its full Git-write prohibition; regular commits happen only through `/wf-commit`; branch integration and its necessary commits happen only inside Merge Mode. Mode-switching commands (`/plan`, `/work`, `/review`, `/wf-commit`, `/wf-init`, `/wf-exit`, …) refuse to drop an active merge — close it via `workflow_merge_complete` or hard-recover via `/wf-reset`.
 
 ## OCR (workspace findings)
 
@@ -390,7 +408,7 @@ Launch the on-demand unified reviewer agent (available in Work Mode when `review
 - Returns a coverage matrix, Implementation Correctness / Verification findings, OCR dispositions (when OCR ran), Critical/Important/Minor, and a final PASS/FAIL verdict submitted via `review_submit`.
 - PASS requires both a PASS verdict AND at least one actually-started repository tool call (fail-closed otherwise; `review_submit` itself never counts).
 - **Round continuity** — each round (verdict, full output, OCR findings, diff fingerprint, task-input hash) is persisted per work run in session-scoped `review-history.json` (newest 3 kept): the next round injects the previous findings for re-disposition, reuses cached OCR findings on an unchanged diff, and short-circuits identically when the diff AND every task input — including the current reviewer protocol text — are unchanged. A protocol change therefore invalidates reuse of rounds produced under the older protocol exactly once.
-- The verdict is **transient** — it only signals whether this review loop can end. It is never written to workflow state and never gates `/commit`. Operational metadata (reviewer model, elapsed, turns, tool calls, repo-tool-used, OCR enabled/counts/rawPath, verdict) is in `details`.
+- The verdict is **transient** — it only signals whether this review loop can end. It is never written to workflow state and never gates `/wf-commit`. Operational metadata (reviewer model, elapsed, turns, tool calls, repo-tool-used, OCR enabled/counts/rawPath, verdict) is in `details`.
 
 | Path | Purpose |
 |------|---------|

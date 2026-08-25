@@ -420,7 +420,7 @@ console.log("\n=== T3: worktree notice dedup + recovery warning ===");
 		"helpers.ts still exports worktreeRuntimeNotice for buildModeMessageBody",
 	);
 
-	// /work, /review, /commit kickoffs do not append the worktree notice.
+	// /work, /review, /wf-commit kickoffs do not append the worktree notice.
 	const workCmdStart = commands.indexOf("export function registerWorkCommand");
 	assert(workCmdStart !== -1, "registerWorkCommand found in commands.ts");
 	const workCmdEnd = commands.indexOf("export function registerReviewCommand", workCmdStart);
@@ -437,13 +437,28 @@ console.log("\n=== T3: worktree notice dedup + recovery warning ===");
 		!/worktreeRuntimeNotice/.test(reviewBlock),
 		"/review (startReviewLoop) does not append worktree notice",
 	);
-	const commitStart = commands.indexOf("export function registerCommitCommand");
-	assert(commitStart !== -1, "registerCommitCommand found in commands.ts");
-	const commitEnd = commands.indexOf("export function registerWfStatusCommand", commitStart);
-	const commitBlock = commands.slice(commitStart, commitEnd > 0 ? commitEnd : commands.length);
+	const commitStart = commands.indexOf("export function registerWfCommitCommand");
+	assert(commitStart !== -1, "registerWfCommitCommand found in commands.ts");
+	const commitEnd = commands.indexOf("export function registerWfMergeCommand", commitStart);
+	assert(commitEnd > commitStart, "registerWfMergeCommand follows registerWfCommitCommand");
+	const commitBlock = commands.slice(commitStart, commitEnd);
 	assert(
 		!/worktreeRuntimeNotice/.test(commitBlock),
-		"/commit kickoff does not append worktree notice",
+		"/wf-commit kickoff does not append worktree notice",
+	);
+	// /wf-merge kickoff does not append the worktree notice either (it lives in
+	// the stable system prompt + per-round hidden merge context).
+	const wfMergeStart = commands.indexOf("export function registerWfMergeCommand");
+	assert(wfMergeStart >= 0, "registerWfMergeCommand found in commands.ts");
+	const wfMergeEnd = commands.indexOf("export function registerWfStatusCommand", wfMergeStart);
+	const wfMergeBlock = commands.slice(wfMergeStart, wfMergeEnd > 0 ? wfMergeEnd : commands.length);
+	assert(
+		!/worktreeRuntimeNotice/.test(wfMergeBlock),
+		"/wf-merge kickoff does not append worktree notice",
+	);
+	assert(
+		wfMergeBlock.includes("buildMergeContextBody") && wfMergeBlock.includes("MERGE_CONTEXT_MARKER"),
+		"/wf-merge active-merge re-entry re-sends the canonical merge context",
 	);
 	// commands.ts no longer references worktreeRuntimeNotice anywhere.
 	assert(
@@ -659,6 +674,88 @@ console.log("\n=== T4: restore vs apply mode runtime split ===");
 			/pi\.getThinkingLevel\(\)/.test(wfStatusBlock) &&
 			/configured role thinking:/.test(wfStatusBlock),
 		"/wf-status displays active runtime thinking (pi.getThinkingLevel) alongside configured role thinking",
+	);
+}
+
+// ── T5: Merge Mode prompt + canonical context + merge-aware guards ────────
+console.log("\n=== T5: merge mode prompt/context/guards ===");
+{
+	// MERGE_PROMPT exists and is dispatched for mode "merge".
+	assert(
+		/export const MERGE_PROMPT/.test(prompts),
+		"prompts.ts: MERGE_PROMPT constant exists",
+	);
+	assert(
+		/case "merge":\s*\n\s*prompt = MERGE_PROMPT;/.test(prompts),
+		"prompts.ts: dispatch maps merge → MERGE_PROMPT",
+	);
+	assert(
+		/finally|workflow_merge_complete\(status=\"cancelled\"\)|默认流程禁止/.test(prompts) &&
+			/MERGE_PROMPT[\s\S]*?workflow_merge_complete/.test(prompts),
+		"prompts.ts: MERGE_PROMPT routes completion/cancel through workflow_merge_complete",
+	);
+	// buildModeMessageBody picks up merge via promptForMode; the worktree notice
+	// stays shared with Work (single source, no duplication in kickoffs — see T3).
+	assert(
+		/buildModeMessageBody[\s\S]*?worktreeRuntimeNotice/.test(helpers),
+		"helpers.ts: buildModeMessageBody keeps the shared worktree notice",
+	);
+
+	// Context injection: rebuilds the hidden canonical merge context from state
+	// every round and filters previous copies (single current message).
+	assert(
+		/MERGE_CONTEXT_MARKER/.test(commands) && /buildMergeContextBody\(state\)/.test(commands),
+		"context handler rebuilds the merge context body from persisted state",
+	);
+	const step4Start = commands.indexOf("// Step 4: Merge Mode canonical context");
+	assert(step4Start !== -1, "context handler has the merge context step");
+	const step4Block = commands.slice(step4Start, commands.indexOf("return { messages };", step4Start));
+	assert(
+		step4Block.includes("display: false"),
+		"merge context message is hidden (display: false)",
+	);
+	assert(
+		/startsWith\(MERGE_CONTEXT_MARKER\)/.test(step4Block),
+		"merge context filtering keys off the stable marker prefix",
+	);
+	assert(
+		!/"role": "custom"|role: "custom" as const,\s*customType: MERGE_CONTEXT_MARKER/.test(step4Block),
+		"merge context stays at user priority (not a system prompt merge)",
+	);
+
+	// Merge-aware worktree guard call-site: commands.ts write/edit guard selects
+	// the merge-aware validator for mode==="merge", strict otherwise.
+	const guardBlock = commands.slice(
+		commands.indexOf("Worktree-bound Work/Merge Mode"),
+		commands.indexOf("// Read-only modes"),
+	);
+	assert(
+		/effectiveMode === "merge"[\s\S]{0,140}validateMergeWorktreeState\(ctx\.cwd, state\)/.test(guardBlock),
+		"tool_call guard: merge mode write/edit uses the merge-aware validator",
+	);
+	assert(
+		guardBlock.includes("validateWorktreeState(ctx.cwd, state)"),
+		"tool_call guard: work mode write/edit keeps the strict validator",
+	);
+
+	// bash override resolver is merge-aware in tools.ts.
+	assert(
+		/state\.mode === "merge"[\s\S]{0,200}validateMergeWorktreeState\(cwd, state\)/.test(tools),
+		"tools.ts: resolveEffectiveCwd selects merge-aware validation for Merge Mode",
+	);
+
+	// workflow_merge_complete terminates the turn after restoring the mode.
+	const mcToolStart = tools.indexOf("export function registerMergeCompleteTool");
+	const mcBulk = tools.indexOf("// ── Bulk registration", mcToolStart);
+	const mcTool = tools.slice(mcToolStart, mcBulk > mcToolStart ? mcBulk : tools.length);
+	assert(/terminate: true/.test(mcTool), "workflow_merge_complete returns terminate: true");
+	assert(
+		/mode: mc\.returnMode/.test(mcTool) && /mergeContext: undefined/.test(mcTool),
+		"workflow_merge_complete clears mergeContext and restores returnMode",
+	);
+	assert(
+		/mc\.defaultStrategy && params\.finalize !== "ff-only"/.test(mcTool),
+		"workflow_merge_complete: defaultStrategy rejects finalize=already-integrated",
 	);
 }
 

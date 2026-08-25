@@ -179,9 +179,16 @@ export function createWorktree(
 	return { path: worktreePath, branch, baseBranch };
 }
 
-export function validateWorktreeState(
+/**
+ * Validate the worktree IDENTITY only: absolute path, real directory, an
+ * actual git worktree, a different checkout than the current repo root, and
+ * the same git common dir (same repository). Deliberately does NOT check
+ * which branch is checked out — callers that need branch discipline use
+ * validateWorktreeState (strict) or validateMergeWorktreeState (merge-aware).
+ */
+export function validateWorktreeIdentity(
 	cwd: string,
-	state: Pick<WorkflowState, "worktreePath" | "worktreeBranch">,
+	state: Pick<WorkflowState, "worktreePath">,
 	deps: WorktreeDeps = {},
 ): WorktreeValidation {
 	if (!state.worktreePath) return { ok: true };
@@ -202,20 +209,6 @@ export function validateWorktreeState(
 			deps,
 		);
 		if (inside !== "true") return { ok: false, reason: "Path is not a git worktree" };
-
-		if (state.worktreeBranch) {
-			const branch = execGit(
-				state.worktreePath,
-				["rev-parse", "--abbrev-ref", "HEAD"],
-				deps,
-			);
-			if (branch !== state.worktreeBranch) {
-				return {
-					ok: false,
-					reason: `Worktree branch mismatch: expected ${state.worktreeBranch}, got ${branch}`,
-				};
-			}
-		}
 
 		const root = gitPath(cwd, execGit(cwd, ["rev-parse", "--show-toplevel"], deps), realpathSync);
 		const wtRoot = gitPath(
@@ -241,6 +234,113 @@ export function validateWorktreeState(
 	}
 
 	return { ok: true };
+}
+
+/**
+ * Whether the checkout has a rebase sequencer in progress. Kept local (same
+ * shape as git-integration.ts detectSequencer) so worktree.ts keeps only
+ * type-only local imports and stays directly importable by the no-build
+ * validation scripts.
+ */
+function hasRebaseSequencerIn(
+	checkoutPath: string,
+	deps: WorktreeDeps = {},
+): boolean {
+	const existsSync = deps.existsSync ?? fs.existsSync;
+	for (const name of ["rebase-merge", "rebase-apply"]) {
+		try {
+			const p = execGit(checkoutPath, ["rev-parse", "--git-path", name], deps);
+			const abs = path.isAbsolute(p) ? p : path.resolve(checkoutPath, p);
+			if (existsSync(abs)) return true;
+		} catch {
+			// git failure → no sequencer evidence
+		}
+	}
+	return false;
+}
+
+/**
+ * Strict worktree validation: identity (see validateWorktreeIdentity) plus a
+ * branch-checkout requirement — the worktree HEAD must be exactly
+ * `state.worktreeBranch`. Used by Work/Review/Commit/reset paths where the
+ * workflow-owned branch must be checked out.
+ */
+export function validateWorktreeState(
+	cwd: string,
+	state: Pick<WorkflowState, "worktreePath" | "worktreeBranch">,
+	deps: WorktreeDeps = {},
+): WorktreeValidation {
+	const identity = validateWorktreeIdentity(cwd, state, deps);
+	if (!identity.ok) return identity;
+	if (!state.worktreeBranch) return { ok: true };
+
+	try {
+		const branch = execGit(
+			state.worktreePath!,
+			["rev-parse", "--abbrev-ref", "HEAD"],
+			deps,
+		);
+		if (branch !== state.worktreeBranch) {
+			return {
+				ok: false,
+				reason: `Worktree branch mismatch: expected ${state.worktreeBranch}, got ${branch}`,
+			};
+		}
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		return { ok: false, reason: message };
+	}
+
+	return { ok: true };
+}
+
+/**
+ * Merge-aware worktree validation for Merge Mode with a workflow-worktree
+ * source. Identity is always required. The branch check stays strict EXCEPT in
+ * the verifiable rebase-in-progress window: when the persisted merge context
+ * says the source is this workflow worktree branch AND a rebase sequencer is
+ * detectable in this worktree, a detached HEAD is accepted (git rebases on a
+ * detached HEAD; `rebase --continue` / `--abort` must stay usable). When the
+ * sequencer disappears, strict branch matching resumes automatically. Manual
+ * detached HEAD, wrong worktree, branch mismatch, and common-dir mismatch all
+ * stay fail-closed.
+ */
+export function validateMergeWorktreeState(
+	cwd: string,
+	state: Pick<WorkflowState, "worktreePath" | "worktreeBranch" | "mergeContext">,
+	deps: WorktreeDeps = {},
+): WorktreeValidation {
+	const identity = validateWorktreeIdentity(cwd, state, deps);
+	if (!identity.ok) return identity;
+	if (!state.worktreeBranch) return { ok: true };
+
+	try {
+		const branch = execGit(
+			state.worktreePath!,
+			["rev-parse", "--abbrev-ref", "HEAD"],
+			deps,
+		);
+		if (branch === state.worktreeBranch) return { ok: true };
+
+		const mergeSource =
+			state.mergeContext?.sourceKind === "workflow-worktree" &&
+			state.mergeContext.sourceBranch === state.worktreeBranch;
+		if (
+			branch === "HEAD" &&
+			mergeSource &&
+			hasRebaseSequencerIn(state.worktreePath!, deps)
+		) {
+			return { ok: true };
+		}
+
+		return {
+			ok: false,
+			reason: `Worktree branch mismatch: expected ${state.worktreeBranch}, got ${branch}`,
+		};
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		return { ok: false, reason: message };
+	}
 }
 
 export function removeWorktree(

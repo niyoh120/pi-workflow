@@ -214,6 +214,8 @@ export function modeLabel(mode: Mode): string {
 			return "Plan Mode";
 		case "work":
 			return "Work Mode";
+		case "merge":
+			return "Merge Mode";
 		case "commit":
 			return "Commit Mode";
 		default:
@@ -234,6 +236,8 @@ export function modeStatusLabel(mode: Mode): string {
 			return "🧭 Plan";
 		case "work":
 			return "⚒ Work";
+		case "merge":
+			return "🔀 Merge";
 		case "commit":
 			return "🚀 Commit";
 		default:
@@ -252,6 +256,13 @@ export function currentStatusText(s: WorkflowState): string {
 		`worktreeBranch: ${s.worktreeBranch ? promptLine(s.worktreeBranch) : "none"}`,
 		`initReturnMode: ${s.initReturnMode ?? "none"}`,
 		`initTargetPath: ${s.initTargetPath ? promptLine(s.initTargetPath) : "none"}`,
+		...(s.mergeContext
+			? [
+					`mergeSource: ${s.mergeContext.sourceBranch} (${s.mergeContext.sourceKind})`,
+					`mergeTarget: ${s.mergeContext.targetBranch}`,
+					`mergeStrategy: ${s.mergeContext.defaultStrategy ? "default (rebase + ff-only)" : "custom (user instructions)"}`,
+				]
+			: []),
 		"",
 		"todos:",
 		todoText(s),
@@ -260,6 +271,58 @@ export function currentStatusText(s: WorkflowState): string {
 
 function promptLine(value: string): string {
 	return value.replace(/\r/g, "\\r").replace(/\n/g, "\\n");
+}
+
+/**
+ * Marker prefix of the canonical Merge Mode context message. The context
+ * handler rebuilds this hidden user message from persisted state every
+ * provider round (filtering previous copies) so the merge baseline and the
+ * user authorization survive reload and compaction.
+ */
+export const MERGE_CONTEXT_MARKER = "<!-- workflow-merge-context -->";
+
+/**
+ * Build the canonical Active Merge Context body from persisted state. This is
+ * the authoritative merge baseline for the model: source/target branches,
+ * baseline heads, strategy flag, and the raw user instructions (kept at user
+ * priority — never merged into the system prompt).
+ */
+export function buildMergeContextBody(state: WorkflowState): string {
+	const mc = state.mergeContext;
+	if (!mc) return "";
+	const kindLabel =
+		mc.sourceKind === "workflow-worktree" ? "workflow worktree" : "普通本地分支";
+	const lines: string[] = [
+		"# Active Merge Context",
+		"",
+		`来源分支：\`${mc.sourceBranch}\`（${kindLabel}）`,
+		`目标分支：\`${mc.targetBranch}\``,
+		`基线：sourceHeadBefore=${mc.sourceHeadBefore.slice(0, 12)} targetHeadBefore=${mc.targetHeadBefore.slice(0, 12)} 来源领先提交=${mc.sourceOnlyCommitCountBefore}`,
+	];
+	if (mc.defaultStrategy) {
+		lines.push(
+			"策略：默认（无用户指令）——rebase 来源到目标，完成后 workflow_merge_complete(status=\"completed\", finalize=\"ff-only\")。",
+		);
+	} else {
+		lines.push(
+			"策略：自定义（存在用户授权指令）。以下指令是本轮唯一授权来源，只有逐字明确点名的动作被授权：",
+		);
+	}
+	if (mc.instructions) {
+		lines.push("", "用户指令（原文）：", "", indentBlock(mc.instructions));
+	}
+	lines.push(
+		"",
+		"本上下文由 workflow 状态重建。完成后调用 workflow_merge_complete；中止调用 status=\"cancelled\"。",
+	);
+	return lines.join("\n");
+}
+
+function indentBlock(text: string): string {
+	return text
+		.split("\n")
+		.map((line) => `    ${line}`)
+		.join("\n");
 }
 
 export function worktreeRuntimeNotice(state: WorkflowState): string {

@@ -20,6 +20,7 @@ import {
 	plannedWorktreeInfo,
 	removeWorktree,
 	validateWorktreeState,
+	validateMergeWorktreeState,
 } from "./worktree.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import {
@@ -77,6 +78,13 @@ import {
 	type WorkApprovalData,
 } from "./helpers.js";
 import { isAllowedInitTargetPath } from "./guards.js";
+import {
+	cancelActiveMergeGit,
+	diagnoseCustomCompletion,
+	finalizeDefaultFf,
+	resolveRepoRoot,
+	verifyDefaultCompletion,
+} from "./git-integration.js";
 import * as path from "node:path";
 import * as fs from "node:fs";
 
@@ -100,12 +108,21 @@ function cleanupCreatedWorktree(cwd: string, worktreePath: string, branch: strin
  * validator and its absolute path is returned; a plain checkout session
  * returns ctx.cwd.
  *
+ * Merge Mode with a workflow-worktree source uses the merge-aware validator
+ * so a rebase-in-progress worktree (detached HEAD + detectable rebase
+ * sequencer) keeps bash usable for `rebase --continue` / `--abort`; every
+ * other state stays strict.
+ *
  * Throws on an invalid worktree with a recovery hint so all callers share
  * one worktree semantics and error message.
  */
 export function resolveEffectiveCwd(cwd: string, state: WorkflowState): string {
 	if (!state.worktreePath) return cwd;
-	const validation = validateWorktreeState(cwd, state);
+	const validation =
+		state.mode === "merge" &&
+		state.mergeContext?.sourceKind === "workflow-worktree"
+			? validateMergeWorktreeState(cwd, state)
+			: validateWorktreeState(cwd, state);
 	if (!validation.ok) {
 		throw new Error(
 			`Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
@@ -1264,7 +1281,7 @@ export function registerReviewTool(
 		name: "workflow_review",
 		label: "Workflow Review",
 		description:
-			"Launch an independent reviewer that reviews the Work agent's implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work), using its own exploration of the actual repository. Work Mode only, on-demand (triggered by /review). The reviewer task is assembled from workflow state. Optional `feedback` (free text) lets the Work agent respond to a prior round's disputed Critical/Important findings; it is injected as a clearly-labeled UNTRUSTED section that the reviewer must independently verify against the repository before it carries any weight — requirements/plan/todos remain the authoritative inputs. When codeReview.enabled is true, a workspace OCR review runs first and its normalized findings are folded into the reviewer task; when false the reviewer covers the implementation directly. Returns structured findings + a PASS/FAIL verdict that signals whether this review loop can end (never gates /commit and is not persisted).",
+			"Launch an independent reviewer that reviews the Work agent's implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work), using its own exploration of the actual repository. Work Mode only, on-demand (triggered by /review). The reviewer task is assembled from workflow state. Optional `feedback` (free text) lets the Work agent respond to a prior round's disputed Critical/Important findings; it is injected as a clearly-labeled UNTRUSTED section that the reviewer must independently verify against the repository before it carries any weight — requirements/plan/todos remain the authoritative inputs. When codeReview.enabled is true, a workspace OCR review runs first and its normalized findings are folded into the reviewer task; when false the reviewer covers the implementation directly. Returns structured findings + a PASS/FAIL verdict that signals whether this review loop can end (never gates /wf-commit and is not persisted).",
 		parameters: Type.Object({
 			feedback: Type.Optional(
 				Type.String({
@@ -1507,7 +1524,7 @@ export function registerReviewTool(
 
 			// The verdict is transient: it only signals whether this on-demand
 			// review loop can end. It is never written to WorkflowState and never
-			// gates /commit. A PASS requires verdict === PASS AND the reviewer
+			// gates /wf-commit. A PASS requires verdict === PASS AND the reviewer
 			// actually inspected the repository (zero repo tool calls → fail-closed
 			// FAIL surfaced for the Work agent to act on).
 			const passed =
@@ -1536,11 +1553,11 @@ export function registerReviewTool(
 
 			let verdictNotice: string;
 			if (passed) {
-				verdictNotice = "\n\n✅ Review PASS. This on-demand review loop can end; the verdict is transient and never gates /commit.";
+				verdictNotice = "\n\n✅ Review PASS. This on-demand review loop can end; the verdict is transient and never gates /wf-commit.";
 			} else if (result.verdict === "PASS" && !result.madeRepoToolCall) {
 				verdictNotice = "\n\n❌ Verdict was PASS but the reviewer made no repository tool calls — treated as FAIL (no independent verification). Re-run after the reviewer inspects the repository.";
 			} else {
-				verdictNotice = "\n\n❌ Review did NOT pass. Address the Critical/Important findings, then re-run workflow_review(). /commit is always available regardless of the verdict.";
+				verdictNotice = "\n\n❌ Review did NOT pass. Address the Critical/Important findings, then re-run workflow_review(). /wf-commit is always available regardless of the verdict.";
 			}
 
 			return {
@@ -1684,6 +1701,361 @@ export function registerInitCompleteTool(
 	});
 }
 
+// ── workflow_merge_complete tool (Merge Mode lifecycle close) ────────────────
+
+const MergeCompleteStatusSchema = StringEnum(["completed", "cancelled"] as const);
+const MergeFinalizeSchema = StringEnum(["ff-only", "already-integrated"] as const);
+
+/**
+ * Close Merge Mode and restore the pre-merge mode.
+ *
+ * status=completed:
+ *  - finalize=ff-only — the deterministic finalizer fast-forwards the target
+ *    branch (target worktree `merge --ff-only` when checked out, otherwise
+ *    ancestor-checked `update-ref` with expected-old CAS), then the strict
+ *    completion checks run (refs equal, source checkout on source branch and
+ *    clean, no sequencer, worktree/branch retained). When the persisted
+ *    context says defaultStrategy, ff-only is FORCED — already-integrated is
+ *    rejected with an explicit tool error and Merge Mode/state is kept, so the
+ *    default path can never degrade into the looser custom checks.
+ *  - finalize=already-integrated (custom strategy only) — strategy-independent
+ *    repository health diagnostics; a user-deleted workflow worktree clears
+ *    the corresponding state fields.
+ *
+ * status=cancelled — abort in-flight rebase/merge/cherry-pick/revert and
+ * guarded-reattach a detached source checkout (dropping in-flight conflict
+ * resolution by design). Already-moved refs are reported, never rolled back
+ * implicitly.
+ *
+ * On success the tool clears mergeContext, restores returnMode, and terminates
+ * the current agent turn — the restored mode re-injects its own prompt and
+ * tool surface on the next turn.
+ */
+export function registerMergeCompleteTool(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.registerTool({
+		name: "workflow_merge_complete",
+		label: "Merge Complete",
+		description:
+			"Close Merge Mode: finalize the branch integration and restore the prior mode. " +
+			"status=completed with finalize=\"ff-only\" lets the tool deterministically fast-forward the target branch and run the strict completion checks; " +
+			"finalize=\"already-integrated\" (custom strategy only, never allowed for the default strategy) runs strategy-independent repository health diagnostics. " +
+			"status=cancelled aborts in-flight rebase/merge/cherry-pick/revert and restores the source checkout (in-flight conflict resolution is discarded). " +
+			"Merge Mode only; call once per merge run.",
+		parameters: Type.Object({
+			status: MergeCompleteStatusSchema,
+			finalize: Type.Optional(
+				MergeFinalizeSchema,
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const denied = checkWorkflowEnabled(ctx, getAgentDir);
+			if (denied) return denied;
+
+			const sessionKey = getSessionKey(ctx.sessionManager);
+			const state = loadState(ctx.cwd, sessionKey);
+
+			if (state.mode !== "merge" || !state.mergeContext) {
+				throw new Error(
+					`workflow_merge_complete only allowed in Merge Mode with an active merge context (current: ${state.mode}${state.mergeContext ? "+context" : ""}).`,
+				);
+			}
+			const mc = state.mergeContext;
+
+			const rootResult = resolveRepoRoot(ctx.cwd);
+			if (!rootResult.ok) {
+				throw new Error(`workflow_merge_complete: ${rootResult.error}`);
+			}
+			const root = rootResult.root;
+
+			if (mc.sourceKind === "workflow-worktree" && !state.worktreePath) {
+				return {
+					isError: true,
+					content: [
+						{
+							type: "text",
+							text: "merge 记录的来源 worktree 已不在状态中（worktreePath 缺失）。请用 /wf-reset 硬恢复后再试。",
+						},
+					],
+					details: { failClosed: true },
+				};
+			}
+			const sourceCheckoutPath =
+				mc.sourceKind === "workflow-worktree" ? state.worktreePath! : root;
+
+			// ── cancellation path ──
+			if (params.status === "cancelled") {
+				// Custom instructions may have deleted the source worktree already;
+				// there is nothing left to abort — close the merge cleanly and drop
+				// the stale worktree state fields instead of erroring on a gone path.
+				if (mc.sourceKind === "workflow-worktree" && !fs.existsSync(sourceCheckoutPath)) {
+					const clearedState: WorkflowState = {
+						...state,
+						mode: mc.returnMode,
+						mergeContext: undefined,
+						worktreePath: undefined,
+						worktreeBranch: undefined,
+						worktreeBaseBranch: undefined,
+					};
+					const goneResult = await transitionWorkflowMode({
+						pi,
+						ctx,
+						sessionKey,
+						nextState: clearedState,
+						getAgentDir,
+						});
+					if (!goneResult.ok) {
+						throw new Error(
+							`workflow_merge_complete: failed to restore mode: ${goneResult.reason}`,
+						);
+					}
+					return {
+						content: [
+							{
+								type: "text",
+								text:
+									`Merge 已取消：来源 worktree 已不存在（可能被用户指令删除），无需 abort。` +
+										`已清理 state 中的 worktree 字段并恢复模式：${mc.returnMode}。`,
+							},
+						],
+						details: { status: "cancelled", worktreeGone: true, returnMode: mc.returnMode },
+						terminate: true,
+					};
+				}
+				if (
+					mc.sourceKind === "workflow-worktree" &&
+					state.worktreeBranch !== mc.sourceBranch
+				) {
+						return {
+							isError: true,
+							content: [
+								{
+									type: "text",
+									text: `状态不一致：worktreeBranch(${state.worktreeBranch ?? "none"}) 与 merge 记录的来源分支(${mc.sourceBranch})不一致，拒绝取消。请用 /wf-reset 硬恢复。`,
+								},
+							],
+							details: { failClosed: true },
+						};
+				}
+
+				const cancel = cancelActiveMergeGit(root, {
+					sourceKind: mc.sourceKind,
+					sourceBranch: mc.sourceBranch,
+					targetBranch: mc.targetBranch,
+					sourceCheckoutPath,
+				});
+				if (!cancel.ok) {
+					return {
+							isError: true,
+							content: [
+								{
+									type: "text",
+									text:
+										`取消 merge 失败（已保留 Merge Mode 与 mergeContext）：${cancel.error ?? "(unknown)"}\n${cancel.diagnostics.join("\n")}`,
+								},
+							],
+							details: { cancelled: false, failClosed: true, aborted: cancel.aborted },
+						};
+				}
+
+				const nextState: WorkflowState = {
+					...state,
+					mode: mc.returnMode,
+					mergeContext: undefined,
+				};
+				const result = await transitionWorkflowMode({
+					pi,
+					ctx,
+					sessionKey,
+					nextState,
+					getAgentDir,
+				});
+				if (!result.ok) {
+					throw new Error(
+						`workflow_merge_complete: failed to restore mode: ${result.reason}`,
+					);
+				}
+
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								`Merge 已取消（${mc.sourceBranch} → ${mc.targetBranch}）。` +
+								`已中止：${[...cancel.aborted, ...(cancel.reattached ? ["forced-reattach"] : [])].join(", ") || "无需恢复"}。` +
+								`已恢复模式：${mc.returnMode}。已完成的 ref 移动不会隐式回滚，实际状态见诊断。\n---\n${cancel.diagnostics.join("\n")}`,
+						},
+					],
+					details: {
+						status: "cancelled",
+					aborted: cancel.aborted,
+					reattached: cancel.reattached,
+					returnMode: mc.returnMode,
+					diagnostics: cancel.diagnostics,
+				},
+					terminate: true,
+				};
+			}
+
+			// ── completion path ──
+			if (!params.finalize) {
+				return {
+					isError: true,
+					content: [
+						{
+							type: "text",
+							text: 'status="completed" 需要 finalize：默认策略用 "ff-only"；自定义策略已完成目标集成时用 "already-integrated"（仍可选择 "ff-only" 复用确定性 finalizer）。',
+						},
+					],
+					details: { failClosed: true },
+				};
+			}
+			if (mc.defaultStrategy && params.finalize !== "ff-only") {
+				// The default strategy must never degrade into the looser custom
+				// completion checks — reject explicitly and keep Merge Mode/state.
+				return {
+					isError: true,
+					content: [
+						{
+							type: "text",
+							text:
+									'本次 merge 为默认策略（无用户自定义指令），只接受 finalize="ff-only"。' +
+									"请先在来源 checkout 完成 rebase 与验证，再重新调用。",
+							},
+					],
+					details: { failClosed: true, defaultStrategy: true },
+				};
+			}
+
+			const diagnostics: string[] = [];
+			let appliedVia: string;
+			let alreadyIntegrated = false;
+
+			if (params.finalize === "ff-only") {
+				const ff = finalizeDefaultFf(root, {
+					sourceBranch: mc.sourceBranch,
+					targetBranch: mc.targetBranch,
+				});
+				diagnostics.push(...ff.diagnostics);
+				if (!ff.ok) {
+					return {
+						isError: true,
+						content: [
+							{
+								type: "text",
+								text: `默认 fast-forward 未执行成功（fail closed，未降级、未清状态）：${ff.error}\n${ff.diagnostics.join("\n")}`,
+							},
+						],
+						details: { failClosed: true, appliedVia: ff.appliedVia },
+					};
+				}
+				appliedVia = ff.appliedVia;
+				alreadyIntegrated = ff.alreadyIntegrated;
+
+				const verify = verifyDefaultCompletion(root, {
+					sourceKind: mc.sourceKind,
+					sourceBranch: mc.sourceBranch,
+					targetBranch: mc.targetBranch,
+					sourceCheckoutPath,
+					worktreePath: state.worktreePath,
+				});
+				diagnostics.push(...verify.diagnostics);
+				if (verify.failures.length) {
+					return {
+						isError: true,
+						content: [
+							{
+								type: "text",
+								text:
+									`目标分支已前移，但完成校验未通过（Merge Mode 与 mergeContext 已保留）：\n- ${verify.failures.join("\n- ")}`,
+							},
+						],
+						details: { failClosed: true, failures: verify.failures },
+					};
+				}
+			} else {
+				// finalize=already-integrated — custom strategy only (default was
+				// rejected above). Strategy-independent health diagnostics.
+				const health = diagnoseCustomCompletion(root, {
+					sourceBranch: mc.sourceBranch,
+					targetBranch: mc.targetBranch,
+					sourceCheckoutPath,
+					worktreePath: state.worktreePath,
+				});
+				diagnostics.push(...health.diagnostics);
+				if (health.failures.length) {
+					return {
+						isError: true,
+							content: [
+								{
+									type: "text",
+									text:
+										`自定义策略完成检查未通过（Merge Mode 与 mergeContext 已保留）：\n- ${health.failures.join("\n- ")}`,
+								},
+							],
+							details: { failClosed: true, failures: health.failures },
+					};
+				}
+				appliedVia = "custom-strategy";
+
+				// User instructions may have deleted the workflow worktree; the
+				// completion tool clears the corresponding state fields so the
+				// restored mode does not point at a gone worktree.
+				if (health.worktreeGone && state.worktreePath) {
+					state.worktreePath = undefined;
+					state.worktreeBranch = undefined;
+					state.worktreeBaseBranch = undefined;
+					diagnostics.push("已清理 state 中的 workflow worktree 字段（用户指令删除了 worktree）。");
+				}
+			}
+
+			const nextState: WorkflowState = {
+				...state,
+				mode: mc.returnMode,
+				mergeContext: undefined,
+			};
+			const result = await transitionWorkflowMode({
+				pi,
+				ctx,
+				sessionKey,
+				nextState,
+				getAgentDir,
+			});
+			if (!result.ok) {
+				throw new Error(
+					`workflow_merge_complete: failed to restore mode: ${result.reason}`,
+				);
+			}
+
+			const summary = alreadyIntegrated
+				? `目标分支已等于来源 head（无需前移）。`
+				: `目标分支 \`${mc.targetBranch}\` 已${params.finalize === "ff-only" ? " fast-forward 到来源 head" : "按自定义策略完成集成"}（via ${appliedVia}）。`;
+			return {
+				content: [
+					{
+						type: "text",
+							text:
+								`✅ Merge 完成：${summary}\n来源分支与 checkout 已保留；已恢复模式：${mc.returnMode}。\n---\n${diagnostics.join("\n")}`,
+						},
+				],
+				details: {
+					status: "completed",
+				finalize: params.finalize,
+				appliedVia,
+				alreadyIntegrated,
+				sourceBranch: mc.sourceBranch,
+				targetBranch: mc.targetBranch,
+				returnMode: mc.returnMode,
+					diagnostics,
+				},
+				terminate: true,
+			};
+		},
+	});
+}
+
 /**
  * Register all workflow tools (todo, plan, plan review, code review).
  * Idempotent per ExtensionAPI instance — skips if already registered.
@@ -1709,6 +2081,7 @@ export function registerAllWorkflowTools(
 	registerPlanReviewTool(pi, getAgentDir);
 	registerReviewTool(pi, getAgentDir);
 	registerInitCompleteTool(pi, getAgentDir);
+	registerMergeCompleteTool(pi, getAgentDir);
 
 	_workflowToolsRegistered.add(pi);
 }

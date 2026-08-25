@@ -2,14 +2,16 @@
  * Pi Workflow Extension
  *
  * A lightweight software development workflow with simplified mode flow:
- * idle → plan → work → commit.
+ * idle → plan → work → commit, plus the user-triggered Merge Mode (/wf-merge)
+ * that integrates a source branch (workflow worktree branch or ordinary local
+ * branch) via rebase + fast-forward under a dedicated capability gate.
  *
  * Plan review runs an independent reviewer AgentSession (fresh, in-memory,
  * multi-turn) that inherits the parent Plan information-tool surface.
  * The unified on-demand Review (/review → workflow_review) launches an
  * independent reviewer over the current workspace and, when codeReview.enabled
  * is true, folds workspace OCR findings into the same review. Review output is
- * transient and never gates /commit. Review rounds are persisted per work run
+ * transient and never gates /wf-commit. Review rounds are persisted per work run
  * (review-history.ts) so the next round re-dispositions the previous round's
  * findings instead of re-deriving everything, reuses cached OCR findings when
  * the workspace diff is unchanged, and short-circuits identical re-reviews.

@@ -57,7 +57,7 @@ function inlineLoadState(wfDir, sessionKey) {
 }
 
 function inlineIsWorkflowToolMode(mode) {
-	return mode === "plan" || mode === "work" || mode === "init";
+	return mode === "plan" || mode === "work" || mode === "init" || mode === "merge";
 }
 
 function inlineComputeWorkflowToolNames(mode, config) {
@@ -82,6 +82,8 @@ function inlineComputeWorkflowToolNames(mode, config) {
 			return [];
 		case "init":
 			return ["workflow_init_complete"];
+		case "merge":
+			return ["workflow_merge_complete"];
 		default:
 			return [];
 	}
@@ -494,14 +496,17 @@ console.log("\n=== Check 6: Source structure verification ===");
 	}
 	const ngBody = extractFnBody("normalizeGrillTurns");
 	const ntBody = extractFnBody("normalizeTodos");
+	const nmcBody = extractFnBody("normalizeMergeContext");
 	const ngFnStr = "function normalizeGrillTurns(raw) {" + ngBody + "\n}";
 	const ntFnStr = "function normalizeTodos(raw) {" + ntBody + "\n}";
+	const nmcFnStr = "function normalizeMergeContext(raw) {" + nmcBody + "\n}";
 	// Guards against silent ReferenceErrors.
 	assert(ngBody.length > 0, "normalizeGrillTurns function found and extracted from state.ts");
 	assert(ntBody.length > 0, "normalizeTodos function found and extracted from state.ts");
+	assert(nmcBody.length > 0, "normalizeMergeContext function found and extracted from state.ts");
 	const normalizeState = eval(
 		"(function(DEFAULT_STATE) { " +
-			ngFnStr + ntFnStr +
+			ngFnStr + ntFnStr + nmcFnStr +
 			" return " + nsFnStr + "; })(DEFAULT_STATE)",
 	);
 
@@ -541,6 +546,36 @@ console.log("\n=== Check 6: Source structure verification ===");
 		// init fields are dropped outside init mode to prevent stale leakage.
 		const r = normalizeState({ mode: "explore", initReturnMode: "work", initTargetPath: "/tmp/AGENTS.md" });
 		assert(r.initReturnMode === undefined && r.initTargetPath === undefined, "real normalizeState: init fields dropped outside init mode");
+	}
+	{
+		// mergeContext is honored only in merge mode with a full baseline shape.
+		const mc = {
+			sourceKind: "ordinary-branch",
+			sourceBranch: "feat",
+			targetBranch: "main",
+			sourceHeadBefore: "a".repeat(40),
+			targetHeadBefore: "b".repeat(40),
+			sourceOnlyCommitCountBefore: 2,
+			defaultStrategy: true,
+			returnMode: "work",
+		};
+		const kept = normalizeState({ mode: "merge", mergeContext: mc });
+		assert(
+			kept.mergeContext && kept.mergeContext.sourceBranch === "feat" && kept.mergeContext.defaultStrategy === true,
+			"real normalizeState: mergeContext preserved in merge mode",
+		);
+		const droppedOutside = normalizeState({ mode: "work", mergeContext: mc });
+		assert(droppedOutside.mergeContext === undefined, "real normalizeState: mergeContext dropped outside merge mode");
+		const custom = normalizeState({
+			mode: "merge",
+			mergeContext: { ...mc, defaultStrategy: false, instructions: "use squash" },
+		});
+		assert(
+			custom.mergeContext && custom.mergeContext.defaultStrategy === false && custom.mergeContext.instructions === "use squash",
+			"real normalizeState: custom strategy instructions preserved",
+		);
+		const malformed = normalizeState({ mode: "merge", mergeContext: { sourceKind: "ordinary-branch" } });
+		assert(malformed.mergeContext === undefined, "real normalizeState: malformed mergeContext fails closed to undefined");
 	}
 	{
 		const r = normalizeState({ pendingWorkHandoff: true, mode: "work" });
@@ -817,12 +852,12 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"export function registerReviewCommand",
 	);
 	const reviewCmdEnd = commandsTs.indexOf(
-		"export function registerCommitCommand",
+		"export function registerWfCommitCommand",
 		reviewCmdStart,
 	);
 	assert(
 		reviewCmdStart >= 0 && reviewCmdEnd > reviewCmdStart,
-		"/review and commit command anchors exist",
+		"/review and wf-commit command anchors exist",
 	);
 	const reviewCmdBlock = commandsTs.slice(reviewCmdStart, reviewCmdEnd);
 	assert(
@@ -903,7 +938,7 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"config.ts: strips askUserQuestion",
 	);
 
-	// Work prompt updated — git writes are reserved for /commit; code review is routed through /review
+	// Work prompt updated — git writes are reserved for /wf-commit; code review is routed through /review
 	const workPromptStart = promptsTs.indexOf("export const WORK_PROMPT");
 	const workPromptEnd = promptsTs.indexOf(
 		"export const COMMIT_PROMPT",
@@ -921,7 +956,7 @@ console.log("\n=== Check 7: Code review tooling ===");
 	assert(
 		/\/review/.test(workPromptBlock) &&
 			/始终直接可用/.test(workPromptBlock),
-		"prompts.ts: work prompt points to /review and states /commit is always available",
+		"prompts.ts: work prompt points to /review and states /wf-commit is always available",
 	);
 	// The review → fix → re-review loop detail lives in the /review kickoff prompt,
 	// not in WORK_PROMPT (no duplication). Assert it on the command block instead.
@@ -1427,11 +1462,12 @@ console.log("\n=== Check 14: Explore mode ===");
 				"workflow_todo" &&
 			// codeReview.enabled alone does NOT change the work tool set.
 			inlineComputeWorkflowToolNames("work", { planReview: { enabled: false }, review: { enabled: false }, codeReview: { enabled: true } }).join(",") === "workflow_todo" &&
-			inlineComputeWorkflowToolNames("commit", cfgAllReviewTools).length === 0,
-		"inline runtime: plan exposes plan tools; work exposes todo (+optional workflow_review); codeReview.enabled does not change the tool set; commit exposes none",
+			inlineComputeWorkflowToolNames("commit", cfgAllReviewTools).length === 0 &&
+			inlineComputeWorkflowToolNames("merge", cfgAllReviewTools).join(",") === "workflow_merge_complete",
+		"inline runtime: plan exposes plan tools; work exposes todo (+optional workflow_review); codeReview.enabled does not change the tool set; commit exposes none; merge exposes only workflow_merge_complete",
 	);
 	assert(
-		/export function isWorkflowToolMode\([\s\S]*?mode === "plan"[\s\S]*?mode === "work"[\s\S]*?mode === "init"/.test(
+		/export function isWorkflowToolMode\([\s\S]*?mode === "plan"[\s\S]*?mode === "work"[\s\S]*?mode === "init"[\s\S]*?mode === "merge"/.test(
 			modeTs14,
 		) &&
 			!/export function isWorkflowToolMode\([\s\S]*?mode === "explore"/.test(
@@ -1440,7 +1476,7 @@ console.log("\n=== Check 14: Explore mode ===");
 			!/export function isWorkflowToolMode\([\s\S]*?mode === "commit"/.test(
 				modeTs14,
 			),
-		"mode.ts: isWorkflowToolMode allow-list is plan/work/init (explore excluded)",
+		"mode.ts: isWorkflowToolMode allow-list is plan/work/init/merge (explore excluded)",
 	);
 	assert(
 		/const PLAN_WORKFLOW_TOOL_NAMES[\s\S]*?workflow_plan_save[\s\S]*?const WORK_WORKFLOW_TOOL_NAMES[\s\S]*?export function computeWorkflowToolNames[\s\S]*?config\.planReview\.enabled[\s\S]*?config\.review\.enabled[\s\S]*?return \[\]/.test(
@@ -1645,14 +1681,15 @@ function validateWorktreeIntegrationStatic() {
 		"isInsideWorktree guards symlink and hardlink escapes",
 	);
 	const writeGuard = commands.slice(
-		commands.indexOf("// Worktree-bound Work Mode"),
+		commands.indexOf("// Worktree-bound Work/Merge Mode"),
 		commands.indexOf("// Read-only modes"),
 	);
 	assert(
 		writeGuard.includes("validateWorktreeState(ctx.cwd, state)") &&
+			writeGuard.includes("validateMergeWorktreeState(ctx.cwd, state)") &&
 			writeGuard.includes("isInsideWorktree(") &&
 			!writeGuard.includes("isAllowedPlanScratchPath"),
-		"tool guard validates worktree and confines write/edit paths",
+		"tool guard validates worktree (strict for Work, merge-aware for Merge) and confines write/edit paths",
 	);
 	assert(
 		!commands.includes("worktreeShellDenial") &&
@@ -1751,7 +1788,7 @@ function validateInitModeStatic() {
 	const promptsTs2 = fs.readFileSync(path.join(CWD, "extensions/workflow/prompts.ts"), "utf8");
 	const helpersTs2 = fs.readFileSync(path.join(CWD, "extensions/workflow/helpers.ts"), "utf8");
 
-	assert(/export type Mode = "idle" \| "explore" \| "init"[\s\S]*"commit";/.test(typesTs), "types.ts: Mode includes init");
+	assert(/export type Mode\s*=[\s\S]*"idle"[\s\S]*"explore"[\s\S]*"init"[\s\S]*"plan"[\s\S]*"work"[\s\S]*"merge"[\s\S]*"commit";/.test(typesTs), "types.ts: Mode union includes init and merge");
 	assert(/initReturnMode\?: "explore" \| "plan" \| "work" \| "commit";/.test(typesTs), "types.ts: initReturnMode narrowed to non-idle/init modes");
 	assert(/initTargetPath\?: string;/.test(typesTs), "types.ts: optional initTargetPath field");
 
@@ -1787,6 +1824,155 @@ function validateInitModeStatic() {
 	assert(inlineIsWorkflowToolMode("idle") === false, "inline runtime: idle is not a workflow-tool mode");
 }
 validateInitModeStatic();
+
+// ═══ Check 16b: Merge Mode + /wf-merge + /wf-commit structure ═══
+console.log("\n=== Check 16b: merge mode / wf-merge / wf-commit ===");
+{
+	const modeTsM = fs.readFileSync(path.join(CWD, "extensions/workflow/mode.ts"), "utf8");
+	const commandsTsM = fs.readFileSync(path.join(CWD, "extensions/workflow/commands.ts"), "utf8");
+	const toolsTsM = fs.readFileSync(path.join(CWD, "extensions/workflow/tools.ts"), "utf8");
+	const stateTsM = fs.readFileSync(path.join(CWD, "extensions/workflow/state.ts"), "utf8");
+	const typesTsM = fs.readFileSync(path.join(CWD, "extensions/workflow/types.ts"), "utf8");
+	const promptsTsM = fs.readFileSync(path.join(CWD, "extensions/workflow/prompts.ts"), "utf8");
+	const helpersTsM = fs.readFileSync(path.join(CWD, "extensions/workflow/helpers.ts"), "utf8");
+	const worktreeTsM = fs.readFileSync(path.join(CWD, "extensions/workflow/worktree.ts"), "utf8");
+	const gitIntTs = fs.readFileSync(path.join(CWD, "extensions/workflow/git-integration.ts"), "utf8");
+
+	// /wf-commit rename: new command registered, old /commit gone.
+	assert(
+		commandsTsM.includes('registerCommand("wf-commit"') &&
+			!commandsTsM.includes('registerCommand("commit"'),
+		"commands.ts: registers wf-commit and the old /commit registration is gone",
+	);
+	assert(
+		/export\s+function\s+registerWfCommitCommand\s*\(/.test(commandsTsM) &&
+			!/export\s+function\s+registerCommitCommand\s*\(/.test(commandsTsM),
+		"commands.ts: registerCommitCommand renamed to registerWfCommitCommand",
+	);
+	assert(
+		commandsTsM.includes("registerWfMergeCommand(pi, getAgentDir);") &&
+			commandsTsM.includes("registerWfCommitCommand(pi, getAgentDir);"),
+		"commands.ts: registerAllWorkflowCommands registers wf-merge + wf-commit",
+	);
+	assert(
+		!/registerWfMergeCommand[\s\S]{0,200}registerWfSettingsCommand|registerWfCommand\(pi, getAgentDir\);[\s\S]{0,50}registerWfMergeCommand/.test(commandsTsM),
+		"commands.ts: /wf-merge is conditionally registered (always-on commands stay /wf + /wf-settings)",
+	);
+
+	// /wf-merge handler structure: init denial, active-merge protection,
+	// preflight before transition, mergeContext persisted with returnMode.
+	const wfMergeStart = commandsTsM.indexOf("export function registerWfMergeCommand");
+	const wfMergeEnd = commandsTsM.indexOf("export function registerWfStatusCommand", wfMergeStart);
+	assert(wfMergeStart >= 0 && wfMergeEnd > wfMergeStart, "commands.ts: registerWfMergeCommand block anchors exist");
+	const wfMergeBlock = commandsTsM.slice(wfMergeStart, wfMergeEnd);
+	assert(wfMergeBlock.includes('registerCommand("wf-merge"'), "commands.ts: /wf-merge command name");
+	assert(wfMergeBlock.includes("current.mode === \"init\""), "commands.ts: /wf-merge rejects Init Mode");
+	assert(
+		wfMergeBlock.includes("current.mode === \"merge\" && current.mergeContext") &&
+			wfMergeBlock.includes("parseMergeCommandArgs") &&
+			wfMergeBlock.includes("runMergePreflight") &&
+			wfMergeBlock.includes("mergeContext: {") &&
+			wfMergeBlock.includes("defaultStrategy: !parsed.value.instructions"),
+		"commands.ts: /wf-merge parses args, runs preflight, and persists mergeContext atomically with mode=merge",
+	);
+	assert(
+		commandsTsM.includes("function activeMergeDenial") &&
+			/activeMergeDenial\(/.test(commandsTsM.slice(commandsTsM.indexOf("registerWfExitCommand"))) === true,
+		"commands.ts: activeMergeDenial guards mode-switching entries (wf-exit etc.)",
+	);
+	// /wf-reset aborts an active merge before clearing state.
+	const resetStart = commandsTsM.indexOf("export function registerWfResetCommand");
+	const resetEnd = commandsTsM.indexOf("export function registerWfInitCommand", resetStart);
+	const resetBlock = commandsTsM.slice(resetStart, resetEnd > 0 ? resetEnd : commandsTsM.length);
+	assert(
+		resetBlock.includes("cancelActiveMergeGit") && resetBlock.includes("已停止 reset"),
+		"commands.ts: /wf-reset aborts the active merge and stops on failed recovery",
+	);
+
+	// mode.ts: merge tool surface + work role.
+	assert(modeTsM.includes("workflow_merge_complete"), "mode.ts: WORKFLOW_GATED_TOOLS includes workflow_merge_complete");
+	assert(modeTsM.includes("MERGE_WORKFLOW_TOOL_NAMES"), "mode.ts: MERGE_WORKFLOW_TOOL_NAMES declared");
+	assert(/modeRole[\s\S]*?case "merge"[\s\S]*?return "work"/.test(modeTsM), "mode.ts: merge reuses the work model role");
+	assert(!/models\.merge/.test(modeTsM + typesTsM), "no merge model role was added");
+
+	// tools.ts: workflow_merge_complete tool + default ff enforcement.
+	assert(toolsTsM.includes("registerMergeCompleteTool(pi, getAgentDir);"), "tools.ts: registers registerMergeCompleteTool");
+	const mcStart = toolsTsM.indexOf("export function registerMergeCompleteTool");
+	const mcEnd = toolsTsM.indexOf("// ── Bulk registration", mcStart);
+	const mcBlock = toolsTsM.slice(mcStart, mcEnd > 0 ? mcEnd : toolsTsM.length);
+	assert(mcBlock.includes('name: "workflow_merge_complete"'), "tools.ts: workflow_merge_complete tool name");
+	assert(
+		mcBlock.includes("mc.defaultStrategy && params.finalize !== \"ff-only\""),
+		"tools.ts: defaultStrategy forces finalize=ff-only (already-integrated rejected)",
+	);
+	assert(
+		mcBlock.includes("finalizeDefaultFf") &&
+			mcBlock.includes("verifyDefaultCompletion") &&
+			mcBlock.includes("diagnoseCustomCompletion") &&
+			mcBlock.includes("cancelActiveMergeGit"),
+		"tools.ts: merge_complete wires ff finalizer, completion verify, custom diagnostics, and cancel recovery",
+	);
+	assert(
+		/terminate: true/.test(mcBlock),
+		"tools.ts: workflow_merge_complete terminates the turn after restoring the mode",
+	);
+	assert(
+		toolsTsM.includes("validateMergeWorktreeState") &&
+			/state\.mode === "merge"[\s\S]{0,220}validateMergeWorktreeState\(cwd, state\)/.test(toolsTsM),
+		"tools.ts: resolveEffectiveCwd uses the merge-aware validator in Merge Mode",
+	);
+
+	// prompts + helpers + worktree.
+	assert(promptsTsM.includes("MERGE_PROMPT") && promptsTsM.includes('case "merge":'), "prompts.ts: MERGE_PROMPT + exhaustive dispatch");
+	assert(helpersTsM.includes('case "merge":') && helpersTsM.includes("Merge Mode"), "helpers.ts: modeLabel has merge");
+	assert(helpersTsM.includes("MERGE_CONTEXT_MARKER") && helpersTsM.includes("buildMergeContextBody"), "helpers.ts: merge context body + marker");
+	assert(
+		/buildMergeContextBody[\s\S]*?instructions[\s\S]*?indentBlock\(mc\.instructions\)/.test(helpersTsM) &&
+			/buildMergeContextBody[\s\S]*?defaultStrategy/.test(helpersTsM),
+		"helpers.ts: merge context body carries strategy flag + verbatim indented instructions",
+	);
+	assert(
+		mcBlock.includes("fs.existsSync(sourceCheckoutPath)") && mcBlock.includes("worktreeGone: true"),
+		"tools.ts: cancellation with a user-deleted source worktree closes cleanly and drops stale worktree fields",
+	);
+	assert(
+		worktreeTsM.includes("export function validateWorktreeIdentity") &&
+			worktreeTsM.includes("export function validateMergeWorktreeState") &&
+			worktreeTsM.includes("hasRebaseSequencerIn"),
+		"worktree.ts: identity/strict/merge-aware validators split; merge-aware tolerates only rebase sequencers",
+	);
+
+	// state.ts + types.ts merge context normalization.
+	assert(stateTsM.includes("normalizeMergeContext"), "state.ts: normalizeMergeContext extracted");
+	assert(/mergeContext:\s*\n?\s*obj\.mode === "merge"/.test(stateTsM), "state.ts: mergeContext honored only in merge mode");
+
+	// git-integration.ts exists with argv-only git.
+	assert(
+		/execFileSync\(\s*["']git["']\s*,\s*args\b/.test(gitIntTs) &&
+			!/execSync\(|\bshell:\s*true\b/.test(gitIntTs),
+		"git-integration.ts: argv-only git, no shell interpolation",
+	);
+	assert(
+		gitIntTs.includes("export function parseMergeCommandArgs") &&
+			gitIntTs.includes("export function runMergePreflight") &&
+			gitIntTs.includes("export function finalizeDefaultFf") &&
+			gitIntTs.includes("export function cancelActiveMergeGit") &&
+			gitIntTs.includes("export function detectSequencer"),
+		"git-integration.ts: exports parse/preflight/finalize/cancel/sequencer helpers",
+	);
+	assert(
+		!/"\.\/worktree\.js"|'\"\.\/worktree\.js'|from "\.\/worktree\.js"|from '\"\.\/worktree\.js'/.test(gitIntTs),
+		"git-integration.ts: no local value imports (stays directly importable for validation scripts)",
+	);
+
+	// Inline runtime: merge tool surface.
+	assert(
+		inlineComputeWorkflowToolNames("merge", { planReview: { enabled: true }, review: { enabled: true } }).join(",") === "workflow_merge_complete",
+		"inline runtime: merge exposes only workflow_merge_complete regardless of review flags",
+	);
+	assert(inlineIsWorkflowToolMode("merge") === true, "inline runtime: merge is a workflow-tool mode");
+	assert(inlineIsWorkflowToolMode("commit") === false, "inline runtime: commit is not a workflow-tool mode");
+}
 
 // ═══ Check 17: Todo delta/snapshot + grilling batch ═══
 console.log("\n=== Check 17: todo delta/snapshot + grilling batch ===");
