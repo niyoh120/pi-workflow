@@ -67,7 +67,7 @@ type ScopeAction = Scope | "reset-session" | "reset-project";
  */
 type RpcContext = Pick<
 	ExtensionCommandContext,
-	"mode" | "cwd" | "modelRegistry" | "isProjectTrusted" | "ui"
+	"mode" | "cwd" | "modelRegistry" | "isProjectTrusted" | "ui" | "scopedModels"
 >;
 
 /** Wrap a writeLayer call with error reporting matching the TUI path. */
@@ -659,6 +659,39 @@ function makeModelPickerSubmenu({
 	};
 }
 
+// ── RPC model candidates ────────────────────────────────────────────────────
+
+/**
+ * Resolve the candidate model list for the RPC model picker.
+ *
+ * A non-empty `scopedModels` (Pi's `--models` / `enabledModels` scope — the
+ * same set `/model` and Ctrl+P cycle through) narrows the picker to exactly
+ * those models. An empty scope keeps the full registry catalog available.
+ * The result is deduped by `provider/id` and sorted by the same key so the
+ * provider → model select always shows a stable list.
+ */
+export function resolveModelCandidates(
+	scopedModels: readonly { model: Model<any> }[],
+	availableModels: readonly Model<any>[],
+): { scoped: boolean; models: Model<any>[] } {
+	const scoped = scopedModels.length > 0;
+	const source = scoped
+		? scopedModels.map((entry) => entry.model).filter((m) => !!m)
+		: [...availableModels];
+	const seen = new Set<string>();
+	const models: Model<any>[] = [];
+	for (const model of source) {
+		const key = `${model.provider}/${model.id}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		models.push(model);
+	}
+	models.sort((a, b) =>
+		`${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`),
+	);
+	return { scoped, models };
+}
+
 // ── Session key helper ──────────────────────────────────────────────────────
 
 function ctxSessionKey(ctx: any): string {
@@ -1190,6 +1223,33 @@ async function runRpcSettingsWizard(
 				continue;
 			}
 			try {
+				const layer = readLayer(resetScope, cwd, agentDir, sessionKey);
+				if (Object.keys(layer).length === 0) {
+					// Mirror the TUI path: an empty layer has nothing to clear, so
+					// confirm+write would be pure noise.
+					ctx.ui.notify(
+						`Workflow settings: ${resetScope} scope already inherits its parent.`,
+						"info",
+					);
+					continue;
+				}
+				// Non-empty layer: destructive, so confirm first. confirmed === true
+				// is the only write condition — cancelling, closing, or answering No
+				// all resolve to false in RPC mode.
+				const confirmed = await ctx.ui.confirm(
+					`Reset ${resetScope} workflow settings?`,
+					`This clears every override stored in the ${resetScope} layer ` +
+						`(${Object.keys(layer).length} top-level key(s)). ` +
+						`${resetScope === "session" ? "This Pi process" : "The project"} goes back to ` +
+						`inheriting ${resetScope === "session" ? "project/global/default" : "global/default"} settings.`,
+				);
+				if (!confirmed) {
+					ctx.ui.notify(
+						`Workflow settings: ${resetScope} reset cancelled — nothing was written.`,
+						"info",
+					);
+					continue;
+				}
 				await writeLayer(resetScope, {}, cwd, agentDir, sessionKey);
 				changedScopes.add(resetScope);
 				ctx.ui.notify(`Workflow settings: reset ${resetScope} scope to inherit.`, "info");
@@ -1326,14 +1386,27 @@ async function editRpcSettingValue(
 	}
 
 	if (desc.kind === "model" && desc.role) {
-		// Provider → Model two-stage select. Refresh the registry first so the
-		// picker has fresh model data (the TUI path refreshes before its UI too).
-		let models = ctx.modelRegistry.getAvailable();
-		try {
-			await ctx.modelRegistry.refresh();
-			models = ctx.modelRegistry.getAvailable();
-		} catch {
-			// Keep the cached catalog when refresh fails.
+		// Provider → Model two-stage select over scoped-first candidates. When
+		// Pi runs with a model scope (--models / enabledModels), restrict the
+		// picker to that scope — the same models /model and Ctrl+P offer. Without
+		// a scope, refresh the registry first so the picker has fresh model data
+		// (the TUI path refreshes before its UI too), falling back to the cached
+		// catalog when refresh fails.
+		const scopedEntries = Array.isArray(ctx.scopedModels)
+			? ctx.scopedModels
+			: [];
+		let models: Model<any>[];
+		if (scopedEntries.length > 0) {
+			models = resolveModelCandidates(scopedEntries, []).models;
+		} else {
+			let available = ctx.modelRegistry.getAvailable();
+			try {
+				await ctx.modelRegistry.refresh();
+				available = ctx.modelRegistry.getAvailable();
+			} catch {
+				// Keep the cached catalog when refresh fails.
+			}
+			models = resolveModelCandidates([], available).models;
 		}
 		const providers = [...new Set(models.map((m: any) => m.provider))].sort();
 		const providerChoice = await ctx.ui.select(

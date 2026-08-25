@@ -158,8 +158,9 @@ function registerWorkflowSessionStart(
 				await runPendingWorkDispatcher(pi, ctx, getAgentDir);
 			}
 		} catch (err) {
-			// Surface initialization failures (e.g. 0.81.x API drift) instead of
-			// silently leaving workflow without tools or runtime.
+			// Surface initialization failures (e.g. Pi SDK API drift across
+			// minor upgrades) instead of silently leaving workflow without tools
+			// or runtime.
 			console.error(`[workflow] session_start initialization failed: ${err}`);
 		}
 	});

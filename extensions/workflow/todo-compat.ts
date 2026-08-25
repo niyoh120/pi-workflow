@@ -6,11 +6,16 @@
  * This module is the single source of truth for that contract so the tool
  * registration, input mapping, and fixtures all reference one definition.
  *
- * Verified against Paseo 0.2.1, commit 65633004b23d6eeeda9321e04f096ca647694b2b
- * (2026-07-24). Paseo normalizes the tool name and parses the `plan` array
- * via UpdatePlanSchema (zod). Pi history mapper replays persisted tool calls,
- * and Paseo's timeline reducer uses the same parser for live and history
- * tool-call input, so resume reconstructs the todo card.
+ * Verified against Paseo 0.5.2 (2026-08-25). Source of truth is the
+ * `@getpaseo/server` npm package installed alongside the Paseo CLI: the
+ * bundled web UI timeline parser (extractTaskEntriesFromToolCall) normalizes
+ * the tool name (lowercase, [.\s-]+ runs collapse to `_`) and parses the
+ * `plan` array via zod; a status that fails the enum coerces to `pending`
+ * (.catch) rather than failing the whole parse. Pi history mapper replays
+ * persisted tool calls, and Paseo's timeline reducer uses the same parser
+ * for live and history tool-call input, so resume reconstructs the todo card.
+ * Paseo releases quickly — re-verify against the locally installed
+ * `@getpaseo/server` before relying on new parser behavior.
  *
  * Compatibility ceiling: Paseo's todo status enum is `pending | in_progress |
  * completed`. pi-workflow's internal `blocked` status has no native slot and
@@ -26,10 +31,7 @@ import type { TodoItem, TodoStatus } from "./types.js";
 // ── Verified Paseo contract ────────────────────────────────────────────────
 
 /** Paseo version this compatibility layer was verified against. */
-export const PASEO_VERIFIED_VERSION = "0.2.1";
-
-/** Paseo commit this compatibility layer was verified against. */
-export const PASEO_VERIFIED_COMMIT = "65633004b23d6eeeda9321e04f096ca647694b2b";
+export const PASEO_VERIFIED_VERSION = "0.5.2";
 
 /**
  * Tool name Paseo normalizes and recognizes. `normalizeToolName` lowercases

@@ -4,7 +4,7 @@
 
 - 本仓库是 `pi-coding-agent` 的 TypeScript 扩展包；扩展入口由 `package.json#pi.extensions` 注册为 `extensions/workflow/index.ts`。
 - 使用 ESM、Node16 模块解析、TypeScript strict/noEmit；源码导入本地模块时保留 `.js` 后缀，Node 内置模块使用 `node:` 前缀。
-- 当前 `@earendil-works/pi-*` 0.81.1 依赖要求 Node.js `>=22.19.0`。
+- 当前 `@earendil-works/pi-*` 0.84.3 依赖要求 Node.js `>=22.19.0`。
 - 不依赖其他 Pi 扩展。结构化问答包 `@juicesharp/rpiv-ask-user-question` 属于可选安装。
 
 ## 验证与本地安装

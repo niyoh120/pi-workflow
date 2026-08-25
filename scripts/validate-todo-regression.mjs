@@ -1855,12 +1855,11 @@ console.log("\n=== Check 16: Paseo update_plan compatibility ===");
 {
 	const tc = fs.readFileSync(path.join(CWD, "extensions/workflow/todo-compat.ts"), "utf8");
 
-	// Verified version/commit recorded so the contract is traceable.
-	assert(tc.includes('PASEO_VERIFIED_VERSION = "0.2.1"'), "todo-compat records verified Paseo version 0.2.1");
-	assert(
-		tc.includes('PASEO_VERIFIED_COMMIT = "65633004b23d6eeeda9321e04f096ca647694b2b"'),
-		"todo-compat records verified Paseo commit",
-	);
+	// Verified version is recorded for traceability; it documents the
+	// compatibility baseline and is intentionally not asserted here (an
+	// external version literal has no behavioral meaning for this repo).
+	assert(tc.includes('PASEO_VERIFIED_VERSION ='), "todo-compat records the verified Paseo version");
+	assert(!tc.includes('PASEO_VERIFIED_COMMIT'), "todo-compat no longer pins a commit literal (npm artifacts cannot map it to source reliably)");
 	assert(tc.includes('UPDATE_PLAN_TOOL_NAME = "update_plan"'), "todo-compat fixes tool name to update_plan");
 	assert(tc.includes('BLOCKED_PREFIX = "[blocked] "'), "todo-compat fixes blocked prefix");
 

@@ -333,14 +333,14 @@ pi-workflow adapts to Pi's run modes so Paseo (and other Pi RPC clients) can dri
 
 ### Paseo native todo (`update_plan` compatibility)
 
-In RPC mode, pi-workflow registers an `update_plan` tool whose arguments match Paseo's existing `UpdatePlanSchema (`{ plan: [{ step, status }] }`, status: `pending | in_progress | completed`). Paseo renders these as native TodoListCard entries; Pi's history mapper replays persisted tool calls, so resumed sessions reconstruct the todo card.
+In RPC mode, pi-workflow registers an `update_plan` tool whose arguments match the task schema parsed by Paseo's bundled web UI timeline parser (`{ plan: [{ step, status }] }`, status: `pending | in_progress | completed`). Paseo renders these as native TodoListCard entries; Pi's history mapper replays persisted tool calls, so resumed sessions reconstruct the todo card.
 
 - **Full-list replacement**: providing `plan` replaces the entire todo list; IDs are per-call `T1..Tn` snapshots and must not be referenced across calls.
 - **Read-only**: omitting `plan` returns the current list without mutating.
 - **Blocked encoding**: pi-workflow's internal `blocked` status has no native slot in Paseo's three-state enum; it is encoded as a `[blocked] ` prefix on the step text. Structured `notes` are inlined into the step text.
 - **Collision-safe**: if another extension already owns `update_plan`, pi-workflow skips the alias and falls back to `workflow_todo`; the active tool and mode prompt are recomputed each turn so fallback is consistent.
 
-Verified against Paseo `0.2.1` (commit `65633004b23d6eeeda9321e04f096ca647694b2b`). Upgrading past the blocked/notes ceilings requires a Paseo mapper change.
+Verified against Paseo `0.5.2` (source: the `@getpaseo/server` npm package shipped with the Paseo CLI — bundled web UI task parser + pi provider). Paseo releases quickly; re-verify against the locally installed package after upgrading. Upgrading past the blocked/notes ceilings requires a Paseo mapper change.
 
 ### Project Trust
 
