@@ -1,5 +1,5 @@
 /**
- * settings.ts — /wf-settings configuration menu
+ * settings.ts — /workflow:settings configuration menu
  *
  * A TUI for editing every pi-workflow config option across three scopes:
  *   - Session: highest-priority overrides stored in this session's state
@@ -163,7 +163,7 @@ function buildDescriptors(): SettingDescriptor[] {
 			id: "review.enabled",
 			label: "review · enabled",
 			description:
-				"Expose /review and the workflow_review tool (requires /reload to register/unregister).",
+				"Expose /workflow:review and the workflow_review tool (requires /reload to register/unregister).",
 			kind: "boolean",
 			path: ["review", "enabled"],
 			reloadSensitive: true,
@@ -789,14 +789,14 @@ function scopeSelectorComponent(
 
 // ── Command registration ────────────────────────────────────────────────────
 
-export function registerWfSettingsCommand(
+export function registerWorkflowSettingsCommand(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
 	const descriptors = buildDescriptors();
 	const byId = new Map(descriptors.map((d) => [d.id, d]));
 
-	pi.registerCommand("wf-settings", {
+	pi.registerCommand("workflow:settings", {
 		description:
 			"配置 workflow 选项（models / autoEnter / planReview / review / codeReview），支持 session / project / global 三层作用域",
 		handler: async (_args, ctx) => {
@@ -808,7 +808,7 @@ export function registerWfSettingsCommand(
 			// JSON/print: no UI surface; stderr keeps stdout protocol/print output clean.
 			if (ctx.mode === "json" || ctx.mode === "print") {
 				console.error(
-					"workflow settings: /wf-settings requires interactive mode (TUI/RPC). " +
+					"workflow settings: /workflow:settings requires interactive mode (TUI/RPC). " +
 						"In JSON/print mode, edit config files directly:\n" +
 						"  - Session: stored in session state\n" +
 						"  - Project: .pi/workflow/config.json\n" +
@@ -1184,7 +1184,7 @@ export function registerWfSettingsCommand(
 // ── RPC Settings wizard (basic dialogs) ────────────────────────────────────
 
 /**
- * Run the /wf-settings wizard over Pi's basic select/input dialogs. Reuses
+ * Run the /workflow:settings wizard over Pi's basic select/input dialogs. Reuses
  * the same descriptor/scope/readLayer/writeLayer/effective-config plumbing
  * as the TUI path so writes are atomic and runtime apply is identical.
  *

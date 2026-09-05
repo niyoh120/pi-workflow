@@ -251,7 +251,7 @@ export function isReadonlyMode(mode: Mode): boolean {
  * Invariants:
  *  - targetPath must be absolute and, after normalize+resolve, strictly equal
  *    to the recorded init target path (no directory prefix, no traversal).
- *  - the repo root (target's parent, as recorded by /wf-init) must be an
+ *  - the repo root (target's parent, as recorded by /workflow:init) must be an
  *    existing real directory and not a symlink.
  *  - every existing path component from repo root down to the target must be
  *    a real directory (no symlinks); the target itself, if it exists, must be

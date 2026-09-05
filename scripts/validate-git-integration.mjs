@@ -1,5 +1,5 @@
 /**
- * Regression validation: /wf-merge git integration (Merge Mode).
+ * Regression validation: /workflow:merge git integration (Merge Mode).
  *
  * Three focused scenarios against throwaway git repositories, using the real
  * git-integration.ts module (direct import — it keeps no local value imports)
@@ -123,7 +123,7 @@ assert(typeof validateMergeWorktreeState === "function", "worktree.ts exports va
 
 // ── 0. command parsing ──────────────────────────────────────────────────────
 
-console.log("\n=== 0. /wf-merge argument parsing ===");
+console.log("\n=== 0. /workflow:merge argument parsing ===");
 {
 	let r = parseMergeCommandArgs("--target main");
 	assert(r.ok && r.value.targetBranch === "main" && !r.value.instructions, "parse: --target <branch>");
@@ -157,7 +157,7 @@ console.log("\n=== 0. /wf-merge argument parsing ===");
 
 console.log("\n=== 1. ordinary feature branch ===");
 {
-	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wf-merge-1-"));
+	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-workflow-merge-1-"));
 	try {
 		git(repo, ["init", "-b", "master"]);
 		commitFile(repo, "README.md", "base\n", "base commit");
@@ -230,7 +230,7 @@ console.log("\n=== 1. ordinary feature branch ===");
 
 console.log("\n=== 2. worktree conflict rebase ===");
 {
-	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wf-merge-2-"));
+	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-workflow-merge-2-"));
 	try {
 		git(repo, ["init", "-b", "master"]);
 		commitFile(repo, "app.txt", "base\n", "base");
@@ -367,7 +367,7 @@ console.log("\n=== 2. worktree conflict rebase ===");
 
 console.log("\n=== 3. failure & recovery ===");
 {
-	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wf-merge-3-"));
+	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-workflow-merge-3-"));
 	try {
 		git(repo, ["init", "-b", "master"]);
 		commitFile(repo, "app.txt", "base\n", "base");
@@ -402,7 +402,7 @@ console.log("\n=== 3. failure & recovery ===");
 
 	// 3b. In-progress rebase → cancelled runs --abort.
 	{
-		const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wf-merge-3b-"));
+		const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-workflow-merge-3b-"));
 		try {
 			git(repo, ["init", "-b", "master"]);
 			commitFile(repo, "app.txt", "base\n", "base");
@@ -444,7 +444,7 @@ console.log("\n=== 3. failure & recovery ===");
 	// 3c. `rebase --quit` residue → cancelled performs the guarded forced
 	// reattach and discards in-flight conflict resolution.
 	{
-		const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wf-merge-3c-"));
+		const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-workflow-merge-3c-"));
 		try {
 			git(repo, ["init", "-b", "master"]);
 			commitFile(repo, "app.txt", "base\n", "base");

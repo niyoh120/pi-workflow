@@ -259,7 +259,7 @@ export interface ReviewBranchEntry {
  * - When `planStartEntryId` is present and found, only user messages at or after
  *   that entry are collected (the Plan discussion).
  * - If no user message follows the marker, the nearest preceding user message
- *   is included (the requirement that triggered /plan).
+ *   is included (the requirement that triggered /workflow:plan).
  * - Assistant messages, thinking, tool results, custom entries, and prior-plan
  *   content (which lives before the marker) are excluded by construction.
  *
@@ -302,7 +302,7 @@ export function extractUserRequirements(
 	let reqs = collect(startIndex, branch.length);
 
 	// No user messages after the marker — fall back to the nearest prior user
-	// message (the requirement that triggered /plan).
+	// message (the requirement that triggered /workflow:plan).
 	if (reqs.length === 0 && startIndex > 0) {
 		for (let i = startIndex - 1; i >= 0; i--) {
 			const e = branch[i];

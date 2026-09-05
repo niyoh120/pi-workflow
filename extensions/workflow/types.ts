@@ -19,8 +19,8 @@ export type Role =
 
 /**
  * Simplified mode: idle plus explore/init/plan/work/merge/commit workflow states.
- * `init` is a scoped write-only-for-AGENTS.md mode used by /wf-init.
- * `merge` is the user-triggered Git-integration mode used by /wf-merge; it
+ * `init` is a scoped write-only-for-AGENTS.md mode used by /workflow:init.
+ * `merge` is the user-triggered Git-integration mode used by /workflow:merge; it
  * reuses the `work` model role and adds the branch-integration capability.
  */
 export type Mode =
@@ -77,7 +77,7 @@ export interface WorkflowConfigOverride {
 
 export interface WorkflowConfig {
 	models: Record<Role, ModelSpec>;
-	/** Workflow entry gate — disabled by default until /wf is run. */
+	/** Workflow entry gate — disabled by default until /workflow:enable is run. */
 	workflow: {
 		autoEnter: boolean;
 	};
@@ -87,11 +87,11 @@ export interface WorkflowConfig {
 	};
 	/**
 	 * On-demand unified Review — gated by this enabled flag. When enabled
-	 * (default), `/review` and the `workflow_review` tool are available in Work
+	 * (default), `/workflow:review` and the `workflow_review` tool are available in Work
 	 * Mode. The Review Agent independently verifies requirements/plan/todos and,
 	 * when `codeReview.enabled` is true, folds workspace OCR findings into the
 	 * same review. Review output is transient (a tool result); it never gates
-	 * `/wf-commit` and is never persisted to WorkflowState.
+	 * `/workflow:commit` and is never persisted to WorkflowState.
 	 */
 	review: {
 		enabled: boolean;
@@ -155,7 +155,7 @@ export interface OcrReviewResult {
 export type MergeSourceKind = "workflow-worktree" | "ordinary-branch";
 
 /**
- * Persistent Merge Mode context, recorded atomically by /wf-merge before
+ * Persistent Merge Mode context, recorded atomically by /workflow:merge before
  * entering Merge Mode and only preserved while `mode === "merge"`.
  *
  * The context is the authoritative baseline for the whole merge run: it fixes
@@ -175,13 +175,13 @@ export interface MergeContext {
 	/** `git rev-list --count target..source` at kickoff. */
 	sourceOnlyCommitCountBefore: number;
 	/**
-	 * Raw trailing user instructions from /wf-merge (options stripped).
+	 * Raw trailing user instructions from /workflow:merge (options stripped).
 	 * Undefined for the default strategy. This is the ONLY authorization
 	 * source for high-risk Git actions beyond the default flow.
 	 */
 	instructions?: string;
 	/**
-	 * True when /wf-merge received no trailing instructions (default
+	 * True when /workflow:merge received no trailing instructions (default
 	 * rebase + ff-only strategy). Forces finalize=ff-only.
 	 */
 	defaultStrategy: boolean;
@@ -214,7 +214,7 @@ export interface WorkflowState {
 	/** Plan Mode grilling 阶段记录的设计决策拷问序列。 */
 	grillTurns: GrillTurn[];
 	/**
-	 * Session leaf entry id captured when `/plan` starts. Scopes authoritative
+	 * Session leaf entry id captured when `/workflow:plan` starts. Scopes authoritative
 	 * requirement extraction to the current Plan lifecycle so the independent
 	 * reviewer only sees user messages from this plan discussion. Undefined
 	 * outside Plan Mode and on older sessions (extraction falls back to the
@@ -237,7 +237,7 @@ export interface WorkflowState {
 	 */
 	approvedTodos?: TodoItem[];
 	/**
-	 * Session leaf entry id captured when `/work` starts a Direct Work run.
+	 * Session leaf entry id captured when `/workflow:work` starts a Direct Work run.
 	 * Scopes authoritative requirement extraction to this Work lifecycle so the
 	 * implementation reviewer only sees user messages from this work session.
 	 * Undefined in Approved Work (which uses the Final Plan instead).
@@ -270,7 +270,7 @@ export interface WorkflowState {
 	/**
 	 * Session-scoped config overrides — highest-priority config layer.
 	 * Merged on top of DEFAULT ← global ← project when resolving config for
-	 * this session. Edited via /wf-settings (Session scope).
+	 * this session. Edited via /workflow:settings (Session scope).
 	 */
 	sessionConfig?: WorkflowConfigOverride;
 }

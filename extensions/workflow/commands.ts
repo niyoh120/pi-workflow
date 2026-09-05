@@ -71,7 +71,7 @@ function getSessionBranch(ctx: unknown): any[] | undefined {
 	}
 }
 
-// ── /wf-init helpers ─────────────────────────────────────────────────────────
+// ── /workflow:init helpers ─────────────────────────────────────────────────────────
 
 function isGitRepo(cwd: string): boolean {
 	try {
@@ -313,7 +313,7 @@ export function registerWorkflowContextInjection(
 
 				// Full fail-open: marker/journal unavailable or pairing broken.
 				// Inject a hidden recovery warning so the model stops execution,
-				// blocks the current todo, and asks the user to run /plan —
+				// blocks the current todo, and asks the user to run /workflow:plan —
 				// rather than silently continuing without the plan contract.
 				console.error(
 					"[workflow] work context isolation fail-open: marker/journal unavailable or pairing broken",
@@ -322,7 +322,7 @@ export function registerWorkflowContextInjection(
 					"# Approved-Plan Work Recovery Warning\n\n" +
 					"计划恢复失败：handoff marker 与 approval journal 均不可用或配对失效。\n" +
 					"立即停止执行：将当前 workflow_todo 标记为 blocked，不要继续修改文件，\n" +
-					"并向用户报告冲突，请用户执行 /plan 修订计划。不要自行切换模式或调用 workflow_plan_save。";
+					"并向用户报告冲突，请用户执行 /workflow:plan 修订计划。不要自行切换模式或调用 workflow_plan_save。";
 				return {
 					messages: [
 						{
@@ -543,13 +543,13 @@ export function registerToolCallGuard(
 				return {
 					block: true,
 					reason:
-						"Workflow is not enabled. Run /wf first to enable workflow tools.",
+						"Workflow is not enabled. Run /workflow:enable first to enable workflow tools.",
 				};
 			}
 			if (!isWorkflowToolMode(effectiveMode)) {
 				return {
 					block: true,
-					reason: `当前模式(${effectiveMode})禁止使用 ${event.toolName}。请用 /plan 进入 Plan Mode 或 /work 进入 Work Mode。`,
+					reason: `当前模式(${effectiveMode})禁止使用 ${event.toolName}。请用 /workflow:plan 进入 Plan Mode 或 /workflow:work 进入 Work Mode。`,
 				};
 			}
 			if (
@@ -567,7 +567,7 @@ export function registerToolCallGuard(
 
 		// ── Workflow data protection: block direct read to .pi/workflow/ in all modes ──
 		// Workflow data is only accessible via workflow tools (plan save/read,
-		// approval journal, /wf-status). This read guard is mode-independent so Work
+		// approval journal, /workflow:status). This read guard is mode-independent so Work
 		// and Commit also cannot bypass it with direct read calls. write/edit
 		// protection lives in the dedicated block below.
 		if (event.toolName === "read") {
@@ -640,7 +640,7 @@ export function registerToolCallGuard(
 			if (!validation.ok) {
 				return {
 					block: true,
-					reason: `Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
+					reason: `Active worktree is invalid: ${validation.reason}. Run /workflow:status or /workflow:reset.`,
 				};
 			}
 
@@ -741,14 +741,15 @@ export function registerAgentEnd(
 	});
 }
 
-// ── /wf command ─────────────────────────────────────────────────────────────
+// ── /workflow:enable command ─────────────────────────────────────────────────────────────
 
-export function registerWfCommand(
+export function registerWorkflowEnableCommand(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
-	pi.registerCommand("wf", {
-		description: "进入 workflow 模式，启用 /plan /work /review /wf-merge /wf-commit 等命令",
+	pi.registerCommand("workflow:enable", {
+		description:
+			"启用 workflow 并进入 Explore Mode，随后可用 /workflow:plan /workflow:work /workflow:review 等命令",
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 			const sessionKey = ctxSessionKey(ctx);
@@ -782,7 +783,7 @@ export function registerWfCommand(
 				// this point, and session_start (post-reload) reconciles them
 				// unconditionally via restoreModeRuntime once registration completes.
 				console.warn(
-					"[workflow] /wf: explore role runtime failed to apply; continuing with reload to register workflow commands/tools",
+					"[workflow] /workflow:enable: explore role runtime failed to apply; continuing with reload to register workflow commands/tools",
 				);
 			}
 
@@ -803,7 +804,7 @@ export function isWorkflowCommandsRegistered(): boolean {
 }
 
 /**
- * Register all workflow slash commands except /wf (which is always registered).
+ * Register all workflow slash commands except /workflow:enable (which is always registered).
  * Idempotent per ExtensionAPI instance — skips if already registered.
  */
 export function registerAllWorkflowCommands(
@@ -813,18 +814,18 @@ export function registerAllWorkflowCommands(
 ): void {
 	if (_workflowCommandsRegistered.has(pi)) return;
 
-	registerExploreCommand(pi, getAgentDir);
-	registerPlanCommand(pi, getAgentDir);
-	registerWorkCommand(pi, getAgentDir);
+	registerWorkflowExploreCommand(pi, getAgentDir);
+	registerWorkflowPlanCommand(pi, getAgentDir);
+	registerWorkflowWorkCommand(pi, getAgentDir);
 	// Register the command definition unconditionally. The handler resolves
 	// codeReview.enabled with the real trusted session context before running.
-	registerReviewCommand(pi, getAgentDir);
-	registerWfMergeCommand(pi, getAgentDir);
-	registerWfCommitCommand(pi, getAgentDir);
-	registerWfStatusCommand(pi, getAgentDir);
-	registerWfResetCommand(pi);
-	registerWfInitCommand(pi, getAgentDir);
-	registerWfExitCommand(pi);
+	registerWorkflowReviewCommand(pi, getAgentDir);
+	registerWorkflowMergeCommand(pi, getAgentDir);
+	registerWorkflowCommitCommand(pi, getAgentDir);
+	registerWorkflowStatusCommand(pi, getAgentDir);
+	registerWorkflowResetCommand(pi);
+	registerWorkflowInitCommand(pi, getAgentDir);
+	registerWorkflowDisableCommand(pi);
 
 	_workflowCommandsRegistered.add(pi);
 }
@@ -835,7 +836,7 @@ export function registerAllWorkflowCommands(
  * Denial notice for mode-switching entries while a merge is active. Mode
  * commands must not silently drop an active merge baseline — the user closes
  * the run via workflow_merge_complete (completed/cancelled) or hard-recovers
- * via /wf-reset.
+ * via /workflow:reset.
  */
 function activeMergeDenial(state: WorkflowState): string | null {
 	if (state.mode !== "merge" || !state.mergeContext) return null;
@@ -843,15 +844,15 @@ function activeMergeDenial(state: WorkflowState): string | null {
 	return (
 		`当前存在 active merge：${mc.sourceBranch} → ${mc.targetBranch}（${mc.sourceKind}）。` +
 		"请先在 Merge Mode 中调用 workflow_merge_complete(status=\"completed\" 或 \"cancelled\") 完成或中止本次集成；" +
-		"需要硬恢复时使用 /wf-reset。"
+		"需要硬恢复时使用 /workflow:reset。"
 	);
 }
 
-export function registerExploreCommand(
+export function registerWorkflowExploreCommand(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
-	pi.registerCommand("explore", {
+	pi.registerCommand("workflow:explore", {
 		description: "进入 Explore Mode：探索代码库、问答，权限等同 Plan Mode",
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
@@ -864,7 +865,7 @@ export function registerExploreCommand(
 				return;
 			}
 			// Non-destructive: switch mode only — preserve plan/todos.
-			// Also enable workflow in case the user ran /wf-exit earlier.
+			// Also enable workflow in case the user ran /workflow:disable earlier.
 			const state: WorkflowState = {
 				...current,
 				workflowEnabled: true,
@@ -889,11 +890,11 @@ export function registerExploreCommand(
 	});
 }
 
-export function registerPlanCommand(
+export function registerWorkflowPlanCommand(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
-	pi.registerCommand("plan", {
+	pi.registerCommand("workflow:plan", {
 		description: "进入计划模式：头脑风暴、产出计划、等待确认",
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
@@ -947,11 +948,11 @@ export function registerPlanCommand(
 	});
 }
 
-export function registerWorkCommand(
+export function registerWorkflowWorkCommand(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
-	pi.registerCommand("work", {
+	pi.registerCommand("workflow:work", {
 		description: "跳过计划，直接进入 Work Mode",
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
@@ -969,7 +970,7 @@ export function registerWorkCommand(
 				const validation = validateWorktreeState(ctx.cwd, current);
 				if (!validation.ok) {
 					ctx.ui.notify(
-						`Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
+						`Active worktree is invalid: ${validation.reason}. Run /workflow:status or /workflow:reset.`,
 						"error",
 					);
 					return;
@@ -1030,12 +1031,12 @@ export function registerWorkCommand(
 	});
 }
 
-// registerReviewCommand — on-demand unified review of the current workspace.
-export function registerReviewCommand(
+// registerWorkflowReviewCommand — on-demand unified review of the current workspace.
+export function registerWorkflowReviewCommand(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
-	pi.registerCommand("review", {
+	pi.registerCommand("workflow:review", {
 		description:
 			"Run the unified on-demand review of the current workspace (incl. active worktree). OCR is included when codeReview.enabled is true.",
 		handler: async (_args, ctx) => {
@@ -1062,7 +1063,7 @@ export function registerReviewCommand(
 			// JSON/print: no UI surface; stderr keeps stdout protocol/print output clean.
 			if (ctx.mode === "json" || ctx.mode === "print") {
 				console.error(
-					"workflow review: /review requires interactive mode (TUI/RPC). " +
+					"workflow review: /workflow:review requires interactive mode (TUI/RPC). " +
 						"In JSON/print mode, call workflow_review directly.",
 				);
 				return;
@@ -1091,7 +1092,7 @@ async function startReviewLoop(
 		const validation = validateWorktreeState(ctx.cwd, current);
 		if (!validation.ok) {
 			ctx.ui.notify(
-				`Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
+				`Active worktree is invalid: ${validation.reason}. Run /workflow:status or /workflow:reset.`,
 				"error",
 			);
 			return;
@@ -1126,21 +1127,21 @@ Review scope: 当前 workspace（含 active worktree）。
 5. 判断某 Critical/Important 问题是误判、超出范围、无需修改或与项目约束冲突时，在下一轮调用 \`workflow_review({ feedback: "..." })\` 提交技术理由。feedback 须逐条对应争议 finding，给出技术理由与 \`file:line\` / 命令输出等可复核证据，保持详细且聚焦，禁止编造事实；reviewer 会独立复核。
 6. 第一轮已经没有 Critical/Important 问题时，可以结束循环。2-3 轮后仍存在分歧时，停止并交给用户裁决。
 7. Minor 问题按价值选择处理，不能阻塞 review 通过。
-8. \`/wf-commit\` 始终直接可用，不要求 Review；review 完成后可随时提交。`;
+8. \`/workflow:commit\` 始终直接可用，不要求 Review；review 完成后可随时提交。`;
 	ctx.ui.notify("Starting unified review loop: workspace.", "info");
 	pi.setSessionName("review: workspace");
 	pi.sendUserMessage(promptText);
 }
 
 
-export function registerWfCommitCommand(
+export function registerWorkflowCommitCommand(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
-	// Command migrated from /commit to /wf-commit with no compat alias (a
+	// Command migrated from /commit to /workflow:commit with no compat alias (a
 	// deliberate breaking CLI change). Registered through the same conditional
 	// registration path as all other workflow commands.
-	pi.registerCommand("wf-commit", {
+	pi.registerCommand("workflow:commit", {
 		description:
 			"切到 commit 模型，根据当前 diff 生成 commit message 并直接提交",
 		handler: async (args, ctx) => {
@@ -1157,7 +1158,7 @@ export function registerWfCommitCommand(
 				const validation = validateWorktreeState(ctx.cwd, current);
 				if (!validation.ok) {
 					ctx.ui.notify(
-						`Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
+						`Active worktree is invalid: ${validation.reason}. Run /workflow:status or /workflow:reset.`,
 						"error",
 					);
 					return;
@@ -1192,27 +1193,27 @@ export function registerWfCommitCommand(
 	});
 }
 
-// ── /wf-merge command ────────────────────────────────────────────────────────
+// ── /workflow:merge command ────────────────────────────────────────────────────────
 
 /**
- * Register /wf-merge: enter Merge Mode to integrate the source branch (the
+ * Register /workflow:merge: enter Merge Mode to integrate the source branch (the
  * active workflow worktree branch, or the current ordinary local branch) into
  * a target local branch. Default strategy is rebase + ff-only; trailing
  * natural-language instructions authorize a custom strategy. Syntax:
  *
- *   /wf-merge [--target <branch>] [用户自然语言指令]
+ *   /workflow:merge [--target <branch>] [用户自然语言指令]
  *
  * Preflight rejects dirty source/target checkouts, detached-HEAD sources,
  * source==target, and unfinished sequencers; the baseline is then persisted
  * atomically with mode=merge BEFORE the kickoff message, so a crash mid-merge
- * never loses the merge context. Re-running /wf-merge with an active context
+ * never loses the merge context. Re-running /workflow:merge with an active context
  * never overwrites the baseline or the authorization.
  */
-export function registerWfMergeCommand(
+export function registerWorkflowMergeCommand(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
-	pi.registerCommand("wf-merge", {
+	pi.registerCommand("workflow:merge", {
 		description:
 			"进入 Merge Mode：rebase 来源分支到目标分支并 fast-forward（可尾随自定义策略指令）",
 		handler: async (args, ctx) => {
@@ -1225,7 +1226,7 @@ export function registerWfMergeCommand(
 			// init run.
 			if (current.mode === "init") {
 				ctx.ui.notify(
-					"当前处于 Init Mode。请先调用 workflow_init_complete 完成或取消初始化，再执行 /wf-merge。",
+					"当前处于 Init Mode。请先调用 workflow_init_complete 完成或取消初始化，再执行 /workflow:merge。",
 					"error",
 				);
 				return;
@@ -1257,7 +1258,7 @@ export function registerWfMergeCommand(
 				const validation = validateWorktreeState(ctx.cwd, current);
 				if (!validation.ok) {
 					ctx.ui.notify(
-						`Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
+						`Active worktree is invalid: ${validation.reason}. Run /workflow:status or /workflow:reset.`,
 						"error",
 					);
 					return;
@@ -1343,11 +1344,11 @@ export function registerWfMergeCommand(
 	});
 }
 
-export function registerWfStatusCommand(
+export function registerWorkflowStatusCommand(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
-	pi.registerCommand("wf-status", {
+	pi.registerCommand("workflow:status", {
 		description: "显示当前轻量 workflow 状态、有效配置与来源",
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
@@ -1372,7 +1373,7 @@ export function registerWfStatusCommand(
 					ctx,
 				);
 			} catch (e: unknown) {
-				const errMsg = `wf-status: failed to resolve config sources: ${e instanceof Error ? e.message : String(e)}`;
+				const errMsg = `workflow:status: failed to resolve config sources: ${e instanceof Error ? e.message : String(e)}`;
 				if (ctx.mode === "json" || ctx.mode === "print") {
 					console.error(errMsg);
 					return;
@@ -1387,7 +1388,7 @@ export function registerWfStatusCommand(
 			// (chosen via /model, Ctrl+P, Shift+Tab, or restored on /reload or /resume).
 			// Differs from the configured role when the user manually switched within
 			// the current workflow mode; workflow only re-applies the role config on
-			// explicit transitions and /wf-settings saves.
+			// explicit transitions and /workflow:settings saves.
 			const activeModel = ctx.model;
 			const activeThinking = pi.getThinkingLevel();
 			msg += `\n\n# Effective Config`;
@@ -1427,9 +1428,9 @@ export function registerWfStatusCommand(
 	});
 }
 
-export function registerWfExitCommand(pi: ExtensionAPI): void {
-	pi.registerCommand("wf-exit", {
-		description: "退出 workflow mode，恢复普通 Pi",
+export function registerWorkflowDisableCommand(pi: ExtensionAPI): void {
+	pi.registerCommand("workflow:disable", {
+		description: "禁用 workflow，恢复普通 Pi",
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 			const sessionKey = ctxSessionKey(ctx);
@@ -1461,14 +1462,14 @@ export function registerWfExitCommand(pi: ExtensionAPI): void {
 			if (overlay) overlay.dispose();
 
 			ctx.ui.setStatus("lite-sp", undefined);
-			ctx.ui.notify("已退出 workflow mode。正在重载扩展...", "info");
+			ctx.ui.notify("已禁用 workflow。正在重载扩展...", "info");
 			await ctx.reload();
 		},
 	});
 }
 
-export function registerWfResetCommand(pi: ExtensionAPI): void {
-	pi.registerCommand("wf-reset", {
+export function registerWorkflowResetCommand(pi: ExtensionAPI): void {
+	pi.registerCommand("workflow:reset", {
 		description: "清空 workflow 状态、plan 目录和 todo",
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
@@ -1482,7 +1483,7 @@ export function registerWfResetCommand(pi: ExtensionAPI): void {
 				const mc = current.mergeContext;
 				if (mc.sourceKind === "workflow-worktree" && !current.worktreePath) {
 					ctx.ui.notify(
-						"Active merge 的来源 worktree 已不在状态中；请手动恢复后重试 /wf-reset。",
+						"Active merge 的来源 worktree 已不在状态中；请手动恢复后重试 /workflow:reset。",
 						"error",
 					);
 					return;
@@ -1593,11 +1594,11 @@ export function registerWfResetCommand(pi: ExtensionAPI): void {
 	});
 }
 
-export function registerWfInitCommand(
+export function registerWorkflowInitCommand(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
-	pi.registerCommand("wf-init", {
+	pi.registerCommand("workflow:init", {
 		description: "初始化 agent 工作区：确保 git 仓库存在，进入 Init Mode 生成/校准 AGENTS.md",
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();

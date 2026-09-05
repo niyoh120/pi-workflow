@@ -2,16 +2,16 @@
  * Pi Workflow Extension
  *
  * A lightweight software development workflow with simplified mode flow:
- * idle → plan → work → commit, plus the user-triggered Merge Mode (/wf-merge)
+ * idle → plan → work → commit, plus the user-triggered Merge Mode (/workflow:merge)
  * that integrates a source branch (workflow worktree branch or ordinary local
  * branch) via rebase + fast-forward under a dedicated capability gate.
  *
  * Plan review runs an independent reviewer AgentSession (fresh, in-memory,
  * multi-turn) that inherits the parent Plan information-tool surface.
- * The unified on-demand Review (/review → workflow_review) launches an
+ * The unified on-demand Review (/workflow:review → workflow_review) launches an
  * independent reviewer over the current workspace and, when codeReview.enabled
  * is true, folds workspace OCR findings into the same review. Review output is
- * transient and never gates /wf-commit. Review rounds are persisted per work run
+ * transient and never gates /workflow:commit. Review rounds are persisted per work run
  * (review-history.ts) so the next round re-dispositions the previous round's
  * findings instead of re-deriving everything, reuses cached OCR findings when
  * the workspace diff is unchanged, and short-circuits identical re-reviews.
@@ -23,7 +23,7 @@
  * never gates approval (always user-confirmed).
  * No external extension dependency required.
  *
- * Workflow commands and tools are gated behind /wf by default.
+ * Workflow commands and tools are gated behind /workflow:enable by default.
  * Set config workflow.autoEnter = true to enable them on startup.
  */
 
@@ -38,11 +38,11 @@ import { WorkflowTodoOverlay, setWorkflowOverlay, getWorkflowOverlay } from "./t
 
 import { registerAllWorkflowTools, ensureRpcAliasRegistered } from "./tools.js";
 
-import { registerWfSettingsCommand } from "./settings.js";
+import { registerWorkflowSettingsCommand } from "./settings.js";
 
 import {
 	registerAllWorkflowCommands,
-	registerWfCommand,
+	registerWorkflowEnableCommand,
 	registerBeforeAgentStart,
 	registerWorkflowContextInjection,
 	registerPendingWorkDispatcher,
@@ -74,7 +74,7 @@ function ensureWorkflowRegistered(
 }
 
 /**
- * Single ordered session_start path for both auto-enter and delayed /wf paths.
+ * Single ordered session_start path for both auto-enter and delayed /workflow:enable paths.
  *
  * When workflow is active, register workflow commands/tools first, then apply
  * the current mode runtime (promote idle → explore through the unified
@@ -109,7 +109,7 @@ function registerWorkflowSessionStart(
 			// time. Register/update it here on every session_start so the
 			// update_plan alias is available in RPC mode regardless of whether
 			// workflow was auto-entered (factory-time registration) or enabled
-			// via /wf. Idempotent: no-op when already owned and live.
+			// via /workflow:enable. Idempotent: no-op when already owned and live.
 			ensureRpcAliasRegistered(pi, getAgentDir, ctx);
 
 			// TUI-only: bind the todo overlay UI context and refresh from state.
@@ -175,9 +175,9 @@ export default function (pi: ExtensionAPI) {
 	// resolves default/global only and ignores session/project layers.
 	const config = loadConfigForContext(process.cwd(), getAgentDir(), "", undefined);
 
-	// ── /wf and /wf-settings are always registered ──
-	registerWfCommand(pi, getAgentDir);
-	registerWfSettingsCommand(pi, getAgentDir);
+	// ── /workflow:enable and /workflow:settings are always registered ──
+	registerWorkflowEnableCommand(pi, getAgentDir);
+	registerWorkflowSettingsCommand(pi, getAgentDir);
 
 	// ── Workflow commands/tools: conditional ──────
 	if (config.workflow.autoEnter) {
@@ -186,9 +186,9 @@ export default function (pi: ExtensionAPI) {
 		// the update_plan RPC alias is also registered there.
 		ensureWorkflowRegistered(pi, getAgentDir, process.cwd(), undefined);
 	}
-	// Unified session_start path: register when /wf has enabled workflow,
+	// Unified session_start path: register when /workflow:enable has enabled workflow,
 	// apply runtime (tools/model) before the first prompt is built, and set
-	// status. Runs for both auto-enter and delayed /wf reload/resume paths.
+	// status. Runs for both auto-enter and delayed /workflow:enable reload/resume paths.
 	registerWorkflowSessionStart(pi, getAgentDir);
 
 	// ── Event handlers (always registered) ────────

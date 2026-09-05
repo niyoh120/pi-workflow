@@ -22,7 +22,7 @@
  *     delta + mode decision (pure fixtures), protocol single-source (task +
  *     protocol hash share one constant source), strict successful-tool
  *     evidence, effective-verdict downgrade, short-circuit wiring, and the
- *     /wf-reset / prompt / README wiring.
+ *     /workflow:reset / prompt / README wiring.
  *
  * Pure-function fixtures are loaded via Node 24 type-stripping: the REAL
  * function source is extracted from plan-review-agent.ts into a temp .ts
@@ -162,7 +162,7 @@ console.log("\n=== Part 1: authoritative requirement extraction ===");
 		{ id: "a1", type: "message", message: { role: "assistant", content: [{ type: "text", text: "planner reasoning" }] } },
 		{ id: "t1", type: "message", message: { role: "toolResult", content: [{ type: "text", text: "tool output" }] } },
 		{ id: "c1", type: "custom", customType: "x", data: {} },
-		{ id: "mark", type: "message", message: { role: "assistant", content: [{ type: "text", text: "/plan acknowledged" }] } },
+		{ id: "mark", type: "message", message: { role: "assistant", content: [{ type: "text", text: "/workflow:plan acknowledged" }] } },
 		{ id: "u2", type: "message", message: { role: "user", content: "build the foo feature" } },
 		{ id: "u3", type: "message", message: { role: "user", content: [{ type: "text", text: "with bar constraint" }] } },
 		{ id: "a2", type: "message", message: { role: "assistant", content: [{ type: "text", text: "draft plan" }] } },
@@ -866,9 +866,9 @@ console.log("\n=== Part 8b: review-round history helpers ===");
 	assert(toolsTs.includes("loadReviewHistory("), "workflow_review loads prior round history");
 	assert(toolsTs.includes("shortCircuited"), "workflow_review short-circuits identical rounds");
 	assert(toolsTs.includes("cachedOcr"), "workflow_review reuses cached OCR findings on unchanged diffs");
-	assert(commandsTs.includes("reviewHistoryPath"), "wf-reset removes the review history file");
+	assert(commandsTs.includes("reviewHistoryPath"), "workflow:reset removes the review history file");
 	// The review-loop fingerprint is a NEW module — the old worktree helpers
-	// stay gone (Part 8) and nothing gates /wf-commit (Part 9).
+	// stay gone (Part 8) and nothing gates /workflow:commit (Part 9).
 	assert(!histTs.includes("computeWorkspaceFingerprint"), "review-history.ts does not resurrect the old fingerprint name");
 
 	// ── pure fixtures (Node 24 type-stripping, same approach as Part 7) ──
@@ -1130,18 +1130,18 @@ console.log("\n=== Part 9: no commit gate + no agent_end PASS + approve snapshot
 	const commandsSrc = read("extensions/workflow/commands.ts");
 	const toolsSrc = read("extensions/workflow/tools.ts");
 
-	// /wf-commit has NO review/implementation gate — it switches Commit Mode directly.
-	const commitStart = commandsSrc.indexOf("export function registerWfCommitCommand");
-	const commitEnd = commandsSrc.indexOf("export function registerWfStatusCommand", commitStart);
+	// /workflow:commit has NO review/implementation gate — it switches Commit Mode directly.
+	const commitStart = commandsSrc.indexOf("export function registerWorkflowCommitCommand");
+	const commitEnd = commandsSrc.indexOf("export function registerWorkflowStatusCommand", commitStart);
 	const commitBlock = commandsSrc.slice(commitStart, commitEnd > 0 ? commitEnd : commandsSrc.length);
-	assert(!/implementationReview/.test(commitBlock), "/wf-commit no longer references implementationReview PASS");
-	assert(!/computeWorkspaceFingerprint/.test(commitBlock), "/wf-commit no longer computes a workspace fingerprint");
-	assert(!/workspaceFingerprint/.test(commitBlock), "/wf-commit no longer compares a fingerprint");
-	assert(commitBlock.includes("transitionWorkflowMode"), "/wf-commit switches Commit Mode directly via transitionWorkflowMode");
+	assert(!/implementationReview/.test(commitBlock), "/workflow:commit no longer references implementationReview PASS");
+	assert(!/computeWorkspaceFingerprint/.test(commitBlock), "/workflow:commit no longer computes a workspace fingerprint");
+	assert(!/workspaceFingerprint/.test(commitBlock), "/workflow:commit no longer compares a fingerprint");
+	assert(commitBlock.includes("transitionWorkflowMode"), "/workflow:commit switches Commit Mode directly via transitionWorkflowMode");
 
 	// agent_end has no fingerprint/PASS check.
 	const agentEndStart = commandsSrc.indexOf("export function registerAgentEnd");
-	const agentEndEnd = commandsSrc.indexOf("export function registerWfCommand", agentEndStart);
+	const agentEndEnd = commandsSrc.indexOf("export function registerWorkflowEnableCommand", agentEndStart);
 	const agentEndBlock = commandsSrc.slice(agentEndStart, agentEndEnd > 0 ? agentEndEnd : commandsSrc.length);
 	assert(!/implementationReview/.test(agentEndBlock), "agent_end no longer references implementationReview PASS");
 	assert(!/computeWorkspaceFingerprint/.test(agentEndBlock), "agent_end no longer computes a fingerprint");
@@ -1154,13 +1154,13 @@ console.log("\n=== Part 9: no commit gate + no agent_end PASS + approve snapshot
 	assert(approveBlock.includes("approvedTodos: state.todos.map"), "approve deep-copies todos into approvedTodos snapshot");
 	assert(!/implementationReview: undefined/.test(approveBlock), "approve no longer clears implementationReview PASS");
 
-	// /work no longer clears a PASS.
-	const workStart = commandsSrc.indexOf("export function registerWorkCommand");
-	const workEnd = commandsSrc.indexOf("export function registerReviewCommand", workStart);
+	// /workflow:work no longer clears a PASS.
+	const workStart = commandsSrc.indexOf("export function registerWorkflowWorkCommand");
+	const workEnd = commandsSrc.indexOf("export function registerWorkflowReviewCommand", workStart);
 	const workBlock = commandsSrc.slice(workStart, workEnd > 0 ? workEnd : commandsSrc.length);
-	assert(workBlock.includes("workStartEntryId"), "/work captures workStartEntryId for Direct Work requirement scoping");
-	assert(workBlock.includes("approvedTodos: undefined"), "/work clears approved todos for Direct Work");
-	assert(!/implementationReview: undefined/.test(workBlock), "/work no longer clears implementationReview PASS");
+	assert(workBlock.includes("workStartEntryId"), "/workflow:work captures workStartEntryId for Direct Work requirement scoping");
+	assert(workBlock.includes("approvedTodos: undefined"), "/workflow:work clears approved todos for Direct Work");
+	assert(!/implementationReview: undefined/.test(workBlock), "/workflow:work no longer clears implementationReview PASS");
 
 	// Todo mutations no longer delete a PASS (both surfaces).
 	const todoToolStart = toolsSrc.indexOf("export function registerTodoTool");
@@ -1733,9 +1733,9 @@ console.log("\n=== Part 13: plan-review tool wiring ===");
 	assert(persistBlock.includes('mode: incremental ? "incremental" : "full"'), "persisted rounds record their mode");
 	assert(persistBlock.includes("historyPersisted = false"), "persistence failure keeps the review result (diagnostics flag full-review next)");
 
-	// /wf-reset clears the plan-review history too.
-	assert(commandsSrc.includes("planReviewHistoryPath"), "/wf-reset removes the plan-review history file");
-	assert(/planReviewHistoryPath\(ctx\.cwd, sessionKey\), \{ force: true \}/.test(commandsSrc), "/wf-reset force-removes plan-review-history.json");
+	// /workflow:reset clears the plan-review history too.
+	assert(commandsSrc.includes("planReviewHistoryPath"), "/workflow:reset removes the plan-review history file");
+	assert(/planReviewHistoryPath\(ctx\.cwd, sessionKey\), \{ force: true \}/.test(commandsSrc), "/workflow:reset force-removes plan-review-history.json");
 
 	// Prompt + README: incremental behavior, feedback, verdict semantics,
 	// strict evidence, round-strategy difference, approval semantics.

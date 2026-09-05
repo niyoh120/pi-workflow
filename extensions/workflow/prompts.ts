@@ -15,7 +15,7 @@ export const EXPLORE_PROMPT = `
 - 禁止修改项目文件、写配置、安装依赖、执行会修改项目的 shell 命令。
 - 禁止 git 写操作、commit / push。
 
-准备好产出计划时用 \`/plan\`；准备好实现时用 \`/work\`。
+准备好产出计划时用 \`/workflow:plan\`；准备好实现时用 \`/workflow:work\`。
 `;
 
 export const COMMON_PROMPT = `
@@ -104,12 +104,12 @@ export const WORK_PROMPT = `
 - 可以读取、搜索、修改文件、运行测试、查询外部文档。
 - 🚫 禁止执行任何 git 仓库写操作（add / commit / push / checkout / switch / reset / clean / apply / restore / merge / rebase / cherry-pick / revert / stash / pull / fetch / branch -d/-m / tag / rm / mv 等）。
 - 通过 workflow_todo 维护任务进度。
-- Approved-Plan Work（由 workflow_plan_approve 进入）：handoff 已包含 Final Plan 与 Approved Todo Snapshot，直接按计划和 todo 执行。执行优先级为最新用户指令 → Final Plan（含 Decision Context 中的硬约束与已确认决策） → workflow_todo → 其他历史。Approved Work 不提供 workflow_plan_read；若上下文出现 recovery warning（handoff/marker 恢复失败），立即将当前 todo 标记为 blocked，停止执行，并请用户执行 /plan 修订计划。
-- Direct Work（由 /work 进入）：以本次 Work 生命周期内的原始用户请求和 workflow_todo 为权威输入。手动测试后发现需要追加的小任务，继续通过 workflow_todo 新增 todo 留在当前 Work。
+- Approved-Plan Work（由 workflow_plan_approve 进入）：handoff 已包含 Final Plan 与 Approved Todo Snapshot，直接按计划和 todo 执行。执行优先级为最新用户指令 → Final Plan（含 Decision Context 中的硬约束与已确认决策） → workflow_todo → 其他历史。Approved Work 不提供 workflow_plan_read；若上下文出现 recovery warning（handoff/marker 恢复失败），立即将当前 todo 标记为 blocked，停止执行，并请用户执行 /workflow:plan 修订计划。
+- Direct Work（由 /workflow:work 进入）：以本次 Work 生命周期内的原始用户请求和 workflow_todo 为权威输入。手动测试后发现需要追加的小任务，继续通过 workflow_todo 新增 todo 留在当前 Work。
 - 开始或恢复 Work 时，近期上下文缺少完整 todo snapshot 则先调用 workflow_todo(action="list") 读取状态；按 workflow_todo 和实际依赖推进，每次保持一个 in_progress 项。
 - 修改后运行能验证改动的检查（项目测试或其他命令）。
 - 当你认为上一轮 review 的某个 Critical/Important finding 是误判、超出范围、无需修改或与项目约束冲突时，可在下一轮调用 \`workflow_review({ feedback: "..." })\` 提交技术理由。feedback 须逐条对应争议 finding，详细说明技术理由，附 \`file:line\` / 命令输出等可复核证据，并保持事实准确；reviewer 会独立复核，编造事实无益。
-- 实现完成后，可提示用户用 \`/review\` 触发统一 Review（可选，适合复杂改动）；\`/wf-commit\` 始终直接可用，不要求 Review。
+- 实现完成后，可提示用户用 \`/workflow:review\` 触发统一 Review（可选，适合复杂改动）；\`/workflow:commit\` 始终直接可用，不要求 Review。
 `;
 
 export const MERGE_PROMPT = `
@@ -165,7 +165,7 @@ export const INIT_PROMPT = `
 权限：
 - 可以读取、搜索文件、查看 git 历史、联网查询文档。
 - 只允许写入初始任务消息中指明的目标 AGENTS.md 绝对路径；其他文件写入会被拦截。
-- 🚫 不允许 scratch 脚本写入、git 写操作（git init 已由 /wf-init 处理）、直接读写 .pi/workflow/。
+- 🚫 不允许 scratch 脚本写入、git 写操作（git init 已由 /workflow:init 处理）、直接读写 .pi/workflow/。
 - 完成或中止时调用 workflow_init_complete(status) 恢复原模式。
 
 流程：

@@ -39,7 +39,7 @@
  * the sole basis for PASS/FAIL.
  *
  * The verdict is TRANSIENT: it only signals whether this on-demand review loop
- * can end. It is never written to WorkflowState and never gates `/wf-commit`.
+ * can end. It is never written to WorkflowState and never gates `/workflow:commit`.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -531,9 +531,9 @@ export interface RunReviewAgentOptions {
 	modelSpec: ModelSpec;
 	/** Active session branch (from sessionManager.getBranch()). */
 	branch: ReviewBranchEntry[] | undefined;
-	/** Session leaf captured when /plan started (Approved Work). */
+	/** Session leaf captured when /workflow:plan started (Approved Work). */
 	planStartEntryId?: string;
-	/** Session leaf captured when /work started (Direct Work). */
+	/** Session leaf captured when /workflow:work started (Direct Work). */
 	workStartEntryId?: string;
 	/** Final Plan markdown (Approved Work). Undefined for Direct Work. */
 	planMarkdown?: string;

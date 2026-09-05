@@ -11,7 +11,7 @@
  * The done/hidden bookkeeping below is intentionally session-local and lives
  * only in this in-memory overlay instance. It is NOT persisted to WorkflowState
  * (the persisted `hiddenDoneIds` field was removed): the overlay's turn/session
- * lifecycle is the sole owner, so a new plan, /wf-reset, or dispose clears it
+ * lifecycle is the sole owner, so a new plan, /workflow:reset, or dispose clears it
  * via clearBookkeeping() without any state-sync burden.
  */
 

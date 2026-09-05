@@ -406,32 +406,32 @@ console.log("\n=== Check 6: Source structure verification ===");
 		'workflow_plan_save: clear todos + grillTurns (no persisted hiddenDoneIds), then saveState, then overlay cleanup',
 	);
 
-	// /plan and /work call clearBookkeeping
+	// /workflow:plan and /workflow:work call clearBookkeeping
 	const planCmdStart = commandsTs.indexOf(
-		"export function registerPlanCommand",
+		"export function registerWorkflowPlanCommand",
 	);
 	const planCmdEnd = commandsTs.indexOf(
-		"export function registerWorkCommand",
+		"export function registerWorkflowWorkCommand",
 		planCmdStart,
 	);
 	assert(
 		planCmdStart >= 0 &&
 			planCmdEnd > planCmdStart &&
 			commandsTs.slice(planCmdStart, planCmdEnd).includes("clearBookkeeping()"),
-		"/plan command calls clearBookkeeping()",
+		"/workflow:plan command calls clearBookkeeping()",
 	);
 	const workCmdStart = commandsTs.indexOf(
-		"export function registerWorkCommand",
+		"export function registerWorkflowWorkCommand",
 	);
 	const workCmdEnd = commandsTs.indexOf(
-		"export function registerReviewCommand",
+		"export function registerWorkflowReviewCommand",
 		workCmdStart,
 	);
 	assert(
 		workCmdStart >= 0 &&
 			workCmdEnd > workCmdStart &&
 			commandsTs.slice(workCmdStart, workCmdEnd).includes("clearBookkeeping()"),
-		"/work command calls clearBookkeeping()",
+		"/workflow:work command calls clearBookkeeping()",
 	);
 
 	// normalizeState drops unknown keys
@@ -736,8 +736,8 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"tools.ts no longer gates plan review definition registration on factory-time config",
 	);
 	assert(
-		commandsTs.includes("registerReviewCommand(pi, getAgentDir);"),
-		"commands.ts registers /review unconditionally; the handler rechecks config",
+		commandsTs.includes("registerWorkflowReviewCommand(pi, getAgentDir);"),
+		"commands.ts registers /workflow:review unconditionally; the handler rechecks config",
 	);
 	// Conditional activation in mode.ts — mode-aware delete-then-add
 	assert(
@@ -847,36 +847,36 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"ocr-helpers.ts: ReviewScopeKind and range/commit/preview flags removed (workspace-only)",
 	);
 
-	// /review owns the unified workflow_review review/fix loop
+	// /workflow:review owns the unified workflow_review review/fix loop
 	const reviewCmdStart = commandsTs.indexOf(
-		"export function registerReviewCommand",
+		"export function registerWorkflowReviewCommand",
 	);
 	const reviewCmdEnd = commandsTs.indexOf(
-		"export function registerWfCommitCommand",
+		"export function registerWorkflowCommitCommand",
 		reviewCmdStart,
 	);
 	assert(
 		reviewCmdStart >= 0 && reviewCmdEnd > reviewCmdStart,
-		"/review and wf-commit command anchors exist",
+		"/workflow:review and workflow:commit command anchors exist",
 	);
 	const reviewCmdBlock = commandsTs.slice(reviewCmdStart, reviewCmdEnd);
 	assert(
 		reviewCmdBlock.includes("workflow_review") &&
 			reviewCmdBlock.includes("review → fix → re-review") &&
 			reviewCmdBlock.includes("transitionWorkflowMode"),
-		"/review command includes unified workflow_review review/fix loop",
+		"/workflow:review command includes unified workflow_review review/fix loop",
 	);
 	assert(
 		reviewCmdBlock.includes("config.review.enabled"),
-		"/review handler is gated on review.enabled",
+		"/workflow:review handler is gated on review.enabled",
 	);
 	assert(
 		!reviewCmdBlock.includes("async function runCodeReviewSubagent"),
-		"/review: no old runCodeReviewSubagent",
+		"/workflow:review: no old runCodeReviewSubagent",
 	);
 	assert(
 		!/scopeSelectorComponent|scopeInputComponent|ReviewScope/.test(commandsTs),
-		"/review: no scope TUI / RPC wizard references",
+		"/workflow:review: no scope TUI / RPC wizard references",
 	);
 
 	// No stale config field references in commands
@@ -938,7 +938,7 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"config.ts: strips askUserQuestion",
 	);
 
-	// Work prompt updated — git writes are reserved for /wf-commit; code review is routed through /review
+	// Work prompt updated — git writes are reserved for /workflow:commit; code review is routed through /workflow:review
 	const workPromptStart = promptsTs.indexOf("export const WORK_PROMPT");
 	const workPromptEnd = promptsTs.indexOf(
 		"export const COMMIT_PROMPT",
@@ -954,25 +954,25 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"prompts.ts: work prompt forbids git repository writes",
 	);
 	assert(
-		/\/review/.test(workPromptBlock) &&
+		/\/workflow:review/.test(workPromptBlock) &&
 			/始终直接可用/.test(workPromptBlock),
-		"prompts.ts: work prompt points to /review and states /wf-commit is always available",
+		"prompts.ts: work prompt points to /workflow:review and states /workflow:commit is always available",
 	);
-	// The review → fix → re-review loop detail lives in the /review kickoff prompt,
+	// The review → fix → re-review loop detail lives in the /workflow:review kickoff prompt,
 	// not in WORK_PROMPT (no duplication). Assert it on the command block instead.
 	assert(
 		/对确认存在的问题进行修复/.test(reviewCmdBlock) &&
 			/review → fix → re-review/.test(reviewCmdBlock),
-		"/review kickoff prompt describes review → fix → re-review with workflow_review()",
+		"/workflow:review kickoff prompt describes review → fix → re-review with workflow_review()",
 	);
-	// /review kickoff routes disputed findings through the feedback channel.
+	// /workflow:review kickoff routes disputed findings through the feedback channel.
 	assert(
 		/workflow_review\(\{\s*feedback/.test(reviewCmdBlock),
-		"/review kickoff instructs workflow_review({ feedback }) for disputed findings",
+		"/workflow:review kickoff instructs workflow_review({ feedback }) for disputed findings",
 	);
 	assert(
 		/逐条|对应/.test(reviewCmdBlock) && /file:line|命令输出|命令证据/.test(reviewCmdBlock),
-		"/review kickoff requires feedback to map to disputed findings with verifiable evidence",
+		"/workflow:review kickoff requires feedback to map to disputed findings with verifiable evidence",
 	);
 	// WORK_PROMPT teaches the optional feedback channel.
 	assert(
@@ -1000,7 +1000,7 @@ console.log("\n=== Check 7: Code review tooling ===");
 	);
 	assert(
 		commandsTs.includes("workflow_review"),
-		"commands.ts: /review kickoff prompt invokes workflow_review (loop lives there, not in WORK_PROMPT)",
+		"commands.ts: /workflow:review kickoff prompt invokes workflow_review (loop lives there, not in WORK_PROMPT)",
 	);
 	assertNotContains(
 		promptsTs,
@@ -1260,14 +1260,14 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"tools.ts: has checkWorkflowEnabled guard function",
 	);
 	assert(
-		toolsTs.includes("Run /wf first to enable workflow tools"),
+		toolsTs.includes("Run /workflow:enable first to enable workflow tools"),
 		"tools.ts: checkWorkflowEnabled error message present",
 	);
 
 	// Register functions exist
 	assert(
-		/export\s+function\s+registerWfCommand\s*\(/.test(commandsTs),
-		"commands.ts: exports registerWfCommand",
+		/export\s+function\s+registerWorkflowEnableCommand\s*\(/.test(commandsTs),
+		"commands.ts: exports registerWorkflowEnableCommand",
 	);
 	assert(
 		/export\s+function\s+registerAllWorkflowCommands\s*\(/.test(commandsTs),
@@ -1282,32 +1282,32 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"mode.ts: exports deactivateWorkflowTools",
 	);
 
-	// /wf-exit disables workflowEnabled
+	// /workflow:disable disables workflowEnabled
 	const wfExitStart = commandsTs.indexOf(
-		"export function registerWfExitCommand",
+		"export function registerWorkflowDisableCommand",
 	);
 	const wfExitEnd = commandsTs.indexOf(
-		"export function registerWfResetCommand",
+		"export function registerWorkflowResetCommand",
 		wfExitStart,
 	);
 	const wfExitBlock = commandsTs.slice(wfExitStart, wfExitEnd);
 	assert(
 		wfExitBlock.includes("workflowEnabled = false"),
-		"/wf-exit: sets workflowEnabled to false",
+		"/workflow:disable: sets workflowEnabled to false",
 	);
 
-	// /wf-reset preserves workflowEnabled
+	// /workflow:reset preserves workflowEnabled
 	const wfResetStart = commandsTs.indexOf(
-		"export function registerWfResetCommand",
+		"export function registerWorkflowResetCommand",
 	);
 	const wfResetEnd = commandsTs.indexOf(
-		"export function registerWfInitCommand",
+		"export function registerWorkflowInitCommand",
 		wfResetStart,
 	);
 	const wfResetBlock = commandsTs.slice(wfResetStart, wfResetEnd);
 	assert(
 		wfResetBlock.includes("current.workflowEnabled"),
-		"/wf-reset: preserves current workflowEnabled state",
+		"/workflow:reset: preserves current workflowEnabled state",
 	);
 
 	// Tool-call guard blocks workflow tools when disabled
@@ -1319,8 +1319,8 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"tool-call guard: checks !workflowActive for workflow tools",
 	);
 	assert(
-		tcgBlock.includes("Run /wf first"),
-		"tool-call guard: error message mentions /wf",
+		tcgBlock.includes("Run /workflow:enable first"),
+		"tool-call guard: error message mentions /workflow:enable",
 	);
 
 	// before_agent_start gates on workflowActive (scoped to the function)
@@ -1347,9 +1347,9 @@ console.log("\n=== Check 7: Code review tooling ===");
 		"utf8",
 	);
 	assert(
-		indexTsGating.includes("registerWfCommand") &&
+		indexTsGating.includes("registerWorkflowEnableCommand") &&
 			indexTsGating.includes("autoEnter"),
-		"index.ts: /wf always registered, autoEnter gating present",
+		"index.ts: /workflow:enable always registered, autoEnter gating present",
 	);
 	assert(
 		indexTsGating.includes("ensureWorkflowRegistered"),
@@ -1537,27 +1537,27 @@ console.log("\n=== Check 14: Explore mode ===");
 		"commands.ts: before_agent_start promotes idle→explore",
 	);
 
-	// commands.ts: /explore command registered
+	// commands.ts: /workflow:explore command registered
 	assert(
-		/registerExploreCommand/.test(commandsTs14),
-		"commands.ts: exports registerExploreCommand",
+		/registerWorkflowExploreCommand/.test(commandsTs14),
+		"commands.ts: exports registerWorkflowExploreCommand",
 	);
 	assert(
 		commandsTs14.includes("Non-destructive") ||
 			commandsTs14.includes("...current, mode"),
-		"commands.ts: /explore is non-destructive",
+		"commands.ts: /workflow:explore is non-destructive",
 	);
 
-	// commands.ts: /wf sets mode explore
-	const wfCmdStart = commandsTs14.indexOf("export function registerWfCommand");
+	// commands.ts: /workflow:enable sets mode explore
+	const wfCmdStart = commandsTs14.indexOf("export function registerWorkflowEnableCommand");
 	const wfResetCmdStart = commandsTs14.indexOf(
-		"export function registerWfResetCommand",
+		"export function registerWorkflowResetCommand",
 		wfCmdStart,
 	);
 	const wfCmdBlock = commandsTs14.slice(wfCmdStart, wfResetCmdStart);
 	assert(
 		wfCmdBlock.includes('state.mode = "explore"'),
-		"commands.ts: /wf sets mode to explore",
+		"commands.ts: /workflow:enable sets mode to explore",
 	);
 
 	// commands.ts: workflow tools are blocked outside plan/work.
@@ -1737,7 +1737,7 @@ function validateWorktreeIntegrationStatic() {
 	assert(
 		commands.includes("Branch was not deleted") &&
 			commands.includes("worktree 已删除，但 branch 删除失败"),
-		"/wf-reset validates removal and preserves branch safety",
+		"/workflow:reset validates removal and preserves branch safety",
 	);
 	assert(
 		tools.includes("Git worktree") &&
@@ -1804,8 +1804,8 @@ function validateInitModeStatic() {
 
 	assert(commandsTs2.includes("effectiveMode === \"init\"") && commandsTs2.includes("isAllowedInitTargetPath"), "commands.ts: tool_call guard has init branch before readonly");
 	assert(/function isProjectEmpty[\s\S]*?ignore[\s\S]*?\.git[\s\S]*?\.pi/.test(commandsTs2), "commands.ts: isProjectEmpty ignores .git/.pi/AGENTS.md");
-	assert(commandsTs2.includes("registerWfInitCommand(\n\tpi: ExtensionAPI,\n\tgetAgentDir") || commandsTs2.includes("registerWfInitCommand(\n\tpi,\n\tgetAgentDir") || /registerWfInitCommand\([\s\S]*?getAgentDir/.test(commandsTs2), "commands.ts: registerWfInitCommand takes getAgentDir");
-	assert(commandsTs2.includes("state.mode === \"init\" && state.initTargetPath"), "commands.ts: wf-init resumes existing init without overwriting return mode");
+	assert(commandsTs2.includes("registerWorkflowInitCommand(\n\tpi: ExtensionAPI,\n\tgetAgentDir") || commandsTs2.includes("registerWorkflowInitCommand(\n\tpi,\n\tgetAgentDir") || /registerWorkflowInitCommand\([\s\S]*?getAgentDir/.test(commandsTs2), "commands.ts: registerWorkflowInitCommand takes getAgentDir");
+	assert(commandsTs2.includes("state.mode === \"init\" && state.initTargetPath"), "commands.ts: workflow:init resumes existing init without overwriting return mode");
 
 	assert(toolsTs2.includes("registerInitCompleteTool"), "tools.ts: registers registerInitCompleteTool");
 	assert(/name: "workflow_init_complete"[\s\S]*?status: InitCompleteStatusSchema/.test(toolsTs2), "tools.ts: workflow_init_complete has status param");
@@ -1825,8 +1825,8 @@ function validateInitModeStatic() {
 }
 validateInitModeStatic();
 
-// ═══ Check 16b: Merge Mode + /wf-merge + /wf-commit structure ═══
-console.log("\n=== Check 16b: merge mode / wf-merge / wf-commit ===");
+// ═══ Check 16b: Merge Mode + /workflow:merge + /workflow:commit structure ═══
+console.log("\n=== Check 16b: merge mode / workflow:merge / workflow:commit ===");
 {
 	const modeTsM = fs.readFileSync(path.join(CWD, "extensions/workflow/mode.ts"), "utf8");
 	const commandsTsM = fs.readFileSync(path.join(CWD, "extensions/workflow/commands.ts"), "utf8");
@@ -1838,55 +1838,55 @@ console.log("\n=== Check 16b: merge mode / wf-merge / wf-commit ===");
 	const worktreeTsM = fs.readFileSync(path.join(CWD, "extensions/workflow/worktree.ts"), "utf8");
 	const gitIntTs = fs.readFileSync(path.join(CWD, "extensions/workflow/git-integration.ts"), "utf8");
 
-	// /wf-commit rename: new command registered, old /commit gone.
+	// /workflow:commit rename: new command registered, old /commit gone.
 	assert(
-		commandsTsM.includes('registerCommand("wf-commit"') &&
+		commandsTsM.includes('registerCommand("workflow:commit"') &&
 			!commandsTsM.includes('registerCommand("commit"'),
-		"commands.ts: registers wf-commit and the old /commit registration is gone",
+		"commands.ts: registers workflow:commit and the old /commit registration is gone",
 	);
 	assert(
-		/export\s+function\s+registerWfCommitCommand\s*\(/.test(commandsTsM) &&
+		/export\s+function\s+registerWorkflowCommitCommand\s*\(/.test(commandsTsM) &&
 			!/export\s+function\s+registerCommitCommand\s*\(/.test(commandsTsM),
-		"commands.ts: registerCommitCommand renamed to registerWfCommitCommand",
+		"commands.ts: registerCommitCommand renamed to registerWorkflowCommitCommand",
 	);
 	assert(
-		commandsTsM.includes("registerWfMergeCommand(pi, getAgentDir);") &&
-			commandsTsM.includes("registerWfCommitCommand(pi, getAgentDir);"),
-		"commands.ts: registerAllWorkflowCommands registers wf-merge + wf-commit",
+		commandsTsM.includes("registerWorkflowMergeCommand(pi, getAgentDir);") &&
+			commandsTsM.includes("registerWorkflowCommitCommand(pi, getAgentDir);"),
+		"commands.ts: registerAllWorkflowCommands registers workflow:merge + workflow:commit",
 	);
 	assert(
-		!/registerWfMergeCommand[\s\S]{0,200}registerWfSettingsCommand|registerWfCommand\(pi, getAgentDir\);[\s\S]{0,50}registerWfMergeCommand/.test(commandsTsM),
-		"commands.ts: /wf-merge is conditionally registered (always-on commands stay /wf + /wf-settings)",
+		!/registerWorkflowMergeCommand[\s\S]{0,200}registerWorkflowSettingsCommand|registerWorkflowEnableCommand\(pi, getAgentDir\);[\s\S]{0,50}registerWorkflowMergeCommand/.test(commandsTsM),
+		"commands.ts: /workflow:merge is conditionally registered (always-on commands stay /workflow:enable + /workflow:settings)",
 	);
 
-	// /wf-merge handler structure: init denial, active-merge protection,
+	// /workflow:merge handler structure: init denial, active-merge protection,
 	// preflight before transition, mergeContext persisted with returnMode.
-	const wfMergeStart = commandsTsM.indexOf("export function registerWfMergeCommand");
-	const wfMergeEnd = commandsTsM.indexOf("export function registerWfStatusCommand", wfMergeStart);
-	assert(wfMergeStart >= 0 && wfMergeEnd > wfMergeStart, "commands.ts: registerWfMergeCommand block anchors exist");
+	const wfMergeStart = commandsTsM.indexOf("export function registerWorkflowMergeCommand");
+	const wfMergeEnd = commandsTsM.indexOf("export function registerWorkflowStatusCommand", wfMergeStart);
+	assert(wfMergeStart >= 0 && wfMergeEnd > wfMergeStart, "commands.ts: registerWorkflowMergeCommand block anchors exist");
 	const wfMergeBlock = commandsTsM.slice(wfMergeStart, wfMergeEnd);
-	assert(wfMergeBlock.includes('registerCommand("wf-merge"'), "commands.ts: /wf-merge command name");
-	assert(wfMergeBlock.includes("current.mode === \"init\""), "commands.ts: /wf-merge rejects Init Mode");
+	assert(wfMergeBlock.includes('registerCommand("workflow:merge"'), "commands.ts: /workflow:merge command name");
+	assert(wfMergeBlock.includes("current.mode === \"init\""), "commands.ts: /workflow:merge rejects Init Mode");
 	assert(
 		wfMergeBlock.includes("current.mode === \"merge\" && current.mergeContext") &&
 			wfMergeBlock.includes("parseMergeCommandArgs") &&
 			wfMergeBlock.includes("runMergePreflight") &&
 			wfMergeBlock.includes("mergeContext: {") &&
 			wfMergeBlock.includes("defaultStrategy: !parsed.value.instructions"),
-		"commands.ts: /wf-merge parses args, runs preflight, and persists mergeContext atomically with mode=merge",
+		"commands.ts: /workflow:merge parses args, runs preflight, and persists mergeContext atomically with mode=merge",
 	);
 	assert(
 		commandsTsM.includes("function activeMergeDenial") &&
-			/activeMergeDenial\(/.test(commandsTsM.slice(commandsTsM.indexOf("registerWfExitCommand"))) === true,
-		"commands.ts: activeMergeDenial guards mode-switching entries (wf-exit etc.)",
+			/activeMergeDenial\(/.test(commandsTsM.slice(commandsTsM.indexOf("registerWorkflowDisableCommand"))) === true,
+		"commands.ts: activeMergeDenial guards mode-switching entries (workflow:disable etc.)",
 	);
-	// /wf-reset aborts an active merge before clearing state.
-	const resetStart = commandsTsM.indexOf("export function registerWfResetCommand");
-	const resetEnd = commandsTsM.indexOf("export function registerWfInitCommand", resetStart);
+	// /workflow:reset aborts an active merge before clearing state.
+	const resetStart = commandsTsM.indexOf("export function registerWorkflowResetCommand");
+	const resetEnd = commandsTsM.indexOf("export function registerWorkflowInitCommand", resetStart);
 	const resetBlock = commandsTsM.slice(resetStart, resetEnd > 0 ? resetEnd : commandsTsM.length);
 	assert(
 		resetBlock.includes("cancelActiveMergeGit") && resetBlock.includes("已停止 reset"),
-		"commands.ts: /wf-reset aborts the active merge and stops on failed recovery",
+		"commands.ts: /workflow:reset aborts the active merge and stops on failed recovery",
 	);
 
 	// mode.ts: merge tool surface + work role.

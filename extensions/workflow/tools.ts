@@ -92,7 +92,7 @@ function cleanupCreatedWorktree(cwd: string, worktreePath: string, branch: strin
 	try {
 		removeWorktree(cwd, { worktreePath, worktreeBranch: branch });
 	} catch {
-		// best effort cleanup after failed approval; /wf-status or git worktree list can recover residue.
+		// best effort cleanup after failed approval; /workflow:status or git worktree list can recover residue.
 	}
 	try {
 		deleteWorktreeBranch(cwd, branch);
@@ -125,7 +125,7 @@ export function resolveEffectiveCwd(cwd: string, state: WorkflowState): string {
 			: validateWorktreeState(cwd, state);
 	if (!validation.ok) {
 		throw new Error(
-			`Active worktree is invalid: ${validation.reason}. Run /wf-status or /wf-reset.`,
+			`Active worktree is invalid: ${validation.reason}. Run /workflow:status or /workflow:reset.`,
 		);
 	}
 	return state.worktreePath;
@@ -184,7 +184,7 @@ function checkWorkflowEnabled(
 				content: [
 					{
 						type: "text",
-						text: "Workflow is not enabled. Run /wf first to enable workflow tools.",
+						text: "Workflow is not enabled. Run /workflow:enable first to enable workflow tools.",
 					},
 				],
 				details: {},
@@ -445,7 +445,7 @@ export function registerPlanReadTool(
 					content: [
 						{
 							type: "text",
-							text: `Active plan is missing or empty: ${state.planPath}. Re-enter /plan and save a plan first.`,
+							text: `Active plan is missing or empty: ${state.planPath}. Re-enter /workflow:plan and save a plan first.`,
 						},
 					],
 					details: { state, planMissing: true, planPath: state.planPath },
@@ -589,7 +589,7 @@ export function registerPlanApproveTool(
 
 			// Approval requires a valid Final Plan. A missing or blank plan file
 			// must not produce a journal/handoff — surface an explicit error so the
-			// user re-enters /plan instead of starting an empty Work run.
+			// user re-enters /workflow:plan instead of starting an empty Work run.
 			const planMarkdown = requirePlanMarkdown(ctx.cwd, state.planPath);
 
 			// Approval requires a non-empty todo list. The Plan prompt mandates
@@ -693,7 +693,7 @@ export function registerPlanApproveTool(
 					});
 					rollbackSucceeded = true;
 				} catch {
-					// Preserve the original approval failure; /wf-reset can recover a rollback failure.
+					// Preserve the original approval failure; /workflow:reset can recover a rollback failure.
 				}
 				if (rollbackSucceeded && worktreePath && worktreeBranch) cleanupCreatedWorktree(ctx.cwd, worktreePath, worktreeBranch);
 			};
@@ -1281,7 +1281,7 @@ export function registerReviewTool(
 		name: "workflow_review",
 		label: "Workflow Review",
 		description:
-			"Launch an independent reviewer that reviews the Work agent's implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work), using its own exploration of the actual repository. Work Mode only, on-demand (triggered by /review). The reviewer task is assembled from workflow state. Optional `feedback` (free text) lets the Work agent respond to a prior round's disputed Critical/Important findings; it is injected as a clearly-labeled UNTRUSTED section that the reviewer must independently verify against the repository before it carries any weight — requirements/plan/todos remain the authoritative inputs. When codeReview.enabled is true, a workspace OCR review runs first and its normalized findings are folded into the reviewer task; when false the reviewer covers the implementation directly. Returns structured findings + a PASS/FAIL verdict that signals whether this review loop can end (never gates /wf-commit and is not persisted).",
+			"Launch an independent reviewer that reviews the Work agent's implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work), using its own exploration of the actual repository. Work Mode only, on-demand (triggered by /workflow:review). The reviewer task is assembled from workflow state. Optional `feedback` (free text) lets the Work agent respond to a prior round's disputed Critical/Important findings; it is injected as a clearly-labeled UNTRUSTED section that the reviewer must independently verify against the repository before it carries any weight — requirements/plan/todos remain the authoritative inputs. When codeReview.enabled is true, a workspace OCR review runs first and its normalized findings are folded into the reviewer task; when false the reviewer covers the implementation directly. Returns structured findings + a PASS/FAIL verdict that signals whether this review loop can end (never gates /workflow:commit and is not persisted).",
 		parameters: Type.Object({
 			feedback: Type.Optional(
 				Type.String({
@@ -1303,7 +1303,7 @@ export function registerReviewTool(
 			}
 			if (!state.workRunId) {
 				throw new Error(
-					"No active Work run. Enter Work Mode via /work or plan approval first.",
+					"No active Work run. Enter Work Mode via /workflow:work or plan approval first.",
 				);
 			}
 
@@ -1524,7 +1524,7 @@ export function registerReviewTool(
 
 			// The verdict is transient: it only signals whether this on-demand
 			// review loop can end. It is never written to WorkflowState and never
-			// gates /wf-commit. A PASS requires verdict === PASS AND the reviewer
+			// gates /workflow:commit. A PASS requires verdict === PASS AND the reviewer
 			// actually inspected the repository (zero repo tool calls → fail-closed
 			// FAIL surfaced for the Work agent to act on).
 			const passed =
@@ -1553,11 +1553,11 @@ export function registerReviewTool(
 
 			let verdictNotice: string;
 			if (passed) {
-				verdictNotice = "\n\n✅ Review PASS. This on-demand review loop can end; the verdict is transient and never gates /wf-commit.";
+				verdictNotice = "\n\n✅ Review PASS. This on-demand review loop can end; the verdict is transient and never gates /workflow:commit.";
 			} else if (result.verdict === "PASS" && !result.madeRepoToolCall) {
 				verdictNotice = "\n\n❌ Verdict was PASS but the reviewer made no repository tool calls — treated as FAIL (no independent verification). Re-run after the reviewer inspects the repository.";
 			} else {
-				verdictNotice = "\n\n❌ Review did NOT pass. Address the Critical/Important findings, then re-run workflow_review(). /wf-commit is always available regardless of the verdict.";
+				verdictNotice = "\n\n❌ Review did NOT pass. Address the Critical/Important findings, then re-run workflow_review(). /workflow:commit is always available regardless of the verdict.";
 			}
 
 			return {
@@ -1776,7 +1776,7 @@ export function registerMergeCompleteTool(
 					content: [
 						{
 							type: "text",
-							text: "merge 记录的来源 worktree 已不在状态中（worktreePath 缺失）。请用 /wf-reset 硬恢复后再试。",
+							text: "merge 记录的来源 worktree 已不在状态中（worktreePath 缺失）。请用 /workflow:reset 硬恢复后再试。",
 						},
 					],
 					details: { failClosed: true },
@@ -1833,7 +1833,7 @@ export function registerMergeCompleteTool(
 							content: [
 								{
 									type: "text",
-									text: `状态不一致：worktreeBranch(${state.worktreeBranch ?? "none"}) 与 merge 记录的来源分支(${mc.sourceBranch})不一致，拒绝取消。请用 /wf-reset 硬恢复。`,
+									text: `状态不一致：worktreeBranch(${state.worktreeBranch ?? "none"}) 与 merge 记录的来源分支(${mc.sourceBranch})不一致，拒绝取消。请用 /workflow:reset 硬恢复。`,
 								},
 							],
 							details: { failClosed: true },

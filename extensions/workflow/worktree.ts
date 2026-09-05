@@ -172,7 +172,7 @@ export function createWorktree(
 		execGit(repoRoot, ["worktree", "add", "-b", branch, worktreePath, baseBranch], deps);
 	} catch (err) {
 		// Avoid removing a concurrently-created worktree at the same deterministic path.
-		// Leave partial residue for explicit recovery via /wf-reset or git worktree prune.
+		// Leave partial residue for explicit recovery via /workflow:reset or git worktree prune.
 		throw err;
 	}
 

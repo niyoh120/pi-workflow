@@ -26,31 +26,31 @@ pi install .
 ## Architecture
 
 ```
-idle → explore → plan → work → [/review loop] → wf-commit → idle
-                                                 ↘ /wf-merge (Merge Mode: rebase + ff) → returns to the prior mode
+idle → explore → plan → work → [/workflow:review loop] → workflow:commit → idle
+                                                 ↘ /workflow:merge (Merge Mode: rebase + ff) → returns to the prior mode
 ```
 
 - **Tool ownership**: pi-workflow manages only its own `workflow_*` tools. Built-in tools and other extension tools preserve their active/inactive state across mode changes; mode permissions apply to every active tool through prompts and stable path guards. There is no special auto-activation of `ask_user_question`.
-- **Mode runtime**: workflow applies the configured model role only on explicit mode transitions (slash commands, `/wf` first entry, `idle→explore` promotion) and `/wf-settings` saves. Session restore (`/reload`, `/resume`) and per-turn startup preserve Pi's active session model/thinking (chosen via `/model`, Ctrl+P, or Shift+Tab), so manual selections survive within the current workflow mode; only workflow tools and the status line are reconciled. `before_agent_start` appends the stable `COMMON_PROMPT` to the system prompt and only falls back to the role config when no active model is present.
+- **Mode runtime**: workflow applies the configured model role only on explicit mode transitions (slash commands, `/workflow:enable` first entry, `idle→explore` promotion) and `/workflow:settings` saves. Session restore (`/reload`, `/resume`) and per-turn startup preserve Pi's active session model/thinking (chosen via `/model`, Ctrl+P, or Shift+Tab), so manual selections survive within the current workflow mode; only workflow tools and the status line are reconciled. `before_agent_start` appends the stable `COMMON_PROMPT` to the system prompt and only falls back to the role config when no active model is present.
 - **Mode context**: the current mode prompt and worktree notice are injected into the stable system prompt (via `before_agent_start`), and the Approved-Plan Work handoff is isolated via a canonical marker so Plan→Work transitions within the same agent run always see the latest mode. Dynamic state (todos, run IDs) comes from tool results, not the system prompt.
-- **Explore Mode**: Default landing after `/wf`. Read-only codebase exploration and Q&A (same permissions as Plan Mode). Explore exposes no workflow tools; a preserved plan is read in Plan Mode. Use `/plan` when ready to design.
+- **Explore Mode**: Default landing after `/workflow:enable`. Read-only codebase exploration and Q&A (same permissions as Plan Mode). Explore exposes no workflow tools; a preserved plan is read in Plan Mode. Use `/workflow:plan` when ready to design.
 - **Plan Review** (optional): Model-initiated `workflow_plan_review` tool call — the plan agent may invoke it after saving a plan. Spawns a fresh, isolated in-memory AgentSession that inherits the parent Plan session's information-tool surface (minus workflow tools), independently explores the repository and active external tools, and returns structured Critical/Important/Minor/Summary findings grounded in repository evidence plus a transient PASS/FAIL evaluation signal submitted through the reviewer's own terminating `review_submit` tool call — the report and the submit call share the same final assistant message, and a missing submission resolves fail-closed to FAIL (never gates approval). Not a separate mode; runs within Plan Mode under a single 30-minute total timeout. Repeated calls reuse cached rounds for identical inputs and run incremental re-reviews focused on changed plan sections / new confirmed decisions; the planner may answer disputed findings via an optional UNTRUSTED `feedback` argument.
-- **Unified Review** (on-demand, configurable): `/review` (or a direct `workflow_review` call) in Work Mode launches a fresh, isolated in-memory AgentSession that independently reviews the implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work) by exploring the actual checkout/worktree itself — it does NOT receive the Work agent's execution summary, diffs, or test claims. The single explicit exception is an optional `feedback` argument the Work agent may pass to respond to a prior round's disputed findings — it is injected as a clearly-labeled UNTRUSTED section that the reviewer must independently verify against the repository before it carries any weight. When `codeReview.enabled` is true, a workspace `ocr review` runs first and its normalized findings are injected into the reviewer task (each finding must be dispositioned with repository evidence). It emits a coverage matrix, correctness/verification findings, OCR dispositions, and submits the final verdict through its own terminating `review_submit` tool call (report and submit share the same final assistant message; a missing submission resolves fail-closed to FAIL). The verdict is **transient**: it only signals whether this on-demand review loop can end — it is never written to workflow state and never gates `/wf-commit`. Disable via `review.enabled: false` to hide `/review` and the tool; set `codeReview.enabled: false` to review without OCR.
+- **Unified Review** (on-demand, configurable): `/workflow:review` (or a direct `workflow_review` call) in Work Mode launches a fresh, isolated in-memory AgentSession that independently reviews the implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work) by exploring the actual checkout/worktree itself — it does NOT receive the Work agent's execution summary, diffs, or test claims. The single explicit exception is an optional `feedback` argument the Work agent may pass to respond to a prior round's disputed findings — it is injected as a clearly-labeled UNTRUSTED section that the reviewer must independently verify against the repository before it carries any weight. When `codeReview.enabled` is true, a workspace `ocr review` runs first and its normalized findings are injected into the reviewer task (each finding must be dispositioned with repository evidence). It emits a coverage matrix, correctness/verification findings, OCR dispositions, and submits the final verdict through its own terminating `review_submit` tool call (report and submit share the same final assistant message; a missing submission resolves fail-closed to FAIL). The verdict is **transient**: it only signals whether this on-demand review loop can end — it is never written to workflow state and never gates `/workflow:commit`. Disable via `review.enabled: false` to hide `/workflow:review` and the tool; set `codeReview.enabled: false` to review without OCR.
 
 ## Modes
 
-Workflow tools and commands are **opt-in by default**: only `/wf` is visible until you enter workflow mode. Set `workflow.autoEnter: true` in config to enable them on startup.
+Workflow tools and commands are **opt-in by default**: only `/workflow:enable` is visible until you enter workflow mode. Set `workflow.autoEnter: true` in config to enable them on startup.
 
 | Mode | Command | Description |
 |------|---------|-------------|
-| Entry | `/wf` | Enter workflow mode — enables all workflow commands and tools |
+| Entry | `/workflow:enable` | Enter workflow mode — enables all workflow commands and tools |
 | Explore Mode | (default) | Read-only codebase exploration and Q&A — same permissions as Plan Mode |
-| Explore Mode | `/explore` | Return to Explore Mode from any mode (non-destructive — keeps plan/todos) |
-| Plan Mode | `/plan` | Brainstorm and produce an implementation plan |
-| Work Mode | `/work` | Implement the approved plan |
-| Review/Fix Loop | `/review` | On-demand unified review of the current workspace (incl. active worktree); folds in workspace OCR when enabled |
-| Merge Mode | `/wf-merge [--target <branch>] [指令]` | User-triggered branch integration: default rebase + fast-forward, or a custom strategy authorized by trailing instructions (see Merge Mode below) |
-| Commit Mode | `/wf-commit` | Generate and execute a conventional commit (always available, no review gate) |
+| Explore Mode | `/workflow:explore` | Return to Explore Mode from any mode (non-destructive — keeps plan/todos) |
+| Plan Mode | `/workflow:plan` | Brainstorm and produce an implementation plan |
+| Work Mode | `/workflow:work` | Implement the approved plan |
+| Review/Fix Loop | `/workflow:review` | On-demand unified review of the current workspace (incl. active worktree); folds in workspace OCR when enabled |
+| Merge Mode | `/workflow:merge [--target <branch>] [指令]` | User-triggered branch integration: default rebase + fast-forward, or a custom strategy authorized by trailing instructions (see Merge Mode below) |
+| Commit Mode | `/workflow:commit` | Generate and execute a conventional commit (always available, no review gate) |
 
 ## Configuration
 
@@ -59,13 +59,13 @@ Workflow tools and commands are **opt-in by default**: only `/wf` is visible unt
 `DEFAULT_CONFIG` ← `global config` ← `project config` ← `session overrides`
 
 The session layer is the highest priority. It is stored in the current session's
-runtime state (not a shared file) and edited via `/wf-settings` (Session scope).
+runtime state (not a shared file) and edited via `/workflow:settings` (Session scope).
 This lets one Pi process temporarily override models or flags without touching
 the shared project/global config files.
 
 ### Workflow entry gate
 
-By default, workflow commands and tools are hidden. Users must run `/wf` to enable them.
+By default, workflow commands and tools are hidden. Users must run `/workflow:enable` to enable them.
 
 ```json
 {
@@ -131,7 +131,7 @@ See `config.json.example` for the canonical config template.
 
 ### Unified Review (on-demand tool)
 
-Review is an **on-demand** feature — when `review.enabled` is `true` (default), `/review` and the `workflow_review` tool become available in Work Mode. `codeReview.enabled` controls whether the Review folds a workspace OCR pass into the reviewer task.
+Review is an **on-demand** feature — when `review.enabled` is `true` (default), `/workflow:review` and the `workflow_review` tool become available in Work Mode. `codeReview.enabled` controls whether the Review folds a workspace OCR pass into the reviewer task.
 
 The reviewer is a **fresh, independent AgentSession** (no subprocess, no RPC): `SessionManager.inMemory(...)` gives it isolated, non-persistent conversation state. It runs the configured `models.review` model and thinking level, and receives only authoritative inputs:
 
@@ -148,14 +148,14 @@ The Work agent's reasoning, thinking, tool results, execution summaries, diffs, 
 
 **Runtime budget.** A single 30-minute total timeout (`1_800_000ms`) bounds the reviewer run, combined with the parent turn's AbortSignal. OCR shares the same parent signal. The child session is always disposed in `finally`; timeout or user cancellation aborts the active AgentSession and returns an explicit tool error.
 
-**Result.** The tool takes a single optional `feedback` argument (free text responding to a prior round's disputed findings); the reviewer task is otherwise assembled from workflow state. The final text keeps the `Critical / Important / Minor / Summary` structure with concrete repository evidence, and the result carries aggregated nested usage on its top-level `usage` field plus operational metadata (reviewer model/thinking, elapsed time, turns, tool-call count, requested/active/unavailable tools, OCR enabled/counts/rawPath, verdict, stop reason/error). The verdict is **transient**: PASS means the review loop can end; it is never written to workflow state and never gates `/wf-commit`.
+**Result.** The tool takes a single optional `feedback` argument (free text responding to a prior round's disputed findings); the reviewer task is otherwise assembled from workflow state. The final text keeps the `Critical / Important / Minor / Summary` structure with concrete repository evidence, and the result carries aggregated nested usage on its top-level `usage` field plus operational metadata (reviewer model/thinking, elapsed time, turns, tool-call count, requested/active/unavailable tools, OCR enabled/counts/rawPath, verdict, stop reason/error). The verdict is **transient**: PASS means the review loop can end; it is never written to workflow state and never gates `/workflow:commit`.
 
 ### Unified review (on-demand tool)
 
-The unified Review is **on-demand** — when `review.enabled` is `true` (default), `/review` and the `workflow_review` tool become available in Work Mode. `codeReview.enabled` toggles whether the Review includes a workspace OCR pass.
+The unified Review is **on-demand** — when `review.enabled` is `true` (default), `/workflow:review` and the `workflow_review` tool become available in Work Mode. `codeReview.enabled` toggles whether the Review includes a workspace OCR pass.
 
 - **Workspace** (the only scope): reviews staged + unstaged + untracked changes; an active workflow worktree is reviewed against its working tree and branch.
-- The Review Agent passes OCR a fixed, bounded code-review `--background` (a constant constraint card under 2000 characters — no requirements/plan/todo text, no file paths); the authoritative requirements/plan/todos go only to the independent reviewer. The `/review` command enters Work runtime and prompts the model to call `workflow_review`, keeping the loop in the agent turn so confirmed Critical/Important findings are fixed and re-reviewed.
+- The Review Agent passes OCR a fixed, bounded code-review `--background` (a constant constraint card under 2000 characters — no requirements/plan/todo text, no file paths); the authoritative requirements/plan/todos go only to the independent reviewer. The `/workflow:review` command enters Work runtime and prompts the model to call `workflow_review`, keeping the loop in the agent turn so confirmed Critical/Important findings are fixed and re-reviewed.
 
 The `ocr` binary is assumed to be in PATH (hardcoded). No additional OCR configuration is exposed.
 
@@ -176,10 +176,10 @@ On load, pi-workflow strips stale config keys from old versions:
 - Unknown models keys are stripped; only `explore/plan/planReview/review/work/commit` are recognized
 - The old top-level `implementationReview` section and `models.implementationReview` are **not** migrated or cleaned: they remain as unread extra properties. Rename them to `review` / `models.review` manually to take effect.
 
-## Settings Menu (`/wf-settings`)
+## Settings Menu (`/workflow:settings`)
 
-`/wf-settings` opens a TUI to edit every config option without hand-editing JSON.
-It is always available, even before you run `/wf` (so you can set
+`/workflow:settings` opens a TUI to edit every config option without hand-editing JSON.
+It is always available, even before you run `/workflow:enable` (so you can set
 `workflow.autoEnter` up front).
 
 Flow:
@@ -214,7 +214,7 @@ layer, letting lower layers take over.
   editable in all three scopes. Note: inside a workflow mode, manual model
   or thinking switches made via `/model`, Ctrl+P, or Shift+Tab are preserved
   across turns, `/reload`, and `/resume` — workflow only re-applies the role
-  config on explicit mode transitions and `/wf-settings` saves. Use `/wf-status`
+  config on explicit mode transitions and `/workflow:settings` saves. Use `/workflow:status`
   to compare the active runtime model/thinking against the configured role.
 - **`workflow.autoEnter`, `planReview.enabled`, `review.enabled`** gate
   command/tool registration, which happens at extension load time using the
@@ -243,7 +243,7 @@ This allows multiple plans to coexist in the same project without conflicts.
 
 ### Plan Path Visibility
 
-Every plan save, read, and `/wf-status` explicitly shows the plan file path (e.g., `.pi/workflow/plan/plan-a3b9f2c1.md`) so you can easily find and inspect the document.
+Every plan save, read, and `/workflow:status` explicitly shows the plan file path (e.g., `.pi/workflow/plan/plan-a3b9f2c1.md`) so you can easily find and inspect the document.
 
 ### Plan Mode Confirmation Gate
 
@@ -259,19 +259,19 @@ This prevents wasting tokens when the user still wants to refine the design.
 
 | Command | Description |
 |---------|-------------|
-| `/wf` | Enter workflow mode — enables all other workflow commands and tools |
-| `/wf-settings` | Open the settings menu — edit all config options across session/project/global scopes (always available) |
-| `/explore` | Enter Explore Mode (non-destructive — preserves plan/todos) |
-| `/plan` | Enter Plan Mode |
+| `/workflow:enable` | Enter workflow mode — enables all other workflow commands and tools |
+| `/workflow:settings` | Open the settings menu — edit all config options across session/project/global scopes (always available) |
+| `/workflow:explore` | Enter Explore Mode (non-destructive — preserves plan/todos) |
+| `/workflow:plan` | Enter Plan Mode |
 | `/go [--force]` | Approve current plan and hand off to Work Mode |
-| `/work [task]` | Skip Plan Mode, go straight to implementation |
-| `/review` | On-demand unified review of the current workspace (incl. active worktree); folds in workspace OCR when `codeReview.enabled` is true |
-| `/wf-merge [--target <branch>] [指令]` | Enter Merge Mode: integrate the source branch (active workflow worktree branch, or the current ordinary local branch) into a target local branch |
-| `/wf-commit [notes]` | Generate commit message and commit |
-| `/wf-status` | Show current workflow state (mode, active runtime model/thinking vs configured role, plan path, run IDs) |
-| `/wf-exit` | Exit workflow mode |
-| `/wf-reset` | Clear workflow state and plan directory |
-| `/wf-init` | Initialize agent workspace: ensure git repo, enter scoped Init Mode that audits/generates AGENTS.md via evidence-based grilling, then restore prior mode |
+| `/workflow:work [task]` | Skip Plan Mode, go straight to implementation |
+| `/workflow:review` | On-demand unified review of the current workspace (incl. active worktree); folds in workspace OCR when `codeReview.enabled` is true |
+| `/workflow:merge [--target <branch>] [指令]` | Enter Merge Mode: integrate the source branch (active workflow worktree branch, or the current ordinary local branch) into a target local branch |
+| `/workflow:commit [notes]` | Generate commit message and commit |
+| `/workflow:status` | Show current workflow state (mode, active runtime model/thinking vs configured role, plan path, run IDs) |
+| `/workflow:disable` | Exit workflow mode |
+| `/workflow:reset` | Clear workflow state and plan directory |
+| `/workflow:init` | Initialize agent workspace: ensure git repo, enter scoped Init Mode that audits/generates AGENTS.md via evidence-based grilling, then restore prior mode |
 
 ## Plan Review (Independent Agent)
 
@@ -287,12 +287,12 @@ Plan review runs an **optional, model-initiated** independent reviewer — no su
 - **Machine verdict** — submitted through the child-session-only `review_submit` tool (schema-validated PASS/FAIL enum, terminating). The reviewer writes the complete Markdown report and calls `review_submit` exactly once in the same final assistant message; zero successful submissions resolve fail-closed to FAIL, and repeated submissions follow last-success-wins.
 - **Strict builtin repo evidence** — an effective PASS (and round cacheability) requires at least one builtin repository tool (read/bash/grep/find/ls) that COMPLETED successfully (`tool_execution_end` with `isError === false`). A submitted PASS without that evidence is downgraded to FAIL; a round with only MCP/Web file tools leaves an inspection-evidence gap the planner should treat as insufficient evidence and re-run.
 - **Transient verdict** — the verdict is the planner's evaluation signal for reaching consensus. It is never written to WorkflowState and never gates approval: after the user explicitly confirms, `workflow_plan_approve` is always callable.
-- **vs Implementation Review** — the two reviewers keep distinct evidence/round policies: Plan Review requires strict finalized builtin repo-tool evidence (`successfulToolNames`, `isError === false`) and its short-circuited calls append NO new history round; Implementation Review judges `madeRepoToolCall` from actually-started repo tool calls (`calledToolNames`) and persists short-circuited rounds. In both cases the mandatory `review_submit` call counts as no repository inspection evidence. `/wf-reset` clears both histories.
+- **vs Implementation Review** — the two reviewers keep distinct evidence/round policies: Plan Review requires strict finalized builtin repo-tool evidence (`successfulToolNames`, `isError === false`) and its short-circuited calls append NO new history round; Implementation Review judges `madeRepoToolCall` from actually-started repo tool calls (`calledToolNames`) and persists short-circuited rounds. In both cases the mandatory `review_submit` call counts as no repository inspection evidence. `/workflow:reset` clears both histories.
 - **Zero config** — just set `models.planReview` and `planReview.enabled: true` in your config.
 
 ## Unified Review (On-Demand)
 
-The unified Review runs an **on-demand, user-triggered** independent reviewer over the current workspace. Trigger it with `/review` (or a direct `workflow_review` call) in Work Mode.
+The unified Review runs an **on-demand, user-triggered** independent reviewer over the current workspace. Trigger it with `/workflow:review` (or a direct `workflow_review` call) in Work Mode.
 
 - **Independent** — a fresh in-memory AgentSession reviews the implementation through its own repository exploration (read, grep, find, ls, bash, git diff). It never sees the Work agent's execution summary, pre-selected diffs, test claims, or prior review output.
 - **Authoritative inputs only** — Approved Work: user requirements (plan lifecycle) + Final Plan + approved todo snapshot + current todos. Direct Work: Work-lifecycle user requirements + current todos.
@@ -300,28 +300,28 @@ The unified Review runs an **on-demand, user-triggered** independent reviewer ov
 - **Validates against actual code** — every todo marked done should have concrete file/line evidence; plan coverage gaps and unverifiable completion claims force FAIL.
 - **Read-only** — `.pi/workflow/` reads blocked in BOTH the main checkout and active worktree; project writes confined to the Plan scratch root; git/source mutation forbidden by prompt.
 - **Bounded** — one 30-minute total timeout; uses `models.review`.
-- **Configurable** — set `models.review` for the reviewer model/thinking, `review.enabled` (default `true`) to toggle `/review` + the tool, and `codeReview.enabled` to toggle the OCR pass.
+- **Configurable** — set `models.review` for the reviewer model/thinking, `review.enabled` (default `true`) to toggle `/workflow:review` + the tool, and `codeReview.enabled` to toggle the OCR pass.
 - **Machine verdict** — submitted through the child-session-only `review_submit` tool (schema-validated PASS/FAIL enum, terminating) as the final action of the same assistant message that carries the complete report; fail-closed on a missing submission. The mandatory submit call never counts as repository inspection evidence.
-- **Transient verdict** — PASS means the review loop can end. It is never written to workflow state and never gates `/wf-commit`.
+- **Transient verdict** — PASS means the review loop can end. It is never written to workflow state and never gates `/workflow:commit`.
 
 ### Flow to commit
 
-- Implement → optionally `/review` (with or without OCR) → fix → re-review → `/wf-commit` (always available, no review gate).
+- Implement → optionally `/workflow:review` (with or without OCR) → fix → re-review → `/workflow:commit` (always available, no review gate).
 
-## Merge Mode (`/wf-merge`)
+## Merge Mode (`/workflow:merge`)
 
-`/wf-merge` is the user-triggered Git integration entry. It works for both kinds of local source branches and enters a dedicated **Merge Mode** that reuses the `work` model role (no new model config):
+`/workflow:merge` is the user-triggered Git integration entry. It works for both kinds of local source branches and enters a dedicated **Merge Mode** that reuses the `work` model role (no new model config):
 
 ```text
-/wf-merge [--target <local-branch>] [用户自然语言指令]
+/workflow:merge [--target <local-branch>] [用户自然语言指令]
 ```
 
 - **Source resolution (fixed priority)** — with an active workflow worktree in session state, the source is always that worktree branch (bash/read/edit/write keep targeting the worktree); without one, the source is the current checkout of the main repository. Detached HEAD, `source == target`, dirty source/target checkouts (no auto-stash), and unfinished rebase/merge/cherry-pick/revert operations are rejected up front.
 - **Target resolution** — explicit `--target` (must be a local branch) wins; omitted, a workflow-worktree source uses its recorded base branch; an ordinary source infers locally-available `origin/HEAD` mapping → `master` → `main`; otherwise the command asks for `--target`.
 - **Default strategy (no trailing instructions)** — rebase the source branch onto the target, resolve conflicts (the model may edit any file in the source checkout — a rebase-in-progress worktree is accepted in a detached-HEAD window backed by a detectable rebase sequencer), run verification, then call `workflow_merge_complete(status="completed", finalize="ff-only")`. The tool deterministically fast-forwards the target: inside the worktree that has the target checked out via `git merge --ff-only`, otherwise via an ancestor-checked `git update-ref` with expected-old CAS that never touches the current source checkout. Default flow forbids push, force/reset, clean, branch/worktree deletion, and unrelated commits; everything (source branch, worktree, checkout) is retained and you stay on the source branch.
 - **Custom strategy (trailing instructions)** — the raw trailing instructions are the only authorization source for this run: only actions the instructions literally name (no-ff merge, squash, cherry-pick, push, force/reset, clean, branch/worktree deletion, …) may be executed. Once the target integration is done, `finalize="already-integrated"` runs strategy-independent repository health checks and reports the actual state; a user-deleted workflow worktree clears the corresponding state fields. Custom runs may also pick `finalize="ff-only"` to reuse the deterministic finalizer.
-- **Cancellation & recovery** — `workflow_merge_complete(status="cancelled")` aborts in-flight rebase/merge/cherry-pick/revert and reattaches a detached source checkout with a guarded `git checkout -f <sourceBranch>` (in-flight conflict resolution is discarded by design, matching `rebase --abort` semantics). Refs already moved by a custom strategy are reported, never rolled back implicitly. `/wf-reset` reuses the same recovery before clearing state and stops if recovery fails.
-- **Hard guarantees** — the persisted `mergeContext` baseline (source/target, pre-rebase heads, commit counts, authorization) is saved atomically before the kickoff and rebuilt into the provider context every round, so reload/compaction cannot lose it. A `defaultStrategy` run can never degrade into the looser custom completion checks. Work Mode keeps its full Git-write prohibition; regular commits happen only through `/wf-commit`; branch integration and its necessary commits happen only inside Merge Mode. Mode-switching commands (`/plan`, `/work`, `/review`, `/wf-commit`, `/wf-init`, `/wf-exit`, …) refuse to drop an active merge — close it via `workflow_merge_complete` or hard-recover via `/wf-reset`.
+- **Cancellation & recovery** — `workflow_merge_complete(status="cancelled")` aborts in-flight rebase/merge/cherry-pick/revert and reattaches a detached source checkout with a guarded `git checkout -f <sourceBranch>` (in-flight conflict resolution is discarded by design, matching `rebase --abort` semantics). Refs already moved by a custom strategy are reported, never rolled back implicitly. `/workflow:reset` reuses the same recovery before clearing state and stops if recovery fails.
+- **Hard guarantees** — the persisted `mergeContext` baseline (source/target, pre-rebase heads, commit counts, authorization) is saved atomically before the kickoff and rebuilt into the provider context every round, so reload/compaction cannot lose it. A `defaultStrategy` run can never degrade into the looser custom completion checks. Work Mode keeps its full Git-write prohibition; regular commits happen only through `/workflow:commit`; branch integration and its necessary commits happen only inside Merge Mode. Mode-switching commands (`/workflow:plan`, `/workflow:work`, `/workflow:review`, `/workflow:commit`, `/workflow:init`, `/workflow:disable`, …) refuse to drop an active merge — close it via `workflow_merge_complete` or hard-recover via `/workflow:reset`.
 
 ## OCR (workspace findings)
 
@@ -343,9 +343,9 @@ pi-workflow adapts to Pi's run modes so Paseo (and other Pi RPC clients) can dri
 
 | Command / surface | TUI | RPC (Paseo) | JSON / print |
 |---|---|---|---|
-| `/wf-settings` | `SettingsList` overlay + searchable model picker | basic-dialog wizard: scope → setting → value (select/input) | stderr guidance, no UI |
-| `/review` | on-demand review of current workspace | on-demand review of current workspace | stderr guidance, no UI |
-| `/wf-status` | `notify` | `notify` (handled-command, Paseo surfaces it) | stderr text |
+| `/workflow:settings` | `SettingsList` overlay + searchable model picker | basic-dialog wizard: scope → setting → value (select/input) | stderr guidance, no UI |
+| `/workflow:review` | on-demand review of current workspace | on-demand review of current workspace | stderr guidance, no UI |
+| `/workflow:status` | `notify` | `notify` (handled-command, Paseo surfaces it) | stderr text |
 | todo tool | `workflow_todo` + TUI overlay | `update_plan` alias (Paseo native TodoListCard) | provider-dependent |
 | `setStatus` / `setWidget` | footer + overlay widget | Pi emits events; Paseo currently ignores persistent status/widgets | n/a |
 
@@ -362,7 +362,7 @@ Verified against Paseo `0.5.2` (source: the `@getpaseo/server` npm package shipp
 
 ### Project Trust
 
-Config loading is trust-aware: `DEFAULT ← global ← trusted project ← session`. In an untrusted session the project layer is skipped for both effective config and source attribution, and `/wf-settings` refuses to read or write the Project scope. Use `--approve` (or `/trust` in interactive mode) to trust project-local config.
+Config loading is trust-aware: `DEFAULT ← global ← trusted project ← session`. In an untrusted session the project layer is skipped for both effective config and source attribution, and `/workflow:settings` refuses to read or write the Project scope. Use `--approve` (or `/trust` in interactive mode) to trust project-local config.
 
 ## Session-Scoped Runtime State
 
@@ -376,7 +376,7 @@ The session key is derived by hashing the Pi session ID or session file path —
 
 This means two Pi processes in the same project directory can run independent workflow state machines without overwriting each other. Plan files remain in the shared `.pi/workflow/plan/` directory with randomized names.
 
-Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) are directory/global scoped and shared intentionally. Session-scoped config overrides (set via `/wf-settings` Session scope) live inside the session `state.json` as a `sessionConfig` field and are never shared across sessions.
+Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) are directory/global scoped and shared intentionally. Session-scoped config overrides (set via `/workflow:settings` Session scope) live inside the session `state.json` as a `sessionConfig` field and are never shared across sessions.
 
 ## Tools
 
@@ -408,7 +408,7 @@ Launch the on-demand unified reviewer agent (available in Work Mode when `review
 - Returns a coverage matrix, Implementation Correctness / Verification findings, OCR dispositions (when OCR ran), Critical/Important/Minor, and a final PASS/FAIL verdict submitted via `review_submit`.
 - PASS requires both a PASS verdict AND at least one actually-started repository tool call (fail-closed otherwise; `review_submit` itself never counts).
 - **Round continuity** — each round (verdict, full output, OCR findings, diff fingerprint, task-input hash) is persisted per work run in session-scoped `review-history.json` (newest 3 kept): the next round injects the previous findings for re-disposition, reuses cached OCR findings on an unchanged diff, and short-circuits identically when the diff AND every task input — including the current reviewer protocol text — are unchanged. A protocol change therefore invalidates reuse of rounds produced under the older protocol exactly once.
-- The verdict is **transient** — it only signals whether this review loop can end. It is never written to workflow state and never gates `/wf-commit`. Operational metadata (reviewer model, elapsed, turns, tool calls, repo-tool-used, OCR enabled/counts/rawPath, verdict) is in `details`.
+- The verdict is **transient** — it only signals whether this review loop can end. It is never written to workflow state and never gates `/workflow:commit`. Operational metadata (reviewer model, elapsed, turns, tool calls, repo-tool-used, OCR enabled/counts/rawPath, verdict) is in `details`.
 
 | Path | Purpose |
 |------|---------|

@@ -75,7 +75,7 @@ function normalizeGrillTurns(raw: unknown): WorkflowState["grillTurns"] {
  * Normalize a raw MergeContext object. Returns undefined for any malformed
  * shape — a merge context without its full baseline is useless (the default
  * finalizer and the cancel path both need source/target heads and branches),
- * so normalization fails closed and forces re-entry via /wf-merge.
+ * so normalization fails closed and forces re-entry via /workflow:merge.
  * Kept annotation-simple so the regression script can extract and eval it.
  */
 function normalizeMergeContext(raw: unknown): WorkflowState["mergeContext"] {
@@ -450,7 +450,7 @@ export function requirePlanMarkdown(cwd: string, planPath: string): string {
 	const text = readPlanTrimmed(cwd, planPath);
 	if (!text) {
 		throw new Error(
-			`Active plan is missing or empty: ${planPath}. Re-enter /plan and save a plan first.`,
+			`Active plan is missing or empty: ${planPath}. Re-enter /workflow:plan and save a plan first.`,
 		);
 	}
 	return text;

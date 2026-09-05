@@ -122,7 +122,7 @@ export async function setRole(
 	getAgentDir: () => string,
 ): Promise<boolean> {
 	try {
-		// Resolve config with this session's override layer so /wf-settings
+		// Resolve config with this session's override layer so /workflow:settings
 		// Session-scope model/thinking changes take effect immediately. Project
 		// trust is honored via ctx.isProjectTrusted() when available.
 		const config = loadConfigForContext(
@@ -248,7 +248,7 @@ export function activateWorkflowToolsIfAllowed(
  *
  * Always switches the model and thinking to the role configured for `mode`,
  * then reconciles workflow tools. Use this for explicit mode transitions
- * (slash commands, /wf first entry, idle→explore promotion) and /wf-settings
+ * (slash commands, /workflow:enable first entry, idle→explore promotion) and /workflow:settings
  * saves where the target role config must take effect. Does NOT write
  * workflow state or update the status line; prefer transitionWorkflowMode()
  * for workflow mode transitions.
@@ -284,7 +284,7 @@ export async function applyModeRuntime(
  * Use this for session restore (non-idle session_start) and per-turn startup
  * (before_agent_start) so manual model/thinking selections survive across
  * turns and reloads within the same workflow mode. For explicit mode
- * transitions and /wf-settings saves, use applyModeRuntime() to force the
+ * transitions and /workflow:settings saves, use applyModeRuntime() to force the
  * target role's model/thinking.
  *
  * Does NOT write workflow state or update the status line.
@@ -368,10 +368,10 @@ export const WORKFLOW_TOOL_NAMES = WORKFLOW_GATED_TOOLS;
 
 /**
  * Remove all workflow tool names from the active tool set.
- * Used by /wf-exit to ensure the next reload starts clean.
+ * Used by /workflow:disable to ensure the next reload starts clean.
  *
  * update_plan is activated by this extension only when isAliasOwned confirms
- * our registration fingerprint still matches. On /wf-exit we remove it if we
+ * our registration fingerprint still matches. On /workflow:disable we remove it if we
  * ever registered the alias (isAliasRegistered), even if ownership was lost
  * mid-session (e.g., another extension re-registered the name after our
  * activation), preventing a stale alias from lingering into the next reload

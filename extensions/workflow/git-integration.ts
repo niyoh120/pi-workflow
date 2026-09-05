@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 /**
- * Git integration helpers for /wf-merge (Merge Mode).
+ * Git integration helpers for /workflow:merge (Merge Mode).
  *
  * Design constraints:
  *  - argv-only git invocations via execFileSync (no shell interpolation);
@@ -83,7 +83,7 @@ function gitErrorMessage(err: unknown): string {
 	return String(err);
 }
 
-// ── /wf-merge command parsing ───────────────────────────────────────────────
+// ── /workflow:merge command parsing ───────────────────────────────────────────────
 
 export interface ParsedMergeCommand {
 	/** Explicit `--target`/`--target=` value, when provided. */
@@ -97,7 +97,7 @@ export type ParseMergeCommandResult =
 	| { ok: false; error: string };
 
 /**
- * Parse `/wf-merge [--target <branch>] [--target=<branch>] [--] [instructions]`.
+ * Parse `/workflow:merge [--target <branch>] [--target=<branch>] [--] [instructions]`.
  *
  * Options must precede the instructions; the first non-option token starts the
  * verbatim instruction tail (so natural language after that point — including
@@ -350,7 +350,7 @@ export function resolveDefaultTargetBranch(
 	return null;
 }
 
-// ── /wf-merge preflight ─────────────────────────────────────────────────────
+// ── /workflow:merge preflight ─────────────────────────────────────────────────────
 
 export interface MergePreflightInput {
 	/** Active workflow worktree facts from session state (source of truth). */
@@ -379,7 +379,7 @@ export type MergePreflight =
 	| { ok: false; error: string };
 
 /**
- * Run all /wf-merge entry checks and collect the merge baseline facts.
+ * Run all /workflow:merge entry checks and collect the merge baseline facts.
  *
  * Source resolution is fixed-priority: an active workflow worktree in session
  * state always wins (the worktree branch is the source); an ordinary-branch
@@ -406,7 +406,7 @@ export function runMergePreflight(
 		if (!input.worktreeBranch) {
 			return {
 				ok: false,
-				error: "存在 active worktree 但缺少 worktreeBranch；请先 /wf-status 检查状态或 /wf-reset 清理。",
+				error: "存在 active worktree 但缺少 worktreeBranch；请先 /workflow:status 检查状态或 /workflow:reset 清理。",
 			};
 		}
 		sourceBranch = input.worktreeBranch;
@@ -415,13 +415,13 @@ export function runMergePreflight(
 		if (!entry) {
 			return {
 				ok: false,
-				error: `来源 worktree 不在同仓 worktree 列表中：${sourceCheckoutPath}。请先 /wf-status 检查或 /wf-reset 清理。`,
+				error: `来源 worktree 不在同仓 worktree 列表中：${sourceCheckoutPath}。请先 /workflow:status 检查或 /workflow:reset 清理。`,
 			};
 		}
 		if (entry.branch !== sourceBranch) {
 			return {
 				ok: false,
-				error: `来源 worktree 当前 checkout 为 ${entry.branch ?? "(detached HEAD)"}，与状态分支 ${sourceBranch} 不一致；请先恢复 worktree 或 /wf-reset。`,
+				error: `来源 worktree 当前 checkout 为 ${entry.branch ?? "(detached HEAD)"}，与状态分支 ${sourceBranch} 不一致；请先恢复 worktree 或 /workflow:reset。`,
 			};
 		}
 	} else {
@@ -430,7 +430,7 @@ export function runMergePreflight(
 		if (!current) {
 			return {
 				ok: false,
-				error: "当前 checkout 处于 detached HEAD；请先 checkout 到要集成的本地分支后再运行 /wf-merge。",
+				error: "当前 checkout 处于 detached HEAD；请先 checkout 到要集成的本地分支后再运行 /workflow:merge。",
 			};
 		}
 		sourceBranch = current;
@@ -692,7 +692,7 @@ export function finalizeDefaultFf(
 				[
 					"update-ref",
 					"-m",
-					`wf-merge: fast-forward ${opts.targetBranch} to ${opts.sourceBranch}`,
+					`workflow:merge: fast-forward ${opts.targetBranch} to ${opts.sourceBranch}`,
 					`refs/heads/${opts.targetBranch}`,
 					sourceHead,
 					targetHead,

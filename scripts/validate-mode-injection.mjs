@@ -92,7 +92,7 @@ assert(
 );
 assert(
 	/WORK_PROMPT[\s\S]*?recovery warning[\s\S]*?标记为 blocked/.test(prompts),
-	"WORK_PROMPT relies on recovery warning → block todo → /plan (no plan_read call path)",
+	"WORK_PROMPT relies on recovery warning → block todo → /workflow:plan (no plan_read call path)",
 );
 assert(
 	/WORK_PROMPT[\s\S]*?workflow_todo\(action="list"\) 读取状态/.test(prompts),
@@ -420,14 +420,14 @@ console.log("\n=== T3: worktree notice dedup + recovery warning ===");
 		"helpers.ts still exports worktreeRuntimeNotice for buildModeMessageBody",
 	);
 
-	// /work, /review, /wf-commit kickoffs do not append the worktree notice.
-	const workCmdStart = commands.indexOf("export function registerWorkCommand");
-	assert(workCmdStart !== -1, "registerWorkCommand found in commands.ts");
-	const workCmdEnd = commands.indexOf("export function registerReviewCommand", workCmdStart);
+	// /workflow:work, /workflow:review, /workflow:commit kickoffs do not append the worktree notice.
+	const workCmdStart = commands.indexOf("export function registerWorkflowWorkCommand");
+	assert(workCmdStart !== -1, "registerWorkflowWorkCommand found in commands.ts");
+	const workCmdEnd = commands.indexOf("export function registerWorkflowReviewCommand", workCmdStart);
 	const workCmdBlock = commands.slice(workCmdStart, workCmdEnd > 0 ? workCmdEnd : commands.length);
 	assert(
 		!/worktreeRuntimeNotice/.test(workCmdBlock),
-		"/work kickoff does not append worktree notice",
+		"/workflow:work kickoff does not append worktree notice",
 	);
 	const reviewStart = commands.indexOf("async function startReviewLoop");
 	assert(reviewStart !== -1, "startReviewLoop found in commands.ts");
@@ -435,30 +435,30 @@ console.log("\n=== T3: worktree notice dedup + recovery warning ===");
 	const reviewBlock = commands.slice(reviewStart, reviewEnd > 0 ? reviewEnd : commands.length);
 	assert(
 		!/worktreeRuntimeNotice/.test(reviewBlock),
-		"/review (startReviewLoop) does not append worktree notice",
+		"/workflow:review (startReviewLoop) does not append worktree notice",
 	);
-	const commitStart = commands.indexOf("export function registerWfCommitCommand");
-	assert(commitStart !== -1, "registerWfCommitCommand found in commands.ts");
-	const commitEnd = commands.indexOf("export function registerWfMergeCommand", commitStart);
-	assert(commitEnd > commitStart, "registerWfMergeCommand follows registerWfCommitCommand");
+	const commitStart = commands.indexOf("export function registerWorkflowCommitCommand");
+	assert(commitStart !== -1, "registerWorkflowCommitCommand found in commands.ts");
+	const commitEnd = commands.indexOf("export function registerWorkflowMergeCommand", commitStart);
+	assert(commitEnd > commitStart, "registerWorkflowMergeCommand follows registerWorkflowCommitCommand");
 	const commitBlock = commands.slice(commitStart, commitEnd);
 	assert(
 		!/worktreeRuntimeNotice/.test(commitBlock),
-		"/wf-commit kickoff does not append worktree notice",
+		"/workflow:commit kickoff does not append worktree notice",
 	);
-	// /wf-merge kickoff does not append the worktree notice either (it lives in
+	// /workflow:merge kickoff does not append the worktree notice either (it lives in
 	// the stable system prompt + per-round hidden merge context).
-	const wfMergeStart = commands.indexOf("export function registerWfMergeCommand");
-	assert(wfMergeStart >= 0, "registerWfMergeCommand found in commands.ts");
-	const wfMergeEnd = commands.indexOf("export function registerWfStatusCommand", wfMergeStart);
+	const wfMergeStart = commands.indexOf("export function registerWorkflowMergeCommand");
+	assert(wfMergeStart >= 0, "registerWorkflowMergeCommand found in commands.ts");
+	const wfMergeEnd = commands.indexOf("export function registerWorkflowStatusCommand", wfMergeStart);
 	const wfMergeBlock = commands.slice(wfMergeStart, wfMergeEnd > 0 ? wfMergeEnd : commands.length);
 	assert(
 		!/worktreeRuntimeNotice/.test(wfMergeBlock),
-		"/wf-merge kickoff does not append worktree notice",
+		"/workflow:merge kickoff does not append worktree notice",
 	);
 	assert(
 		wfMergeBlock.includes("buildMergeContextBody") && wfMergeBlock.includes("MERGE_CONTEXT_MARKER"),
-		"/wf-merge active-merge re-entry re-sends the canonical merge context",
+		"/workflow:merge active-merge re-entry re-sends the canonical merge context",
 	);
 	// commands.ts no longer references worktreeRuntimeNotice anywhere.
 	assert(
@@ -479,8 +479,8 @@ console.log("\n=== T3: worktree notice dedup + recovery warning ===");
 	// scoped to the literal so the loose cross-section match can't false-pass.
 	const warnMatch = commands.match(/const recoveryWarning =\s*([\s\S]*?);\s*\n/);
 	assert(
-		!!warnMatch && /标记为 blocked/.test(warnMatch[1]) && /\/plan/.test(warnMatch[1]),
-		"recovery warning tells the model to block the todo and run /plan",
+		!!warnMatch && /标记为 blocked/.test(warnMatch[1]) && /\/workflow:plan/.test(warnMatch[1]),
+		"recovery warning tells the model to block the todo and run /workflow:plan",
 	);
 
 	// workflow_plan_read is only in the Plan tool set, not Work/Explore.
@@ -619,10 +619,10 @@ console.log("\n=== T4: restore vs apply mode runtime split ===");
 		"index.ts no longer calls applyModeRuntime(state.mode) directly",
 	);
 
-	// /wf applies Explore runtime before reload: setRole(explore) + status +
+	// /workflow:enable applies Explore runtime before reload: setRole(explore) + status +
 	// guard mode set, then reconcile, with a fallback warning on failure.
-	const wfStart = commands.indexOf("export function registerWfCommand");
-	assert(wfStart >= 0, "T4: commands.ts marker 'registerWfCommand' found");
+	const wfStart = commands.indexOf("export function registerWorkflowEnableCommand");
+	assert(wfStart >= 0, "T4: commands.ts marker 'registerWorkflowEnableCommand' found");
 	const wfEnd = commands.indexOf(
 		"// ── Command registrations",
 		wfStart,
@@ -631,32 +631,32 @@ console.log("\n=== T4: restore vs apply mode runtime split ===");
 	assert(
 		/setWorkflowStatus\(ctx,\s*"explore"\)/.test(wfBlock) &&
 			/setCurrentTurnGuardMode\(sessionKey,\s*"explore"\)/.test(wfBlock),
-		"/wf sets explore status and guard mode before reload",
+		"/workflow:enable sets explore status and guard mode before reload",
 	);
 	assert(
 		/setRole[\s\S]*?"explore"[\s\S]*?getAgentDir/.test(wfBlock),
-		"/wf applies explore role via setRole before reload",
+		"/workflow:enable applies explore role via setRole before reload",
 	);
 	assert(
 		/activateWorkflowToolsIfAllowed\(pi,\s+ctx\.cwd,\s*getAgentDir,\s*"explore",\s*ctx\)/.test(
 			wfBlock,
 		),
-		"/wf reconciles workflow tools for explore before reload",
+		"/workflow:enable reconciles workflow tools for explore before reload",
 	);
 	assert(
 		/explore role runtime failed to apply/.test(wfBlock),
-		"/wf logs a warning when explore runtime fails and continues with reload",
+		"/workflow:enable logs a warning when explore runtime fails and continues with reload",
 	);
 	assert(
 		/await\s+ctx\.reload\(\)/.test(wfBlock),
-		"/wf still reloads after applying Explore runtime",
+		"/workflow:enable still reloads after applying Explore runtime",
 	);
 
-	// /wf-status shows both active runtime and configured role model/thinking.
-	const wfStatusStart = commands.indexOf("export function registerWfStatusCommand");
-	assert(wfStatusStart >= 0, "T4: commands.ts marker 'registerWfStatusCommand' found");
+	// /workflow:status shows both active runtime and configured role model/thinking.
+	const wfStatusStart = commands.indexOf("export function registerWorkflowStatusCommand");
+	assert(wfStatusStart >= 0, "T4: commands.ts marker 'registerWorkflowStatusCommand' found");
 	const wfStatusEnd = commands.indexOf(
-		"export function registerWfExitCommand",
+		"export function registerWorkflowDisableCommand",
 		wfStatusStart,
 	);
 	const wfStatusBlock = commands.slice(
@@ -667,13 +667,13 @@ console.log("\n=== T4: restore vs apply mode runtime split ===");
 		/active runtime model:/.test(wfStatusBlock) &&
 			/activeModel\s*\?\s*`\$\{activeModel\.provider\}\/\$\{activeModel\.id\}`\s*:\s*"\(none/.test(wfStatusBlock) &&
 			/configured role model:/.test(wfStatusBlock),
-		"/wf-status displays active runtime model (ctx.model) with safe ternary access alongside configured role model",
+		"/workflow:status displays active runtime model (ctx.model) with safe ternary access alongside configured role model",
 	);
 	assert(
 		/active runtime thinking:/.test(wfStatusBlock) &&
 			/pi\.getThinkingLevel\(\)/.test(wfStatusBlock) &&
 			/configured role thinking:/.test(wfStatusBlock),
-		"/wf-status displays active runtime thinking (pi.getThinkingLevel) alongside configured role thinking",
+		"/workflow:status displays active runtime thinking (pi.getThinkingLevel) alongside configured role thinking",
 	);
 }
 

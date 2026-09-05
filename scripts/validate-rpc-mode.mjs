@@ -234,8 +234,8 @@ const tmpCwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wf-rpc-"));
 const tmpAgent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wf-rpc-agent-"));
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wf-rpc-home-"));
 
-// Enable workflow.autoEnter via a global config so /wf-status is registered
-// without needing an interactive /wf first. Global config lives under the
+// Enable workflow.autoEnter via a global config so /workflow:status is registered
+// without needing an interactive /workflow:enable first. Global config lives under the
 // agent dir: <agentDir>/workflow/config.json.
 const wfConfigDir = path.join(tmpAgent, "workflow");
 fs.mkdirSync(wfConfigDir, { recursive: true });
@@ -268,14 +268,14 @@ const RPC_ENV = {
 	PI_OFFLINE: "1",
 };
 
-// ── Test 1: RPC /wf-status emits an effective-config notify ─────────────────
-console.log("=== Test 1: RPC /wf-status effective-config notify ===");
+// ── Test 1: RPC /workflow:status emits an effective-config notify ─────────────────
+console.log("=== Test 1: RPC /workflow:status effective-config notify ===");
 {
 	const env = RPC_ENV;
 
 	let result;
 	try {
-		result = await runRpcPrompt(RPC_ARGS, "/wf-status", tmpCwd, env, { timeoutMs: 15000 });
+		result = await runRpcPrompt(RPC_ARGS, "/workflow:status", tmpCwd, env, { timeoutMs: 15000 });
 	} catch (e) {
 		// Spawn/startup failure is a real regression — do not mask it as a pass.
 		console.error(`  FAIL: RPC spawn failed: ${e.message}`);
@@ -292,12 +292,12 @@ console.log("=== Test 1: RPC /wf-status effective-config notify ===");
 		);
 		assert(
 			!!statusNotify,
-			"RPC /wf-status emits a notify containing 'Effective Config'",
+			"RPC /workflow:status emits a notify containing 'Effective Config'",
 		);
 		if (statusNotify) {
 			assert(
 				statusNotify.message.includes("projectConfig:"),
-				"/wf-status notify includes projectConfig trust line",
+				"/workflow:status notify includes projectConfig trust line",
 			);
 			assert(
 				statusNotify.message.includes("todoTool: update_plan"),
@@ -310,7 +310,7 @@ console.log("=== Test 1: RPC /wf-status effective-config notify ===");
 			console.error(`  stderr: ${result.stderr.slice(0, 2000)}`);
 			console.error(`  exit code: ${result.code}`);
 		}
-		assert(!!response && response.success === true, "RPC /wf-status prompt accepted");
+		assert(!!response && response.success === true, "RPC /workflow:status prompt accepted");
 	}
 }
 
@@ -366,8 +366,8 @@ console.log("\n=== Test 2: update_plan Paseo contract (source-level) ===");
 	assert(/question: Type\.Optional\(Type\.String\(\)\)/.test(toolsSrc) && /recommendedAnswer: Type\.Optional\(Type\.String\(\)\)/.test(toolsSrc), "workflow_grill_record: legacy single-field params retained for replay");
 }
 
-// ── Test 3: /wf-settings empty-layer reset skips confirm and write ──────
-console.log("\n=== Test 3: RPC /wf-settings empty session layer reset ===");
+// ── Test 3: /workflow:settings empty-layer reset skips confirm and write ──────
+console.log("\n=== Test 3: RPC /workflow:settings empty session layer reset ===");
 {
 	// Fresh throwaway cwd: the session layer is empty, so reset-session must
 	// short-circuit with an already-inherits notify — no confirm, no write.
@@ -379,7 +379,7 @@ console.log("\n=== Test 3: RPC /wf-settings empty session layer reset ===");
 		];
 		const result = await runRpcInteractive(
 			RPC_ARGS,
-			"/wf-settings",
+			"/workflow:settings",
 			tmpCwd3,
 			RPC_ENV,
 			responses,
@@ -406,14 +406,14 @@ console.log("\n=== Test 3: RPC /wf-settings empty session layer reset ===");
 			console.error(`  stderr: ${result.stderr.slice(0, 2000)}`);
 			console.error(`  exit code: ${result.code}`);
 		}
-		assert(!!response && response.success === true, "RPC /wf-settings prompt accepted (empty-layer path)");
+		assert(!!response && response.success === true, "RPC /workflow:settings prompt accepted (empty-layer path)");
 	} finally {
 		fs.rmSync(tmpCwd3, { recursive: true, force: true });
 	}
 }
 
-// ── Test 4: /wf-settings cancelled reset leaves project config untouched ─
-console.log("\n=== Test 4: RPC /wf-settings cancelled project reset ===");
+// ── Test 4: /workflow:settings cancelled reset leaves project config untouched ─
+console.log("\n=== Test 4: RPC /workflow:settings cancelled project reset ===");
 {
 	// Throwaway project with a non-empty .pi/workflow/config.json, started
 	// with --approve so the project trust gate passes. Cancelling the reset
@@ -433,7 +433,7 @@ console.log("\n=== Test 4: RPC /wf-settings cancelled project reset ===");
 		];
 		const result = await runRpcInteractive(
 			[...RPC_ARGS, "--approve"],
-			"/wf-settings",
+			"/workflow:settings",
 			tmpCwd4,
 			RPC_ENV,
 			responses,
@@ -470,7 +470,7 @@ console.log("\n=== Test 4: RPC /wf-settings cancelled project reset ===");
 			console.error(`  stderr: ${result.stderr.slice(0, 2000)}`);
 			console.error(`  exit code: ${result.code}`);
 		}
-		assert(!!response && response.success === true, "RPC /wf-settings prompt accepted (cancelled-reset path)");
+		assert(!!response && response.success === true, "RPC /workflow:settings prompt accepted (cancelled-reset path)");
 	} finally {
 		fs.rmSync(tmpCwd4, { recursive: true, force: true });
 	}

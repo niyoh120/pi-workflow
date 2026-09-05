@@ -285,7 +285,7 @@ function normalizeConfig(cfg: any): WorkflowConfig {
 	return cfg as WorkflowConfig;
 }
 
-// ── Raw config-layer IO (for /wf-settings) ─────────────────────────────
+// ── Raw config-layer IO (for /workflow:settings) ─────────────────────────────
 //
 // These helpers read/write a raw partial config object for a single layer
 // (project or global config.json) WITHOUT merging defaults. They are used
