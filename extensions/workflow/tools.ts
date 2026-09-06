@@ -38,7 +38,9 @@ import {
 	extractUserRequirements,
 	buildPlanReviewProtocolText,
 	reconstructReviewerToolSurface,
+	prepareReviewerModelPlan,
 	type PlanReviewResult,
+	type PreparedReviewerModel,
 } from "./plan-review-agent.js";
 import {
 	boundPreviousRoundText,
@@ -1001,11 +1003,32 @@ export function registerPlanReviewTool(
 			// ── Single snapshots shared by hashes and the child runner ──
 			// Requirements, tool surface, and protocol text are each computed ONCE
 			// so the cache decision and the actual reviewer inputs cannot drift.
+			// The reviewer model plan (child runtime + validated window clone + the
+			// SettingsManager shared by validation/loader/session) is prepared BEFORE
+			// the cache decision so an invalid contextWindow errors out before any
+			// cached verdict is returned.
 			const branch = ctx.sessionManager?.getBranch?.();
 			const requirements = extractUserRequirements(branch, state.planStartEntryId);
 			const toolSurface = reconstructReviewerToolSurface(pi);
 			const protocolText = buildPlanReviewProtocolText();
 			const reviewerModel = `${config.models.planReview.provider}/${config.models.planReview.model}`;
+
+			let prepared: PreparedReviewerModel;
+			try {
+				prepared = await prepareReviewerModelPlan({
+					ctx,
+					modelSpec: config.models.planReview,
+					reviewCwd: ctx.cwd,
+					progressLabel: "Plan review",
+				});
+			} catch (err) {
+				const reason = err instanceof Error ? err.message : String(err);
+				return {
+					isError: true,
+					content: [{ type: "text", text: `Plan review failed: ${reason}` }],
+					details: { error: true, reason },
+				};
+			}
 
 			// Optional non-authoritative planner feedback on a prior round's
 			// disputed findings. Accepted only when this plan run already has an
@@ -1038,6 +1061,7 @@ export function registerPlanReviewTool(
 				requestedTools: toolSurface.requestedTools,
 				extensionPaths: toolSurface.extensionPaths,
 				protocolText,
+				reviewerContext: prepared.contextBasis,
 			});
 			const decisionHash = computePlanDecisionHash(decisions);
 			const planHash = computePlanHash(planMarkdown);
@@ -1126,6 +1150,7 @@ export function registerPlanReviewTool(
 					ctx,
 					pi,
 					modelSpec: config.models.planReview,
+					prepared,
 					planMarkdown,
 					decisions,
 					requirements,
@@ -1343,6 +1368,28 @@ export function registerReviewTool(
 			const requirements = isApprovedWork
 				? extractUserRequirements(branch, state.planStartEntryId)
 				: extractUserRequirements(branch, state.workStartEntryId);
+
+			// Reviewer model plan (child runtime + validated window clone + the
+			// SettingsManager shared by validation/loader/session), prepared BEFORE
+			// the cache decision so an invalid contextWindow errors out before any
+			// cached verdict is returned. The basis feeds the task-input hash.
+			let prepared: PreparedReviewerModel;
+			try {
+				prepared = await prepareReviewerModelPlan({
+					ctx,
+					modelSpec: config.models.review,
+					reviewCwd,
+					progressLabel: "Review",
+				});
+			} catch (err) {
+				const reason = err instanceof Error ? err.message : String(err);
+				return {
+					isError: true,
+					content: [{ type: "text", text: `Review failed: ${reason}` }],
+					details: { ocrEnabled: includeOcr, error: true, reason },
+				};
+			}
+
 			const diffSnapshot = computeWorkspaceDiffSnapshot(reviewCwd);
 			const todoHash = computeTodoHash(state.todos);
 			const reviewModel = `${config.models.review.provider}/${config.models.review.model}`;
@@ -1359,6 +1406,7 @@ export function registerReviewTool(
 				includeOcr,
 				reviewModel,
 				protocolText,
+				reviewerContext: prepared.contextBasis,
 				feedback,
 			});
 			const history = loadReviewHistory(ctx.cwd, sessionKey);
@@ -1447,6 +1495,7 @@ export function registerReviewTool(
 						ctx,
 						pi,
 						modelSpec: config.models.review,
+						prepared,
 						branch,
 						planStartEntryId: state.planStartEntryId,
 						workStartEntryId: state.workStartEntryId,

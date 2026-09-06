@@ -31,7 +31,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadState, getSessionKey } from "./state.js";
 import { loadConfigForContext } from "./config.js";
-import { restoreModeRuntime, setWorkflowStatus, transitionWorkflowMode } from "./mode.js";
+import { restoreModeRuntime, setWorkflowStatus, transitionWorkflowMode, clearContextWindowOwnership } from "./mode.js";
 import { isWorkflowActive } from "./helpers.js";
 import type { WorkflowState } from "./types.js";
 import { WorkflowTodoOverlay, setWorkflowOverlay, getWorkflowOverlay } from "./todo-overlay.js";
@@ -49,6 +49,7 @@ import {
 	runPendingWorkDispatcher,
 	registerToolCallGuard,
 	registerAgentEnd,
+	registerContextWindowEvents,
 } from "./commands.js";
 
 // ── Dynamic registration guard ──────────────────────
@@ -197,6 +198,7 @@ export default function (pi: ExtensionAPI) {
 	registerPendingWorkDispatcher(pi, getAgentDir);
 	registerToolCallGuard(pi, getAgentDir);
 	registerAgentEnd(pi, getAgentDir);
+	registerContextWindowEvents(pi, getAgentDir);
 
 	// ── Overlay setup ─────────────────────────────
 	const overlay = new WorkflowTodoOverlay();
@@ -208,7 +210,21 @@ export default function (pi: ExtensionAPI) {
 	// Capture the instance in the closure so each pi disposes only the
 	// overlay it created, not whatever is current at shutdown time (which
 	// could belong to a newer ExtensionAPI instance after a rebind).
-	pi.on("session_shutdown", () => {
+	// The context-window ownership bookkeeping is dropped here too: the
+	// transcript never persisted the cloned window (only provider/id), and a
+	// fresh load re-resolves the registry model — session_start re-establishes
+	// the override from config when the next session needs it.
+	pi.on("session_shutdown", (_event, ctx) => {
 		overlay.dispose();
+		try {
+			clearContextWindowOwnership(
+				getSessionKey({
+					getSessionId: () => (ctx as any)?.sessionManager?.getSessionId?.(),
+					getSessionFile: () => (ctx as any)?.sessionManager?.getSessionFile?.() ?? null,
+				}),
+			);
+		} catch {
+			// Best-effort: bookkeeping is process-local and dies with the session.
+		}
 	});
 }

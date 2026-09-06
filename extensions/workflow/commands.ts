@@ -39,6 +39,9 @@ import {
 	workflowManagedToolNames,
 	computeWorkflowToolNames,
 	resolveTodoToolName,
+	reconcileContextWindowForSession,
+	releaseContextWindowOverride,
+	getContextWindowOverride,
 } from "./mode.js";
 import { execSync } from "node:child_process";
 import path from "node:path";
@@ -741,6 +744,28 @@ export function registerAgentEnd(
 	});
 }
 
+// ── Context-window event reconcile (model_select / session_tree) ──────────
+
+/**
+ * Re-apply the configured role context-window after user model selection or
+ * session-tree navigation, so the override survives manual switches back to
+ * the role model BEFORE the next provider request (and its compaction
+ * check). Same-id selections emit no model_select (Pi dedup), which the
+ * before_agent_start reconcile also covers; this handler catches the
+ * different-model → role-model switch and tree restores immediately.
+ */
+export function registerContextWindowEvents(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.on("model_select", async (_event, ctx) => {
+		await reconcileContextWindowForSession(pi, ctx, getAgentDir);
+	});
+	pi.on("session_tree", async (_event, ctx) => {
+		await reconcileContextWindowForSession(pi, ctx, getAgentDir);
+	});
+}
+
 // ── /workflow:enable command ─────────────────────────────────────────────────────────────
 
 export function registerWorkflowEnableCommand(
@@ -1398,6 +1423,26 @@ export function registerWorkflowStatusCommand(
 			msg += `\nactive runtime thinking: ${activeThinking}`;
 			msg += `\nconfigured role model: ${roleSpec ? `${roleSpec.provider}/${roleSpec.model}` : "(none)"}`;
 			msg += `\nconfigured role thinking: ${roleSpec?.thinking ?? "(none)"}`;
+			// Context-window diagnostics: configured override vs Pi baseline vs the
+			// actually-active runtime window, plus workflow ownership. Locates a
+			// stale override (cleared config but active clone), a lost override
+			// (manual same-id re-select), and failed applies.
+			const roleModelForWindow = roleSpec
+				? ctx.modelRegistry.find(roleSpec.provider, roleSpec.model)
+				: undefined;
+			const ownership = getContextWindowOverride(sessionKey);
+			msg += `\nconfigured contextWindow: ${
+				roleSpec?.contextWindow !== undefined ? roleSpec.contextWindow : "(inherit)"
+			} (source: ${report.sources[`models.${role}.contextWindow`]})`;
+			msg += `\npi baseline window: ${
+				roleModelForWindow?.contextWindow ?? "(model unavailable)"
+			}`;
+			msg += `\nactive runtime contextWindow: ${activeModel?.contextWindow ?? "(none)"}`;
+			msg += `\nworkflow window ownership: ${
+				ownership
+					? `active (applied ${ownership.appliedWindow}, original ${ownership.originalWindow}, ${ownership.provider}/${ownership.modelId})`
+					: "inactive"
+			}`;
 			msg += `\nworkflow.autoEnter: ${eff.workflow.autoEnter} (source: ${report.sources["workflow.autoEnter"]})`;
 			msg += `\nplanReview.enabled: ${eff.planReview.enabled} (source: ${report.sources["planReview.enabled"]})`;
 			msg += `\nreview.enabled: ${eff.review.enabled} (source: ${report.sources["review.enabled"]})`;
@@ -1405,8 +1450,10 @@ export function registerWorkflowStatusCommand(
 			for (const r of ["explore", "plan", "planReview", "review", "work", "commit"] as const) {
 				const spec = eff.models[r];
 				if (!spec) continue;
-				msg += `\nmodels.${r}: ${spec.provider}/${spec.model} / ${spec.thinking ?? "(none)"}`;
-				msg += ` (provider: ${report.sources[`models.${r}.provider`]}, model: ${report.sources[`models.${r}.model`]}, thinking: ${report.sources[`models.${r}.thinking`]})`;
+				msg += `\nmodels.${r}: ${spec.provider}/${spec.model} / ${spec.thinking ?? "(none)"} / ctx ${
+					spec.contextWindow !== undefined ? spec.contextWindow : "(inherit)"
+				}`;
+				msg += ` (provider: ${report.sources[`models.${r}.provider`]}, model: ${report.sources[`models.${r}.model`]}, thinking: ${report.sources[`models.${r}.thinking`]}, contextWindow: ${report.sources[`models.${r}.contextWindow`]})`;
 			}
 
 			// Active todo tool + alias ownership (RPC compatibility status).
@@ -1453,6 +1500,10 @@ export function registerWorkflowDisableCommand(pi: ExtensionAPI): void {
 				getAgentDir: () => "",
 				applyRuntime: false,
 			});
+
+			// Release a workflow-owned context-window clone (restore the original
+			// window on the matching active model) before leaving workflow runtime.
+			await releaseContextWindowOverride(pi, ctx, sessionKey);
 
 			// Remove workflow tools from active set before reload so
 			// the next turn starts clean.
@@ -1571,6 +1622,11 @@ export function registerWorkflowResetCommand(pi: ExtensionAPI): void {
 				getAgentDir: () => "",
 				applyRuntime: false,
 			});
+
+			// Release a workflow-owned context-window clone (restore the original
+			// window on the matching active model) — /workflow:reset keeps running
+			// normal Pi runtime without a reload, so the clone must not linger.
+			await releaseContextWindowOverride(pi, ctx, sessionKey);
 
 			const overlay = getWorkflowOverlay();
 			if (overlay) overlay.dispose();

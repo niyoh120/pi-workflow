@@ -11,7 +11,8 @@
     "plan": {
       "provider": "anthropic",
       "model": "claude-opus-4-5",
-      "thinking": "high"
+      "thinking": "high",
+      "contextWindow": 150000
     },
     "planReview": {
       "provider": "openai",

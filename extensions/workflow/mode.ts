@@ -1,9 +1,16 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
 import type { Mode, WorkflowConfig, WorkflowState } from "./types.js";
 import { loadConfigForContext } from "./config.js";
-import { assertNever, modeLabel, modeStatusLabel } from "./helpers.js";
+import {
+	buildContextWindowApplyError,
+	cloneModelWithContextWindow,
+	loadDiskCompactionSnapshot,
+	prepareModelWithContextWindow,
+} from "./model-context.js";
+import { assertNever, isWorkflowActive, modeLabel, modeStatusLabel } from "./helpers.js";
 import { isAliasOwned, isAliasRegistered, UPDATE_PLAN_TOOL_NAME } from "./todo-compat.js";
-import { saveState, getSessionKey } from "./state.js";
+import { saveState, getSessionKey, loadState } from "./state.js";
 
 // ── Workflow tool mode gating ─────────────────────────────────────────────────
 
@@ -109,11 +116,106 @@ export function computeWorkflowToolNames(
 	}
 }
 
+// ── Context-window ownership bookkeeping (session-local, in-memory) ────────
+
+/**
+ * Records a workflow-imposed context-window clone for one session. The clone
+ * lives only in the Pi runtime; the transcript persists just provider/id, so
+ * this bookkeeping is the only place that knows the active model object is
+ * workflow-owned and what its original window was. NOT persisted to
+ * WorkflowState — reload re-establishes the override from config.
+ */
+export interface ContextWindowOverrideRecord {
+	provider: string;
+	modelId: string;
+	/** contextWindow the applied clone carries. */
+	appliedWindow: number;
+	/** Registry (pre-clone) contextWindow of the same provider/id. */
+	originalWindow: number;
+}
+
+const contextWindowOverrides = new Map<string, ContextWindowOverrideRecord>();
+
+/** Current ownership record for a session (diagnostics/status). */
+export function getContextWindowOverride(
+	sessionKey: string,
+): ContextWindowOverrideRecord | undefined {
+	return contextWindowOverrides.get(sessionKey);
+}
+
+function recordContextWindowOverride(
+	sessionKey: string,
+	record: ContextWindowOverrideRecord,
+): void {
+	contextWindowOverrides.set(sessionKey, record);
+}
+
+function clearContextWindowOverride(sessionKey: string): void {
+	contextWindowOverrides.delete(sessionKey);
+}
+
+/** Drop ownership bookkeeping without touching the runtime (shutdown path:
+ *  the transcript never stored the window, and the next load re-resolves the
+ *  registry model — the override is re-established from config if needed). */
+export function clearContextWindowOwnership(sessionKey: string): void {
+	clearContextWindowOverride(sessionKey);
+}
+
+/** Read the trust flag off an unknown ctx, conservative when absent. */
+function ctxProjectTrusted(ctx: any): boolean {
+	try {
+		return typeof ctx?.isProjectTrusted === "function" ? !!ctx.isProjectTrusted() : false;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Release a workflow-owned context-window override: delete the bookkeeping
+ * and restore the ORIGINAL window — but only on the still-active matching
+ * clone. A user's later manual model (or any other extension's change) is
+ * preserved untouched. Best-effort: returns whether a needed restore
+ * succeeded (true when nothing had to be restored).
+ */
+export async function releaseContextWindowOverride(
+	pi: ExtensionAPI,
+	ctx: any,
+	sessionKey: string,
+): Promise<boolean> {
+	const record = contextWindowOverrides.get(sessionKey);
+	if (!record) return true;
+	clearContextWindowOverride(sessionKey);
+	const active = ctx?.model;
+	if (!active) return true;
+	const isActiveClone =
+		active.provider === record.provider &&
+		active.id === record.modelId &&
+		active.contextWindow === record.appliedWindow;
+	if (!isActiveClone) return true;
+	try {
+		const restored = cloneModelWithContextWindow(active, record.originalWindow);
+		const savedThinking = pi.getThinkingLevel();
+		const ok = await pi.setModel(restored);
+		if (ok) pi.setThinkingLevel(savedThinking);
+		return ok;
+	} catch (err) {
+		console.error(`[workflow] context-window release failed: ${err}`);
+		return false;
+	}
+}
+
 // ── Runtime mode switching ────────────────────────────────────────────────
 
 /**
  * Switch the model to the one configured for the given role,
- * and apply thinking level. Does NOT write workflow state.
+ * apply thinking level, and apply the optional context-window override:
+ * the registry model is validated (positive safe integer, strictly below the
+ * Pi baseline, strictly above reserve+keepRecent from the trust-aware disk
+ * settings snapshot) and applied as a SHALLOW CLONE — the registry object
+ * itself is never mutated. A configured-but-invalid window fails the apply
+ * with an explicit error (role, provider/model, input, bounds, fix).
+ * Does NOT write workflow state. Also maintains the session-local override
+ * ownership bookkeeping.
  */
 export async function setRole(
 	pi: ExtensionAPI,
@@ -144,13 +246,70 @@ export async function setRole(
 			return false;
 		}
 
-		const ok = await pi.setModel(model);
+		const sessionKey = getSessionKey(ctx.sessionManager);
+
+		// Optional context-window override: validate against the raw registry
+		// model + compaction snapshot, then apply a clone. Invalid values fail
+		// loudly — never silently dropped or clamped.
+		let modelToApply: Model<any> = model;
+		let compactionForError: Parameters<typeof buildContextWindowApplyError>[0]["compaction"];
+		if (spec.contextWindow !== undefined) {
+			const compactionRes = loadDiskCompactionSnapshot(
+				ctx.cwd,
+				getAgentDir(),
+				ctxProjectTrusted(ctx),
+			);
+			if (!compactionRes.ok) {
+				ctx.ui.notify(
+					`models.${role}.contextWindow 已配置，但${compactionRes.error}；已拒绝应用该角色模型。可先清除该字段（继承 Pi 默认窗口）。`,
+					"error",
+				);
+				return false;
+			}
+			compactionForError = compactionRes.compaction;
+			const prepared = prepareModelWithContextWindow(
+				model,
+				spec.contextWindow,
+				compactionRes.compaction,
+			);
+			if (!prepared.ok) {
+				ctx.ui.notify(
+					buildContextWindowApplyError({
+						role,
+						provider: spec.provider,
+						model: spec.model,
+						rawValue: spec.contextWindow,
+						reason: prepared.error,
+						baselineWindow: model.contextWindow,
+						compaction: compactionForError,
+					}),
+					"error",
+				);
+				return false;
+			}
+			modelToApply = prepared.model;
+		}
+
+		const ok = await pi.setModel(modelToApply);
 		if (!ok) {
 			ctx.ui.notify(
 				`模型不可用或缺少 API key：${spec.provider}/${spec.model}`,
 				"error",
 			);
 			return false;
+		}
+
+		if (spec.contextWindow !== undefined) {
+			recordContextWindowOverride(sessionKey, {
+				provider: spec.provider,
+				modelId: spec.model,
+				appliedWindow: spec.contextWindow,
+				originalWindow: model.contextWindow,
+			});
+		} else {
+			// Role inherits the Pi window — any stale ownership from an earlier
+			// override is superseded (the raw registry model just became active).
+			clearContextWindowOverride(sessionKey);
 		}
 
 		if (spec.thinking) {
@@ -281,6 +440,13 @@ export async function applyModeRuntime(
  * model is available, keeping the no-model path usable. Always reconciles
  * workflow tools for the current mode.
  *
+ * Context-window reconcile (idempotent, runs BEFORE the fallback): when Pi
+ * restored an active model, the configured role override is re-applied only
+ * if the active provider/id matches the role config AND the window drifted
+ * (manual same-id re-select, tree restore, reload). Steady state performs
+ * ZERO setModel calls; a needed re-apply preserves the user's thinking level.
+ * A manual model different from the role config is kept untouched.
+ *
  * Use this for session restore (non-idle session_start) and per-turn startup
  * (before_agent_start) so manual model/thinking selections survive across
  * turns and reloads within the same workflow mode. For explicit mode
@@ -296,9 +462,15 @@ export async function restoreModeRuntime(
 	getAgentDir: () => string,
 ): Promise<boolean> {
 	try {
+		let modelOk = true;
+		// Idempotent context-window reconcile — only when Pi has an active model;
+		// the no-model fallback below applies the full role config (incl. window)
+		// via setRole.
+		if (ctx?.model) {
+			modelOk = await reconcileContextWindow(pi, ctx, mode, getAgentDir);
+		}
 		// Keep Pi's active session model/thinking when present; only fall back to
 		// the role config when Pi could not restore a model for this session.
-		let modelOk = true;
 		if (!ctx?.model) {
 			modelOk = await setRole(pi, ctx, modeRole(mode), getAgentDir);
 		}
@@ -310,6 +482,159 @@ export async function restoreModeRuntime(
 		return modelOk;
 	} catch {
 		return false;
+	}
+}
+
+/**
+ * Idempotent context-window reconcile for the restore path. See
+ * restoreModeRuntime for the contract. Not exported for external use —
+ * event-driven callers use reconcileContextWindowForSession().
+ */
+async function reconcileContextWindow(
+	pi: ExtensionAPI,
+	ctx: any,
+	mode: Mode,
+	getAgentDir: () => string,
+): Promise<boolean> {
+	try {
+		const config = loadConfigForContext(
+			ctx.cwd,
+			getAgentDir(),
+			getSessionKey(ctx.sessionManager),
+			ctx,
+		);
+		const role = modeRole(mode) as keyof typeof config.models;
+		const spec = config.models[role];
+		const active = ctx?.model as Model<any> | undefined;
+		if (!spec || !active) return true;
+
+		const sessionKey = getSessionKey(ctx.sessionManager);
+
+		// No override configured: release any workflow-owned clone left over from
+		// an earlier configured run (restore original window on the active clone).
+		if (spec.contextWindow === undefined) {
+			return await releaseContextWindowOverride(pi, ctx, sessionKey);
+		}
+
+		// Manual model different from the role config: keep the user's model (and
+		// its window) untouched — the override binds only the configured model.
+		if (
+			active.provider !== spec.provider ||
+			active.id !== spec.model
+		) {
+			return true;
+		}
+
+		const existing = contextWindowOverrides.get(sessionKey);
+		if (active.contextWindow === spec.contextWindow) {
+			// Already applied — re-establish bookkeeping only if it was lost
+			// (e.g. process-internal reload) using the registry baseline.
+			if (!existing || existing.provider !== active.provider || existing.modelId !== active.id) {
+				const registryModel = ctx.modelRegistry.find(spec.provider, spec.model);
+				recordContextWindowOverride(sessionKey, {
+					provider: active.provider,
+					modelId: active.id,
+					appliedWindow: spec.contextWindow,
+					originalWindow: registryModel?.contextWindow ?? active.contextWindow,
+				});
+			}
+			return true;
+		}
+
+		// Window drifted (manual same-id re-select, tree navigation restore,
+		// reload) — re-validate against the registry baseline and re-apply the
+		// clone, preserving the user's current thinking level.
+		const registryModel = ctx.modelRegistry.find(spec.provider, spec.model);
+		if (!registryModel) {
+			ctx.ui.notify(
+				`contextWindow 覆盖无法恢复：找不到模型 ${spec.provider}/${spec.model}。`,
+				"error",
+			);
+			return false;
+		}
+		const compactionRes = loadDiskCompactionSnapshot(
+			ctx.cwd,
+			getAgentDir(),
+			ctxProjectTrusted(ctx),
+		);
+		if (!compactionRes.ok) {
+			ctx.ui.notify(
+				`models.${role}.contextWindow 已配置，但${compactionRes.error}；已拒绝恢复窗口覆盖。`,
+				"error",
+			);
+			return false;
+		}
+		const prepared = prepareModelWithContextWindow(
+			registryModel,
+			spec.contextWindow,
+			compactionRes.compaction,
+		);
+		if (!prepared.ok) {
+			ctx.ui.notify(
+				buildContextWindowApplyError({
+					role: String(role),
+					provider: spec.provider,
+					model: spec.model,
+					rawValue: spec.contextWindow,
+					reason: prepared.error,
+					baselineWindow: registryModel.contextWindow,
+					compaction: compactionRes.compaction,
+				}),
+				"error",
+			);
+			return false;
+		}
+		const savedThinking = pi.getThinkingLevel();
+		const ok = await pi.setModel(prepared.model);
+		if (!ok) {
+			ctx.ui.notify(
+				`contextWindow 覆盖恢复失败：模型不可用或缺少 API key（${spec.provider}/${spec.model}）。`,
+				"error",
+			);
+			return false;
+		}
+		recordContextWindowOverride(sessionKey, {
+			provider: spec.provider,
+			modelId: spec.model,
+			appliedWindow: prepared.appliedWindow,
+			originalWindow: prepared.originalWindow,
+		});
+		pi.setThinkingLevel(savedThinking);
+		return true;
+	} catch (err) {
+		console.error(`[workflow] context-window reconcile failed: ${err}`);
+		return false;
+	}
+}
+
+/**
+ * Event-driven entry (model_select / session_tree): load the persisted mode
+ * and run the idempotent context-window reconcile when workflow is active.
+ * Guarded against re-entrancy — the reconcile's own setModel on the same
+ * provider/id is suppressed by Pi's model_select dedup, so no recursion is
+ * expected, but the guard keeps any future emission path safe.
+ */
+const contextWindowReconcileInFlight = new Set<string>();
+
+export async function reconcileContextWindowForSession(
+	pi: ExtensionAPI,
+	ctx: any,
+	getAgentDir: () => string,
+): Promise<boolean> {
+	const sessionKey = getSessionKey(ctx.sessionManager);
+	if (contextWindowReconcileInFlight.has(sessionKey)) return true;
+	contextWindowReconcileInFlight.add(sessionKey);
+	try {
+		const state: WorkflowState = loadState(ctx.cwd, sessionKey);
+		const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
+		if (!isWorkflowActive(state, config)) return true;
+		if (!ctx?.model) return true;
+		return await reconcileContextWindow(pi, ctx, state.mode, getAgentDir);
+	} catch (err) {
+		console.error(`[workflow] context-window event reconcile failed: ${err}`);
+		return false;
+	} finally {
+		contextWindowReconcileInFlight.delete(sessionKey);
 	}
 }
 

@@ -44,7 +44,8 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { planReviewHistoryPath } from "./paths.js";
-import type { GrillTurn } from "./types.js";
+import type { GrillTurn, ReviewerContextBasis } from "./types.js";
+import { serializeReviewerContextBasis } from "./model-context.js";
 import {
 	PREVIOUS_ROUND_TEXT_BUDGET,
 	boundedHeadTail,
@@ -344,10 +345,12 @@ export function computePlanSectionDelta(
 /**
  * Hash of the reviewer's ENVIRONMENT baseline: authoritative user
  * requirements, reviewer model/thinking, the sorted reconstructed tool
- * surface, and the ACTUAL reviewer protocol text (system prompt + task
- * section instructions, assembled by buildPlanReviewProtocolText()).
- * Any change here forces a full review — a stale cache must never outlive a
- * changed requirement, model, tool set, or reviewer instruction.
+ * surface, the ACTUAL reviewer protocol text (system prompt + task
+ * section instructions, assembled by buildPlanReviewProtocolText()), and
+ * the structured context basis (configured override, Pi baseline, effective
+ * window, compaction snapshot). Any change here forces a full review — a
+ * stale cache must never outlive a changed requirement, model, tool set,
+ * reviewer instruction, or context/compaction parameter.
  *
  * Protocol text is passed as a parameter (not imported) so this module never
  * depends on the agent's prompt constants at runtime. Pure function.
@@ -359,6 +362,8 @@ export function computePlanReviewBasisHash(input: {
 	requestedTools: string[];
 	extensionPaths: string[];
 	protocolText: string;
+	/** Structured context-window basis (configured/baseline/effective/compaction). */
+	reviewerContext: ReviewerContextBasis;
 }): string {
 	const body = {
 		requirements: input.requirements,
@@ -367,6 +372,7 @@ export function computePlanReviewBasisHash(input: {
 		requestedTools: [...input.requestedTools].sort(),
 		extensionPaths: [...input.extensionPaths].sort(),
 		protocolText: input.protocolText,
+		reviewerContext: serializeReviewerContextBasis(input.reviewerContext),
 	};
 	return sha1(JSON.stringify(body));
 }

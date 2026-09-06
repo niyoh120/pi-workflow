@@ -191,6 +191,7 @@ export function resolveConfigSources(
 				`models.${role}.provider`,
 				`models.${role}.model`,
 				`models.${role}.thinking`,
+				`models.${role}.contextWindow`,
 			],
 		),
 	];
@@ -223,8 +224,11 @@ function sourceOfPath(path: string, layers: ConfigLayers): ConfigSource {
  * Normalize a config object to the current schema.
  * Removes stale sections that no longer exist (subagent, askUserQuestion,
  * todoOverlay) and strips unknown keys from codeReview/planReview.
+ *
+ * Exported for the settings editor, which validates candidate merges
+ * ("merged up to the editing scope") before writing a layer.
  */
-function normalizeConfig(cfg: any): WorkflowConfig {
+export function normalizeConfig(cfg: any): WorkflowConfig {
 	// Remove old sections entirely.
 	if ("subagent" in cfg) delete cfg.subagent;
 	if ("todoOverlay" in cfg) delete cfg.todoOverlay;
@@ -258,7 +262,10 @@ function normalizeConfig(cfg: any): WorkflowConfig {
 	}
 
 	// Strip unknown models entries and normalize each model to only contain
-	// provider/model/thinking (strip baseUrl, apiKey, or other old fields).
+	// provider/model/thinking/contextWindow (strip baseUrl, apiKey, or other old
+	// fields). contextWindow is preserved VERBATIM — including invalid values —
+	// so the settings editor can open, display, and clear a broken value;
+	// validity is enforced at the apply/settings boundaries (model-context.ts).
 	const VALID_ROLES = new Set([
 		"explore",
 		"plan",
@@ -276,6 +283,7 @@ function normalizeConfig(cfg: any): WorkflowConfig {
 					provider: m.provider,
 					model: m.model,
 					...("thinking" in m ? { thinking: m.thinking } : {}),
+					...("contextWindow" in m ? { contextWindow: m.contextWindow } : {}),
 				};
 			}
 		}

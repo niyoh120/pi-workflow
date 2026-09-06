@@ -48,11 +48,21 @@ import {
 	readGlobalConfigRaw,
 	writeProjectConfigRaw,
 	writeGlobalConfigRaw,
+	deepMerge,
+	normalizeConfig,
 } from "./config.js";
+import { DEFAULT_CONFIG } from "./defaults.js";
 import { getSessionKey, loadState, saveState } from "./state.js";
 import { applyModeRuntime } from "./mode.js";
 import { isWorkflowActive } from "./helpers.js";
-import type { WorkflowConfig } from "./types.js";
+import type { ModelSpec, WorkflowConfig } from "./types.js";
+import {
+	loadDiskCompactionSnapshot,
+	parseContextWindowInput,
+	validateContextWindowValue,
+	formatContextWindowRange,
+	type CompactionSnapshotResult,
+} from "./model-context.js";
 
 // ── Scopes ────────────────────────────────────────────────────────────────
 
@@ -98,7 +108,7 @@ const SCOPE_LABELS: Record<Scope, string> = {
 
 // ── Setting descriptors ─────────────────────────────────────────────────────
 
-type SettingKind = "boolean" | "thinking" | "string" | "model";
+type SettingKind = "boolean" | "thinking" | "string" | "model" | "contextWindow";
 
 interface SettingDescriptor {
 	id: string;
@@ -193,6 +203,16 @@ function buildDescriptors(): SettingDescriptor[] {
 			description: `Thinking level for the ${role} role.`,
 			kind: "thinking",
 			path: ["models", role, "thinking"],
+			role,
+		});
+		list.push({
+			id: `models.${role}.contextWindow`,
+			label: `${role} · contextWindow`,
+			description:
+				`Optional context window override for the ${role} role, in TOKENS. ` +
+				`Must be a decimal integer strictly below the Pi default window and above the compaction reserve; blank = inherit.`,
+			kind: "contextWindow",
+			path: ["models", role, "contextWindow"],
 			role,
 		});
 	}
@@ -296,6 +316,107 @@ async function writeLayer(
 	await writeGlobalConfigRaw(agentDir, layer);
 }
 
+// ── Context-window candidate validation ──────────────────────────────────
+
+/**
+ * Build the CANDIDATE config "merged up to the editing scope": DEFAULT ←
+ * global ← (trusted project, only when a higher-priority scope is being
+ * edited) ← the edited layer with the pending change already applied. Used
+ * by the settings editor so a higher-priority session override cannot mask
+ * an error in the layer being edited. The final runtime apply still
+ * validates the FULL merge (setRole).
+ */
+export function buildCandidateConfigUpToScope(
+	scope: Scope,
+	editedLayer: Record<string, any>,
+	cwd: string,
+	agentDir: string,
+	ctx: any,
+): WorkflowConfig {
+	let merged: any = { ...DEFAULT_CONFIG };
+	merged = deepMerge(merged, readGlobalConfigRaw(agentDir));
+	if (scope === "project") {
+		merged = deepMerge(merged, editedLayer);
+	} else if (scope === "session") {
+		// The trusted project layer sits below session — include it so the
+		// candidate reflects everything session would inherit from.
+		const trusted =
+			typeof ctx?.isProjectTrusted === "function" && ctx.isProjectTrusted();
+		if (trusted) merged = deepMerge(merged, readProjectConfigRaw(cwd));
+		merged = deepMerge(merged, editedLayer);
+	} else {
+		// global: only DEFAULT ← edited global layer.
+		merged = deepMerge({ ...DEFAULT_CONFIG }, editedLayer);
+	}
+	return normalizeConfig(merged);
+}
+
+export type ContextWindowCandidateCheck =
+	| { ok: true }
+	| { ok: false; error: string };
+
+/**
+ * Validate a candidate role spec's contextWindow against the registry model
+ * and a compaction snapshot. No configured window → OK regardless of
+ * compaction/model availability (clearing and repairing stay possible).
+ * Shared by the TUI onChange path and the RPC wizard. Pure apart from the
+ * registry lookup.
+ */
+export function validateRoleContextWindowCandidate(
+	spec: ModelSpec | undefined,
+	modelRegistry: ModelRegistry,
+	compactionRes: CompactionSnapshotResult,
+): ContextWindowCandidateCheck {
+	if (!spec || spec.contextWindow === undefined) return { ok: true };
+	if (!compactionRes.ok) {
+		return {
+			ok: false,
+			error: `${compactionRes.error}；无法校验 contextWindow。可先清除该字段（继承 Pi 默认窗口）。`,
+		};
+	}
+	let model: Model<any> | undefined;
+	try {
+		model = modelRegistry.find(spec.provider, spec.model);
+	} catch {
+		model = undefined;
+	}
+	if (!model) {
+		return {
+			ok: false,
+			error: `无法解析模型 ${spec.provider}/${spec.model}，保留的 contextWindow ${spec.contextWindow} 无法校验。先修正 provider/model 或清除 contextWindow。`,
+		};
+	}
+	const check = validateContextWindowValue(
+		spec.contextWindow,
+		model.contextWindow,
+		compactionRes.compaction,
+	);
+	if (!check.ok) return { ok: false, error: check.error };
+	return { ok: true };
+}
+
+/**
+ * Compute the acceptable-range hint for a role's contextWindow row: Pi
+ * default window (registry) plus the dynamic range from the disk compaction
+ * snapshot. Returns a short suffix string for the settings description.
+ */
+function contextWindowRangeHint(
+	spec: ModelSpec | undefined,
+	modelRegistry: ModelRegistry,
+	compactionRes: CompactionSnapshotResult,
+): string {
+	if (!spec) return "";
+	let model: Model<any> | undefined;
+	try {
+		model = modelRegistry.find(spec.provider, spec.model);
+	} catch {
+		model = undefined;
+	}
+	if (!model) return "Pi 窗口不可用（模型无法解析）";
+	if (!compactionRes.ok) return `Pi 默认 ${model.contextWindow} · 区间不可用（${compactionRes.error}）`;
+	return `Pi 默认 ${model.contextWindow} tokens · 可接受 ${formatContextWindowRange(model.contextWindow, compactionRes.compaction)}`;
+}
+
 // ── Display helpers ─────────────────────────────────────────────────────────
 
 function formatVal(v: any): string {
@@ -332,7 +453,7 @@ function valuesFor(
 		}
 		return [label, ...THINKING_VALUES];
 	}
-	return undefined; // string/model → submenu
+	return undefined; // string/model/contextWindow → submenu
 }
 
 /** Return thinking levels supported by the effective model for a role. */
@@ -388,6 +509,17 @@ function currentDisplay(
 			getPath(effective, paths.provider),
 			getPath(effective, paths.model),
 		)})`;
+	}
+
+	if (desc.kind === "contextWindow") {
+		const raw = getPath(layer, desc.path);
+		if (raw !== undefined) return `${formatVal(raw)} tokens`;
+		const effWindow = getPath(effective, desc.path);
+		return `${inheritLabel(scope)} (${
+			effWindow !== undefined
+				? `${formatVal(effWindow)} tokens`
+				: "unset — Pi model window"
+		})`;
 	}
 
 	const raw = getPath(layer, desc.path);
@@ -932,12 +1064,28 @@ export function registerWorkflowSettingsCommand(
 							sessionKey,
 							ctx,
 						);
+						// Disk compaction snapshot for the contextWindow range hint. The
+						// hint degrades to an explicit "unavailable" note on load errors.
+						const initialCompaction = loadDiskCompactionSnapshot(
+							cwd,
+							agentDir,
+							typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+						);
+						const describe = (desc: SettingDescriptor, effective: WorkflowConfig, compactionRes: CompactionSnapshotResult) =>
+							desc.kind === "contextWindow" && desc.role
+								? `${desc.description} ${contextWindowRangeHint(
+										effective.models[desc.role],
+										ctx.modelRegistry,
+										compactionRes,
+									)}
+								`
+								: descriptionFor(desc, effective);
 
 						const items: SettingItem[] = scopeDescriptors.map((desc) => {
 							const item: SettingItem = {
 								id: desc.id,
 								label: desc.label,
-								description: descriptionFor(desc, initialEffective),
+								description: describe(desc, initialEffective, initialCompaction),
 								currentValue: currentDisplay(
 									desc,
 									scope,
@@ -983,7 +1131,9 @@ export function registerWorkflowSettingsCommand(
 									});
 								};
 							} else {
-								// String field → single-line input submenu.
+								// String / contextWindow field → single-line input submenu.
+								// contextWindow reuses the same input; validation happens in
+								// onChange before any write.
 								item.submenu = (_cur, submenuDone) => {
 									const raw = getPath(
 										readLayer(scope, cwd, agentDir, sessionKey),
@@ -1005,11 +1155,16 @@ export function registerWorkflowSettingsCommand(
 						const refreshItems = () => {
 							const layer = readLayer(scope, cwd, agentDir, sessionKey);
 							const effective = loadConfigForContext(cwd, agentDir, sessionKey, ctx);
+							const compactionRes = loadDiskCompactionSnapshot(
+								cwd,
+								agentDir,
+								typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+							);
 							for (const item of items) {
 								const desc = byId.get(item.id);
 								if (!desc) continue;
 								item.currentValue = currentDisplay(desc, scope, layer, effective);
-								item.description = descriptionFor(desc, effective);
+								item.description = describe(desc, effective, compactionRes);
 								if (desc.kind === "thinking" && desc.role) {
 									item.values = thinkingValuesFor(
 										desc,
@@ -1046,7 +1201,76 @@ export function registerWorkflowSettingsCommand(
 											`Ignored invalid model selection: ${e instanceof Error ? e.message : String(e)}`,
 											"warning",
 										);
+										return;
 									}
+								}
+								// Model selection / clear re-checks any RETAINED contextWindow
+								// (this layer or below, merged up to the editing scope) against the
+								// candidate model — an illegal combination is rejected before the
+								// write so no layer can be saved into a broken state.
+								const modelCandidate = buildCandidateConfigUpToScope(
+									scope,
+									JSON.parse(JSON.stringify(layer)),
+									cwd,
+									agentDir,
+									ctx,
+								);
+								const modelWindowCheck = validateRoleContextWindowCandidate(
+									modelCandidate.models[desc.role],
+									ctx.modelRegistry,
+									loadDiskCompactionSnapshot(
+										cwd,
+										agentDir,
+										typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+									),
+								);
+								if (!modelWindowCheck.ok) {
+									ctx.ui.notify(
+										`模型选择未保存：${modelWindowCheck.error} 先清除或调整 contextWindow 后重试。`,
+										"error",
+									);
+									return;
+								}
+							} else if (desc.kind === "contextWindow" && desc.role) {
+								const trimmed = newValue.trim();
+								if (trimmed === "") {
+									// Blank clears the current layer's override — always allowed so a
+									// broken value stays repairable.
+									unsetPath(layer, desc.path);
+								} else {
+									const parsed = parseContextWindowInput(trimmed);
+									if (!parsed.ok) {
+										ctx.ui.notify(`Workflow settings: ${parsed.error}`, "error");
+										return; // no write; config keeps the original value
+									}
+									// Candidate = pending change merged up to the editing scope, so a
+									// higher-priority session override cannot mask an error here.
+									const candidateLayer = JSON.parse(JSON.stringify(layer));
+									setPath(candidateLayer, desc.path, parsed.value);
+									const candidate = buildCandidateConfigUpToScope(
+										scope,
+										candidateLayer,
+										cwd,
+										agentDir,
+										ctx,
+									);
+									const check = validateRoleContextWindowCandidate(
+										candidate.models[desc.role],
+										ctx.modelRegistry,
+										loadDiskCompactionSnapshot(
+											cwd,
+											agentDir,
+											typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+										),
+									);
+									if (!check.ok) {
+										ctx.ui.notify(
+											`Workflow settings: contextWindow 未保存 — ${check.error}`,
+											"error",
+										);
+										return; // no write; config keeps the original value
+									}
+									setPath(layer, desc.path, parsed.value);
 								}
 							} else if (desc.kind === "boolean") {
 								if (INHERIT_WORDS.has(newValue)) unsetPath(layer, desc.path);
@@ -1163,7 +1387,7 @@ export function registerWorkflowSettingsCommand(
 					? " Changes to autoEnter / planReview.enabled / review.enabled also need /reload."
 					: "";
 				ctx.ui.notify(
-					`Workflow settings saved (${scopes}), but the runtime failed to switch model/thinking. Check provider/model names and API key.${suffix}`,
+					`Workflow settings saved (${scopes}), but the runtime failed to switch model/thinking/contextWindow. Check provider/model names and API key, and make sure contextWindow is inside the acceptable range.${suffix}`,
 					"warning",
 				);
 			} else if (reloadNeeded) {
@@ -1173,7 +1397,7 @@ export function registerWorkflowSettingsCommand(
 				);
 			} else {
 				ctx.ui.notify(
-					`Workflow settings saved (${scopes}). Model/thinking changes apply to the current and later turns.`,
+					`Workflow settings saved (${scopes}). Model/thinking/contextWindow changes apply to the current and later turns.`,
 					"info",
 				);
 			}
@@ -1335,12 +1559,12 @@ async function runRpcSettingsWizard(
 	const scopes = [...changedScopes].join(", ");
 	if (!runtimeApplied) {
 		ctx.ui.notify(
-			`Workflow settings saved (${scopes}), but the runtime failed to switch model/thinking. Check provider/model names and API key.`,
+			`Workflow settings saved (${scopes}), but the runtime failed to switch model/thinking/contextWindow. Check provider/model names and API key, and make sure contextWindow is inside the acceptable range.`,
 			"warning",
 		);
 	} else {
 		ctx.ui.notify(
-			`Workflow settings saved (${scopes}). Model/thinking changes apply to the current and later turns.`,
+			`Workflow settings saved (${scopes}). Model/thinking/contextWindow changes apply to the current and later turns.`,
 			"info",
 		);
 	}
@@ -1414,11 +1638,36 @@ async function editRpcSettingValue(
 			[label, ...providers],
 		);
 		if (!providerChoice) return;
+		const layer = readLayer(scope, cwd, agentDir, sessionKey);
+		const paths = modelPaths(desc.role);
 		if (providerChoice === label) {
-			const layer = readLayer(scope, cwd, agentDir, sessionKey);
-			const paths = modelPaths(desc.role);
 			unsetPath(layer, paths.provider);
 			unsetPath(layer, paths.model);
+			// Clearing this scope's model re-checks any RETAINED contextWindow
+			// (this layer or below, merged up to the editing scope).
+			const candidate = buildCandidateConfigUpToScope(
+				scope,
+				JSON.parse(JSON.stringify(layer)),
+				cwd,
+				agentDir,
+				ctx,
+			);
+			const check = validateRoleContextWindowCandidate(
+				candidate.models[desc.role],
+				ctx.modelRegistry,
+				loadDiskCompactionSnapshot(
+					cwd,
+					agentDir,
+					typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+				),
+			);
+			if (!check.ok) {
+				ctx.ui.notify(
+					`模型清除未保存：${check.error} 先清除或调整 contextWindow 后重试。`,
+					"error",
+				);
+				return;
+			}
 			await commitRpcWrite(ctx, scope, layer, cwd, agentDir, sessionKey, changedScopes);
 			return;
 		}
@@ -1431,10 +1680,97 @@ async function editRpcSettingValue(
 			modelLabels,
 		);
 		if (!modelChoice) return;
-		const layer = readLayer(scope, cwd, agentDir, sessionKey);
-		const paths = modelPaths(desc.role);
 		setPath(layer, paths.provider, providerChoice);
 		setPath(layer, paths.model, modelChoice);
+		// Selection re-checks the retained contextWindow against the NEW model
+		// (candidate merged up to the editing scope) — reject broken combos.
+		const candidate = buildCandidateConfigUpToScope(
+			scope,
+			JSON.parse(JSON.stringify(layer)),
+			cwd,
+			agentDir,
+			ctx,
+		);
+		const check = validateRoleContextWindowCandidate(
+			candidate.models[desc.role],
+			ctx.modelRegistry,
+			loadDiskCompactionSnapshot(
+				cwd,
+				agentDir,
+				typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+			),
+		);
+		if (!check.ok) {
+			ctx.ui.notify(
+				`模型选择未保存：${check.error} 先清除或调整 contextWindow 后重试。`,
+				"error",
+			);
+			return;
+		}
+		await commitRpcWrite(ctx, scope, layer, cwd, agentDir, sessionKey, changedScopes);
+		return;
+	}
+
+	if (desc.kind === "contextWindow" && desc.role) {
+		// Context window: single-line input (tokens). Blank clears this scope's
+		// override (always allowed); a value is strictly parsed and validated
+		// against the candidate merge before any write; cancel keeps the original.
+		const raw = getPath(readLayer(scope, cwd, agentDir, sessionKey), desc.path);
+		const initial = raw === undefined || raw === null ? "" : String(raw);
+		// Surface the Pi default window and the acceptable range BEFORE input
+		// (parity with the TUI description line).
+		const rangeHint = contextWindowRangeHint(
+			effective.models[desc.role],
+			ctx.modelRegistry,
+			loadDiskCompactionSnapshot(
+				cwd,
+				agentDir,
+				typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+			),
+		);
+		const value = await ctx.ui.input(
+			`${desc.label} (tokens) — blank = ${label} · ${rangeHint}`,
+			initial,
+		);
+		if (value === undefined) return;
+		const trimmed = value.trim();
+		const layer = readLayer(scope, cwd, agentDir, sessionKey);
+		if (trimmed === "") {
+			unsetPath(layer, desc.path);
+			await commitRpcWrite(ctx, scope, layer, cwd, agentDir, sessionKey, changedScopes);
+			return;
+		}
+		const parsed = parseContextWindowInput(trimmed);
+		if (!parsed.ok) {
+			ctx.ui.notify(`Workflow settings: ${parsed.error}`, "error");
+			return;
+		}
+		const candidateLayer = JSON.parse(JSON.stringify(layer));
+		setPath(candidateLayer, desc.path, parsed.value);
+		const candidate = buildCandidateConfigUpToScope(
+			scope,
+			candidateLayer,
+			cwd,
+			agentDir,
+			ctx,
+		);
+		const check = validateRoleContextWindowCandidate(
+			candidate.models[desc.role],
+			ctx.modelRegistry,
+			loadDiskCompactionSnapshot(
+				cwd,
+				agentDir,
+				typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+			),
+		);
+		if (!check.ok) {
+			ctx.ui.notify(
+				`Workflow settings: contextWindow 未保存 — ${check.error}`,
+				"error",
+			);
+			return;
+		}
+		setPath(layer, desc.path, parsed.value);
 		await commitRpcWrite(ctx, scope, layer, cwd, agentDir, sessionKey, changedScopes);
 		return;
 	}

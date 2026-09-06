@@ -28,7 +28,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { reviewHistoryPath } from "./paths.js";
-import type { OcrFinding, TodoItem } from "./types.js";
+import type { OcrFinding, ReviewerContextBasis, TodoItem } from "./types.js";
+import { serializeReviewerContextBasis } from "./model-context.js";
 
 // ── Bounds ──────────────────────────────────────────────────────────────────
 
@@ -439,6 +440,11 @@ export function normalizeWorkFeedback(raw: unknown): string | undefined {
  * invalidates unchanged-diff reuse of rounds produced under the older
  * protocol in one shot.
  *
+ * `reviewerContext` participates unconditionally when provided (the tool
+ * layer always passes it), so a changed window override, Pi baseline, or
+ * compaction parameter breaks short-circuit reuse in one shot. Omitting it
+ * keeps the legacy body shape byte-identical (pre-context test fixtures).
+ *
  * Feedback is idempotently re-normalized here so future call sites cannot
  * drift; a missing/blank feedback contributes NO key, keeping the hash body
  * byte-identical to the pre-feedback algorithm (modulo the protocolText key)
@@ -454,6 +460,8 @@ export function computeTaskInputHash(input: {
 	reviewModel: string;
 	/** Current Implementation Review protocol text (single constant source). */
 	protocolText: string;
+	/** Structured context basis (configured/baseline/effective/compaction). */
+	reviewerContext?: ReviewerContextBasis;
 	/** Optional non-authoritative Work feedback on prior-round findings. */
 	feedback?: string;
 }): string {
@@ -471,6 +479,9 @@ export function computeTaskInputHash(input: {
 		includeOcr: input.includeOcr,
 		reviewModel: input.reviewModel,
 		protocolText: input.protocolText,
+		...(input.reviewerContext !== undefined
+			? { reviewerContext: serializeReviewerContextBasis(input.reviewerContext) }
+			: {}),
 		...(feedback !== undefined ? { feedback } : {}),
 	};
 	return crypto.createHash("sha1").update(JSON.stringify(body)).digest("hex");

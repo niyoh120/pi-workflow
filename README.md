@@ -129,6 +129,72 @@ Set `workflow.autoEnter: true` to enable workflow commands and tools automatical
 
 See `config.json.example` for the canonical config template.
 
+### Per-role context window (`contextWindow`)
+
+Each model role may set an optional `contextWindow` (tokens) to run that role
+on a SMALLER Pi context window:
+
+```json
+{
+  "models": {
+    "explore": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-5",
+      "thinking": "medium",
+      "contextWindow": 120000
+    }
+  }
+}
+```
+
+Rules:
+
+- The value must be a decimal integer (JSON `number`) that is **strictly less
+  than the Pi default window** for the role's model (equality is rejected) and
+  **greater than the Pi compaction reserve** (`reserveTokens + keepRecentTokens`,
+  defaults `16384 + 20000`). The acceptable range is shown in
+  `/workflow:settings` and in the apply error message.
+- Omitting the field (or clearing it in `/workflow:settings`) inherits the
+  Pi model's own window. Invalid values are never silently clamped or dropped:
+  they fail the role apply / settings save with an explicit error, and the
+  config stays readable so the field can be repaired.
+- The runtime applies the override as a **shallow clone** of the registry
+  model — the registry object itself is never modified, and provider/id/auth/
+  maxTokens/compat stay identical. A manual `/model` selection that differs
+  from the role config keeps the user's model (and its window) untouched.
+- The override is re-applied idempotently: mode transitions and settings saves
+  apply it explicitly; session restore (`session_start`/`before_agent_start`)
+  and `model_select`/`session_tree` re-apply it only when the active model
+  matches the role config and the window drifted (manual same-id re-select,
+  tree navigation, `/reload`). Steady state performs zero extra model
+  switches, and the user's thinking level is preserved. Clearing the field,
+  switching to a role without an override, `/workflow:disable`,
+  `/workflow:reset`, and session shutdown release the workflow-owned clone.
+- **Output budget side effect**: Pi clamps each request's `maxTokens` to
+  `contextWindow − estimated context − safety margin`, so a smaller window can
+  reduce the real per-request output budget and end generations with `length`
+  earlier, and increases compaction frequency. Leave generous headroom — the
+  lower bound is a floor, not a guarantee that every prompt/output combination
+  fits.
+- Main-session validation reads a **trust-aware disk snapshot** of Pi settings
+  (the live in-session SettingsManager is not exposed to extensions), so a
+  compaction setting saved moments ago may not be reflected until Pi flushes
+  it. The two reviewer agents share one SettingsManager instance between
+  validation, the child resource loader, and the child session — with project
+  trust aligned to the parent session. Compatibility note: previously the
+  child session defaulted to trusting the project; in untrusted projects the
+  reviewer now uses global/default compaction settings.
+- Reviewer caches: both reviewer cache hashes (plan-review basis hash and
+  implementation-review task-input hash) include the structured context basis
+  (configured override, Pi baseline, effective window, compaction snapshot).
+  Changing any of them invalidates short-circuit reuse; an invalid configured
+  window errors before any cached verdict is returned. Existing caches
+  invalidate once on upgrade.
+
+`/workflow:status` shows `configured contextWindow`, the `pi baseline window`,
+the `active runtime contextWindow`, and the workflow window ownership state to
+help locate a stale/lost override or a failed apply.
+
 ### Unified Review (on-demand tool)
 
 Review is an **on-demand** feature — when `review.enabled` is `true` (default), `/workflow:review` and the `workflow_review` tool become available in Work Mode. `codeReview.enabled` controls whether the Review folds a workspace OCR pass into the reviewer task.
@@ -147,6 +213,8 @@ The Work agent's reasoning, thinking, tool results, execution summaries, diffs, 
 **Read-only safety boundary.** An inline child extension reuses the existing pure path guards: direct reads of `.pi/workflow/` are blocked (in BOTH the main checkout and active worktree), and `write`/`edit` are confined to the Plan scratch root (`/tmp/pi-workflow-plan-scratch/`). Bash mutation is governed by the reviewer system prompt (read-only + scratch probes only).
 
 **Runtime budget.** A single 30-minute total timeout (`1_800_000ms`) bounds the reviewer run, combined with the parent turn's AbortSignal. OCR shares the same parent signal. The child session is always disposed in `finally`; timeout or user cancellation aborts the active AgentSession and returns an explicit tool error.
+
+**Model / settings preparation.** Before any cache decision, the tool layer prepares the reviewer child once: it creates the child ModelRuntime (same `auth.json`/`models.json` plus in-memory provider registrations), resolves the configured `models.planReview`/`models.review` model, applies the validated `contextWindow` clone when configured, and builds ONE SettingsManager that feeds the window-validation lower bound, the child `DefaultResourceLoader`, AND the child `AgentSession`. Project trust follows the parent session (`ctx.isProjectTrusted()`). Compatibility note: the child session previously defaulted to trusting the project; in untrusted projects the reviewer now uses global/default compaction settings. The structured context basis (configured override, Pi baseline, effective window, compaction snapshot) feeds both reviewer cache hashes, and an invalid configured window errors out before any cached verdict is returned.
 
 **Result.** The tool takes a single optional `feedback` argument (free text responding to a prior round's disputed findings); the reviewer task is otherwise assembled from workflow state. The final text keeps the `Critical / Important / Minor / Summary` structure with concrete repository evidence, and the result carries aggregated nested usage on its top-level `usage` field plus operational metadata (reviewer model/thinking, elapsed time, turns, tool-call count, requested/active/unavailable tools, OCR enabled/counts/rawPath, verdict, stop reason/error). The verdict is **transient**: PASS means the review loop can end; it is never written to workflow state and never gates `/workflow:commit`.
 
@@ -188,6 +256,7 @@ Flow:
 2. Edit options in a searchable list:
    - `models.<role>.provider` / `models.<role>.model` — free-text input (clear the field to inherit).
    - `models.<role>.thinking` — cycle through `inherit / off / minimal / low / medium / high / xhigh / max`.
+   - `models.<role>.contextWindow` — decimal-integer token input (blank = inherit). The row shows the Pi default window and the acceptable range; invalid input is rejected with an error and the config keeps its previous value. Changing a provider/model re-checks any retained window against the new model before the write.
    - `workflow.autoEnter`, `planReview.enabled`, `review.enabled` — toggle through `inherit / true / false` (**Project / Global scopes only**, see below). `codeReview.enabled` (Review OCR toggle) is editable in all scopes including Session.
 3. Press Esc to return to the scope picker; pick **Done** to finish.
 
@@ -209,13 +278,15 @@ layer, letting lower layers take over.
 
 ### When changes take effect
 
-- **Model / thinking** changes apply immediately to the current and later turns
+- **Model / thinking / contextWindow** changes apply immediately to the current and later turns
   (the active mode's model is re-applied when the menu closes). These are
   editable in all three scopes. Note: inside a workflow mode, manual model
   or thinking switches made via `/model`, Ctrl+P, or Shift+Tab are preserved
   across turns, `/reload`, and `/resume` — workflow only re-applies the role
-  config on explicit mode transitions and `/workflow:settings` saves. Use `/workflow:status`
-  to compare the active runtime model/thinking against the configured role.
+  config on explicit mode transitions and `/workflow:settings` saves. A
+  configured `contextWindow` is re-applied idempotently when the active model
+  matches the role config (see [Per-role context window](#per-role-context-window-contextwindow)). Use `/workflow:status`
+  to compare the active runtime model/thinking/window against the configured role.
 - **`workflow.autoEnter`, `planReview.enabled`, `review.enabled`** gate
   command/tool registration, which happens at extension load time using the
   Project/Global layers. They are editable only in **Project** and **Global**

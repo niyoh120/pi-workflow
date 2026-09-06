@@ -534,5 +534,84 @@ console.log("\n=== Test 5: scoped-first model candidates helper ===");
 	}
 }
 
+// ── Test 7: RPC contextWindow editing — real event-dispatch path ────────
+console.log("\n=== Test 7: RPC contextWindow session-scope editing ===");
+{
+	// Drives the REAL RPC wizard: session scope → plan · contextWindow →
+	// invalid parse ("abc") → invalid value (250000 ≥ Pi baseline for
+	// claude-opus-4-5) → valid value (150000). The two invalid inputs must be
+	// rejected with error notifies and leave nothing persisted; the valid one
+	// must land in the session layer as a number.
+	const tmpCwd7 = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wf-rpc-ctx-"));
+	try {
+		const pickCtxWindow = (event) => {
+			const items = Array.isArray(event.options) ? event.options : [];
+			const hit = items.find((o) => typeof o === "string" && o.includes("plan · contextWindow"));
+			return hit !== undefined ? { value: hit } : { cancelled: true };
+		};
+		const responses = [
+			{ value: "session" },      // scope selector
+			pickCtxWindow,             // setting selector (first attempt)
+			{ value: "abc" },          // input: non-integer → parse error, no write
+			pickCtxWindow,             // setting selector (second attempt)
+			{ value: "250000" },       // input: ≥ Pi baseline → validation reject, no write
+			pickCtxWindow,             // setting selector (third attempt)
+			{ value: "150000" },       // input: valid → write
+			{ value: "(back to scopes)" },
+			{ value: "done" },
+		];
+		const result = await runRpcInteractive(
+			RPC_ARGS,
+			"/workflow:settings",
+			tmpCwd7,
+			RPC_ENV,
+			responses,
+			{ timeoutMs: 30000 },
+		);
+
+		const notifies = result.uiRequests.filter(
+			(e) => e.method === "notify" && typeof e.message === "string",
+		);
+		assert(
+			notifies.some((e) => e.message.includes("请输入十进制整数")),
+			"non-integer input surfaces the strict parse error",
+		);
+		assert(
+			notifies.some((e) => e.message.includes("严格小于") && e.message.includes("未保存")),
+			"a value at/above the Pi baseline is rejected with the bound error and NOT saved",
+		);
+
+		// The session layer must now contain ONLY the valid value as a number.
+		const stateFiles = [];
+		const walk = (dir) => {
+			for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+				const p = path.join(dir, entry.name);
+				if (entry.isDirectory()) walk(p);
+				else if (entry.name === "state.json") stateFiles.push(p);
+			}
+		};
+		walk(path.join(tmpCwd7, ".pi", "workflow"));
+		const states = stateFiles.map((p) => JSON.parse(fs.readFileSync(p, "utf8")));
+		const withWindow = states.filter(
+			(s) => s?.sessionConfig?.models?.plan?.contextWindow !== undefined,
+		);
+		assert(
+			withWindow.length === 1 &&
+				withWindow[0].sessionConfig.models.plan.contextWindow === 150000 &&
+				typeof withWindow[0].sessionConfig.models.plan.contextWindow === "number",
+			"the valid value is persisted to the session layer as a JSON number",
+		);
+
+		const response = result.events.find((e) => e.type === "response");
+		if (!response || response.success !== true) {
+			console.error(`  stderr: ${result.stderr.slice(0, 2000)}`);
+			console.error(`  exit code: ${result.code}`);
+		}
+		assert(!!response && response.success === true, "RPC contextWindow settings prompt accepted");
+	} finally {
+		fs.rmSync(tmpCwd7, { recursive: true, force: true });
+	}
+}
+
 console.log(`\n${runs - failures}/${runs} checks passed.`);
 if (failures > 0) process.exit(1);

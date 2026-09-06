@@ -49,6 +49,7 @@ import type { ModelSpec, OcrFinding, TodoItem } from "./types.js";
 import {
 	type ReviewBranchEntry,
 	type PlanReviewAgentResult,
+	type PreparedReviewerModel,
 	extractUserRequirements,
 	runIndependentReviewer,
 	type ReviewerSafetyRoots,
@@ -529,6 +530,10 @@ export interface RunReviewAgentOptions {
 	ctx: ExtensionContext;
 	pi: ExtensionAPI;
 	modelSpec: ModelSpec;
+	/** Prepared by prepareReviewerModelPlan BEFORE the cache decision: child
+	 *  runtime, validated (possibly cloned) model, thinking level, and the
+	 *  SettingsManager shared by validation, loader, and child session. */
+	prepared: PreparedReviewerModel;
 	/** Active session branch (from sessionManager.getBranch()). */
 	branch: ReviewBranchEntry[] | undefined;
 	/** Session leaf captured when /workflow:plan started (Approved Work). */
@@ -587,6 +592,7 @@ export async function runReviewAgent(
 		ctx,
 		pi,
 		modelSpec,
+		prepared,
 		branch,
 		planStartEntryId,
 		workStartEntryId,
@@ -712,6 +718,7 @@ export async function runReviewAgent(
 		ctx,
 		pi,
 		modelSpec,
+		prepared,
 		task,
 		systemPrompt: REVIEWER_SYSTEM_PROMPT,
 		reviewCwd,

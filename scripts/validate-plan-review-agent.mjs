@@ -884,6 +884,9 @@ console.log("\n=== Part 8b: review-round history helpers ===");
 			'import crypto from "node:crypto";',
 			// normalizeWorkFeedback references WORK_FEEDBACK_TEXT_BUDGET + boundedHeadTail.
 			"const WORK_FEEDBACK_TEXT_BUDGET = 20_000;",
+			// computeTaskInputHash references serializeReviewerContextBasis (model-context.ts)
+			// when a reviewerContext basis is provided.
+			extractDecl(read("extensions/workflow/model-context.ts"), "export function serializeReviewerContextBasis("),
 			todoHashFn,
 			changedFn,
 			headTailFn,
@@ -925,6 +928,14 @@ console.log("\n=== Part 8b: review-round history helpers ===");
 	assert(taskA === taskB, "task input hash is stable for equal inputs");
 	assert(taskA !== taskC, "task input hash changes when a requirement changes");
 	assert(taskA !== taskProto, "task input hash changes when the reviewer protocol text changes (old-protocol caches invalidate)");
+	// Structured reviewer context basis participates when provided: window
+	// override / baseline / compaction changes all break short-circuit reuse.
+	const ctxBasis = { piBaseline: 200_000, effective: 200_000, compaction: { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 } };
+	const taskCtx = histMod.computeTaskInputHash({ ...taskBaseInput, reviewerContext: ctxBasis });
+	assert(taskCtx === histMod.computeTaskInputHash({ ...taskBaseInput, reviewerContext: { ...ctxBasis } }), "task hash is stable for equal reviewer context basis");
+	assert(taskCtx !== taskA, "adding a reviewer context basis changes the task hash (old caches invalidate one-time)");
+	assert(taskCtx !== histMod.computeTaskInputHash({ ...taskBaseInput, reviewerContext: { ...ctxBasis, configured: 120_000, effective: 120_000 } }), "contextWindow override change → task hash changes");
+	assert(taskCtx !== histMod.computeTaskInputHash({ ...taskBaseInput, reviewerContext: { ...ctxBasis, compaction: { ...ctxBasis.compaction, keepRecentTokens: 8_000 } } }), "compaction change → task hash changes");
 
 	// ── normalizeWorkFeedback + feedback-aware task hash ──
 	assert(histMod.normalizeWorkFeedback(undefined) === undefined, "normalizeWorkFeedback(undefined) → undefined");
@@ -1289,6 +1300,7 @@ console.log("\n=== Part 11: plan-review history pure functions ===");
 			extractDecl(read("extensions/workflow/review-history.ts"), "export function boundedHeadTail("),
 			extractDecl(read("extensions/workflow/review-history.ts"), "export function normalizeWorkFeedback("),
 			"export const normalizePlanReviewFeedback = normalizeWorkFeedback;",
+			extractDecl(read("extensions/workflow/model-context.ts"), "export function serializeReviewerContextBasis("),
 			extractDecl(histTs, "function matchAtxHeading("),
 			extractDecl(histTs, "function isFenceLine("),
 			extractDecl(histTs, "function fenceMarker("),
@@ -1353,6 +1365,11 @@ console.log("\n=== Part 11: plan-review history pure functions ===");
 	assert(delta.removed.join(",") === "Removed", "delta reports removed sections");
 
 	// ── basis hash ──
+	const basisContext = {
+		piBaseline: 200_000,
+		effective: 200_000,
+		compaction: { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 },
+	};
 	const basisA = {
 		requirements: ["build X"],
 		reviewerModel: "p/m",
@@ -1360,6 +1377,7 @@ console.log("\n=== Part 11: plan-review history pure functions ===");
 		requestedTools: ["read", "bash", "web_search"],
 		extensionPaths: ["/a.ts", "/b.ts"],
 		protocolText: "PROTOCOL-V1",
+		reviewerContext: basisContext,
 	};
 	assert(histMod.computePlanReviewBasisHash(basisA) === histMod.computePlanReviewBasisHash({ ...basisA }), "basis hash is stable for equal inputs");
 	assert(histMod.computePlanReviewBasisHash(basisA) === histMod.computePlanReviewBasisHash({ ...basisA, requestedTools: [...basisA.requestedTools].reverse(), extensionPaths: [...basisA.extensionPaths].reverse() }), "basis hash is order-insensitive for tools/extension paths");
@@ -1368,6 +1386,9 @@ console.log("\n=== Part 11: plan-review history pure functions ===");
 	assert(histMod.computePlanReviewBasisHash(basisA) !== histMod.computePlanReviewBasisHash({ ...basisA, reviewerModel: "p/m2" }), "reviewer model change → basis hash changes");
 	assert(histMod.computePlanReviewBasisHash(basisA) !== histMod.computePlanReviewBasisHash({ ...basisA, requestedTools: [...basisA.requestedTools, "mcp__x"] }), "tool surface change → basis hash changes");
 	assert(histMod.computePlanReviewBasisHash(basisA) !== histMod.computePlanReviewBasisHash({ ...basisA, extensionPaths: ["/c.ts"] }), "extension path change → basis hash changes");
+	assert(histMod.computePlanReviewBasisHash(basisA) !== histMod.computePlanReviewBasisHash({ ...basisA, reviewerContext: { ...basisContext, configured: 120_000, effective: 120_000 } }), "context-window override presence → basis hash changes");
+	assert(histMod.computePlanReviewBasisHash(basisA) !== histMod.computePlanReviewBasisHash({ ...basisA, reviewerContext: { ...basisContext, piBaseline: 400_000 } }), "Pi baseline window change → basis hash changes");
+	assert(histMod.computePlanReviewBasisHash(basisA) !== histMod.computePlanReviewBasisHash({ ...basisA, reviewerContext: { ...basisContext, compaction: { ...basisContext.compaction, reserveTokens: 32_768 } } }), "compaction parameter change → basis hash changes");
 
 	// ── decision/plan/task hashes ──
 	const decisions1 = [{ question: "q1", recommendedAnswer: "r1", decisionStatus: "resolved" }];

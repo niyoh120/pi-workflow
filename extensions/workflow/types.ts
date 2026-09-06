@@ -60,6 +60,37 @@ export interface ModelSpec {
 	provider: string;
 	model: string;
 	thinking?: Thinking;
+	/**
+	 * Optional per-role context window override in TOKENS. When set, the role
+	 * model is applied as a shallow clone with this contextWindow — strictly
+	 * validated at the apply boundary (positive safe integer, greater than
+	 * reserveTokens + keepRecentTokens, strictly less than the Pi registry
+	 * baseline). Omitted everywhere = inherit the Pi model's own window.
+	 * Invalid values are preserved by config normalization and reported at the
+	 * apply/settings boundary so the editor can still open and clear them.
+	 */
+	contextWindow?: number;
+}
+
+/**
+ * Structured context-window basis shared by both reviewer cache hashes
+ * (plan-review basis hash and implementation-review task-input hash). Every
+ * field participates in the hash so a changed override, Pi baseline,
+ * effective window, or compaction parameter invalidates short-circuit reuse.
+ */
+export interface ReviewerContextBasis {
+	/** Configured override value (tokens); undefined when the role inherits. */
+	configured?: number;
+	/** Raw Pi model contextWindow before any workflow cloning. */
+	piBaseline: number;
+	/** contextWindow the reviewer child will actually run with. */
+	effective: number;
+	/** Compaction parameters snapshot used for this round's validation + child. */
+	compaction: {
+		enabled: boolean;
+		reserveTokens: number;
+		keepRecentTokens: number;
+	};
 }
 
 /**

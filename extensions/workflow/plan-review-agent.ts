@@ -49,6 +49,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type {
+	Model,
 	StopReason,
 	ThinkingLevel,
 	Usage,
@@ -59,11 +60,16 @@ import { tmpdir } from "node:os";
 import type {
 	GrillTurn,
 	ModelSpec,
+	ReviewerContextBasis,
 	ReviewerVerdict,
 	Thinking,
 } from "./types.js";
 import { workflowManagedToolNames } from "./mode.js";
 import { isAllowedPlanScratchPath, isWorkflowDataPath } from "./guards.js";
+import {
+	prepareModelWithContextWindow,
+	readCompactionSnapshot,
+} from "./model-context.js";
 import type {
 	PlanSectionDelta,
 	PreviousPlanReviewRoundInput,
@@ -732,6 +738,125 @@ export function createReviewerSafetyExtension(roots: ReviewerSafetyRoots): Inlin
 // ── Child model runtime ─────────────────────────────────────────────────────
 
 /**
+ * Everything the shared runner needs to spawn the reviewer child — prepared
+ * ONCE by the tool layer BEFORE the cache decision so the cache hashes and
+ * the actual child inputs share one snapshot:
+ *  - childRuntime: same auth.json/models.json + parent in-memory providers;
+ *  - model: resolved with the child's priority (childRuntime.getModel ??
+ *    ctx.modelRegistry.find), already shallow-cloned with the validated
+ *    contextWindow override when one is configured;
+ *  - settingsManager: the SAME instance later handed to both
+ *    DefaultResourceLoader and createAgentSession, so the validation lower
+ *    bound and the child's actual compaction parameters cannot drift. Project
+ *    trust is aligned with the parent session (previously the child session
+ *    defaulted to trusting the project — untrusted projects now use
+ *    global/default compaction settings, a documented tightening);
+ *  - contextBasis: structured context-window basis for the cache hashes.
+ */
+export interface PreparedReviewerModel {
+	childRuntime: ModelRuntime;
+	model: Model<any>;
+	/** Derived thinking level for the child (undefined = off/unset). */
+	thinkingLevel: ThinkingLevel | undefined;
+	settingsManager: SettingsManager;
+	/** Structured context basis — feeds both reviewer cache hashes. */
+	contextBasis: ReviewerContextBasis;
+}
+
+/**
+ * Prepare the reviewer child model/session inputs. Throws an explicit error
+ * when the configured model is unresolvable or the configured contextWindow
+ * fails validation — callers surface this as a tool error BEFORE any cached
+ * verdict is returned, so an illegal configuration can never hide behind a
+ * short-circuit.
+ */
+export async function prepareReviewerModelPlan(opts: {
+	ctx: ExtensionContext;
+	modelSpec: ModelSpec;
+	/** Validated cwd the reviewer runs in (worktree or main checkout). */
+	reviewCwd: string;
+	/** Label for error messages, e.g. "Plan review" / "Review". */
+	progressLabel: string;
+}): Promise<PreparedReviewerModel> {
+	const { ctx, modelSpec, reviewCwd, progressLabel } = opts;
+	const reviewerLabel = `${modelSpec.provider}/${modelSpec.model}`;
+	const agentDir = getAgentDir();
+
+	const childRuntime = await createChildModelRuntime(ctx, agentDir);
+	const baselineModel =
+		childRuntime.getModel(modelSpec.provider, modelSpec.model) ??
+		ctx.modelRegistry.find(modelSpec.provider, modelSpec.model);
+	if (!baselineModel) {
+		throw new Error(`${progressLabel} model not found: ${reviewerLabel}`);
+	}
+
+	let settingsManager: SettingsManager;
+	try {
+		settingsManager = SettingsManager.create(reviewCwd, agentDir, {
+			projectTrusted: ctx.isProjectTrusted(),
+		});
+	} catch {
+		settingsManager = SettingsManager.inMemory();
+	}
+	const compaction = readCompactionSnapshot(settingsManager);
+
+	let model = baselineModel;
+	if (modelSpec.contextWindow !== undefined) {
+		// Mirror the main-session strictness (loadDiskCompactionSnapshot): a
+		// corrupt Pi settings file must not silently provide the window lower
+		// bound from SDK defaults. Only enforced when a window is configured —
+		// no-window reviews keep running, and the context basis hash reflects
+		// the compaction params the child session actually uses.
+		const settingsErrors = settingsManager.drainErrors();
+		if (settingsErrors.length > 0) {
+			const detail = settingsErrors
+				.map((e) => `${e.scope}${e.path ? ` (${e.path})` : ""}: ${e.error?.message ?? String(e.error)}`)
+				.join("; ");
+			throw new Error(
+				`${progressLabel} contextWindow 校验被跳过：Pi settings 加载失败（${detail}）。` +
+					`请修复 settings.json 或清除该角色的 contextWindow（继承 Pi 默认窗口）。`,
+			);
+		}
+		const prepared = prepareModelWithContextWindow(
+			baselineModel,
+			modelSpec.contextWindow,
+			compaction,
+		);
+		if (!prepared.ok) {
+			throw new Error(
+				`${progressLabel} contextWindow 无效（${reviewerLabel}，输入 ${modelSpec.contextWindow}）：` +
+					`${prepared.error} 请清除该角色的 contextWindow 或改为区间内的整数。`,
+			);
+		}
+		model = prepared.model;
+	}
+
+	const thinkingLevel: ThinkingLevel | undefined =
+		modelSpec.thinking && modelSpec.thinking !== "off"
+			? (modelSpec.thinking as ThinkingLevel)
+			: undefined;
+
+	return {
+		childRuntime,
+		model,
+		thinkingLevel,
+		settingsManager,
+		contextBasis: {
+			...(modelSpec.contextWindow !== undefined
+				? { configured: modelSpec.contextWindow }
+				: {}),
+			piBaseline: baselineModel.contextWindow,
+			effective: model.contextWindow,
+			compaction: {
+				enabled: compaction.enabled,
+				reserveTokens: compaction.reserveTokens,
+				keepRecentTokens: compaction.keepRecentTokens,
+			},
+		},
+	};
+}
+
+/**
  * Create a child ModelRuntime reading the same auth.json / models.json as the
  * parent, then best-effort copy runtime-only provider registrations and API
  * keys that live in memory (set via pi.registerProvider / setRuntimeApiKey)
@@ -832,6 +957,8 @@ export interface RunPlanReviewAgentOptions {
 	ctx: ExtensionContext;
 	pi: ExtensionAPI;
 	modelSpec: ModelSpec;
+	/** Precomputed reviewer model/runtime/settings snapshot (tools layer). */
+	prepared: PreparedReviewerModel;
 	planMarkdown: string;
 	decisions: GrillTurn[];
 	/** Authoritative user requirements, extracted ONCE by the tool layer so
@@ -870,6 +997,11 @@ export interface RunIndependentReviewerOptions {
 	ctx: ExtensionContext;
 	pi: ExtensionAPI;
 	modelSpec: ModelSpec;
+	/** Prepared by prepareReviewerModelPlan BEFORE the cache decision: child
+	 *  runtime, validated (possibly cloned) model, thinking level, and the
+	 *  SettingsManager shared by validation, DefaultResourceLoader, and
+	 *  createAgentSession. */
+	prepared: PreparedReviewerModel;
 	/** Fully-assembled authoritative task (requirements + plan/decisions or
 	 *  lifecycle requirements + todos). The runner passes it verbatim. */
 	task: string;
@@ -908,7 +1040,7 @@ export interface RunIndependentReviewerOptions {
 export async function runIndependentReviewer(
 	opts: RunIndependentReviewerOptions,
 ): Promise<PlanReviewAgentResult> {
-	const { ctx, pi, modelSpec, task, systemPrompt, reviewCwd, safetyRoots, progressLabel } =
+	const { ctx, pi, modelSpec, prepared, task, systemPrompt, reviewCwd, safetyRoots, progressLabel } =
 		opts;
 	const reviewerLabel = `${modelSpec.provider}/${modelSpec.model}`;
 	const labelSlug = progressLabel.toLowerCase().replace(/\s+/g, "-");
@@ -926,32 +1058,20 @@ export async function runIndependentReviewer(
 	// session settles (last successful submission wins).
 	const submitCollector = createReviewSubmitCollector();
 
-	// ── Model / auth ──
+	// ── Model / auth / settings — all from the prepared snapshot ──
+	// The model may be a context-window clone validated by the same
+	// SettingsManager that feeds the child's resource loader and session.
 	const agentDir = getAgentDir();
-	const childRuntime = await createChildModelRuntime(ctx, agentDir);
-
-	const model =
-		childRuntime.getModel(modelSpec.provider, modelSpec.model) ??
-		ctx.modelRegistry.find(modelSpec.provider, modelSpec.model);
-	if (!model) {
-		throw new Error(`${progressLabel} model not found: ${reviewerLabel}`);
-	}
-
-	// Thinking level: pass the configured level; "off" disables reasoning.
-	const thinkingLevel: ThinkingLevel | undefined =
-		modelSpec.thinking && modelSpec.thinking !== "off"
-			? (modelSpec.thinking as ThinkingLevel)
-			: undefined;
+	const childRuntime = prepared.childRuntime;
+	const model = prepared.model;
+	const thinkingLevel = prepared.thinkingLevel;
+	const settingsManager = prepared.settingsManager;
 
 	// ── Resource loader: project context + skills + active extensions only ──
 	// Use reviewCwd so the reviewer sees the worktree's project context when
-	// running inside an active worktree.
-	let settingsManager: SettingsManager;
-	try {
-		settingsManager = SettingsManager.create(reviewCwd, agentDir);
-	} catch {
-		settingsManager = SettingsManager.inMemory();
-	}
+	// running inside an active worktree. The SAME prepared SettingsManager
+	// feeds this loader and the child AgentSession below, so compaction
+	// parameters match the ones the window lower bound was validated against.
 	const resourceLoader = new DefaultResourceLoader({
 		cwd: reviewCwd,
 		agentDir,
@@ -987,6 +1107,9 @@ export async function runIndependentReviewer(
 		thinkingLevel,
 		tools: [...requestedTools, REVIEW_SUBMIT_TOOL_NAME],
 		resourceLoader,
+		// The SAME prepared SettingsManager as the resource loader and the
+		// window validation — one compaction-parameter source for the child.
+		settingsManager,
 		sessionManager: SessionManager.inMemory(reviewCwd),
 		sessionStartEvent: { type: "session_start", reason: "new" },
 	});
@@ -1200,7 +1323,7 @@ export async function runIndependentReviewer(
 export async function runPlanReviewAgent(
 	opts: RunPlanReviewAgentOptions,
 ): Promise<PlanReviewResult> {
-	const { ctx, modelSpec, planMarkdown, decisions, requirements } = opts;
+	const { ctx, modelSpec, prepared, planMarkdown, decisions, requirements } = opts;
 
 	// ── Authoritative task ──
 	const task = buildReviewerTask({
@@ -1217,6 +1340,7 @@ export async function runPlanReviewAgent(
 		ctx,
 		pi: opts.pi,
 		modelSpec,
+		prepared,
 		task,
 		systemPrompt: REVIEWER_SYSTEM_PROMPT,
 		reviewCwd: ctx.cwd,
