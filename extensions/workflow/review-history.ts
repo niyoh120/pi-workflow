@@ -4,17 +4,14 @@
  *
  * Why this exists: each workflow_review round spawns a FRESH reviewer that
  * cannot see the previous round's findings, so every round re-derives the
- * whole review from scratch and re-runs the expensive workspace OCR even when
- * the diff barely changed. This module persists each round's verdict + full
- * reviewer output + normalized OCR findings + a workspace diff fingerprint +
- * a hash of every review task input (authoritative inputs plus any present
- * non-authoritative Work feedback), keyed by work run, so the next
- * round can:
+ * whole review from scratch. This module persists each round's verdict + full
+ * reviewer output + a workspace diff fingerprint + a hash of every review
+ * task input (authoritative inputs plus any present non-authoritative Work
+ * feedback), keyed by work run, so the next round can:
  *
  *  1. inject the previous round's findings/evidence into the new reviewer
  *     task (re-disposition prior findings instead of re-deriving them);
- *  2. reuse cached OCR findings when the diff fingerprint is unchanged;
- *  3. short-circuit a review whose task inputs AND diff are identical to the
+ *  2. short-circuit a review whose task inputs AND diff are identical to the
  *     last round (same verdict, no re-run).
  *
  * The verdict remains TRANSIENT: this file lives beside session state but is
@@ -28,7 +25,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { reviewHistoryPath } from "./paths.js";
-import type { OcrFinding, ReviewerContextBasis, TodoItem } from "./types.js";
+import type { ReviewerContextBasis, TodoItem } from "./types.js";
 import { serializeReviewerContextBasis } from "./model-context.js";
 
 // ── Bounds ──────────────────────────────────────────────────────────────────
@@ -43,7 +40,7 @@ export const PREVIOUS_ROUND_TEXT_BUDGET = 60_000;
  *  the reviewer's context. */
 export const WORK_FEEDBACK_TEXT_BUDGET = 20_000;
 /** Untracked-file hashing bounds. Beyond these the diff fingerprint is marked
- *  unknown so OCR caching/short-circuit are skipped (a stale cache is worse
+ *  unknown so the same-input short-circuit is skipped (a stale reuse is worse
  *  than none). */
 export const MAX_UNTRACKED_FILES = 200;
 export const MAX_UNTRACKED_BYTES = 8 * 1024 * 1024;
@@ -61,7 +58,7 @@ export interface WorkspaceDiffSnapshot {
 	/** sha1 of each untracked file's content (key: relative path). */
 	untrackedHashes: Record<string, string>;
 	/** True when untracked-file hashing hit a bound — treat the diff as
-	 *  unverifiable (no OCR cache reuse, no short-circuit, full delta). */
+	 *  unverifiable (no short-circuit, full delta). */
 	unknown: boolean;
 }
 
@@ -78,20 +75,16 @@ export interface ReviewRoundRecord {
 	madeRepoToolCall: boolean;
 	/** Full reviewer output as surfaced by workflow_review. */
 	reviewerText: string;
-	ocrEnabled: boolean;
-	ocrCount: number;
-	ocrCounts: Record<string, number>;
-	ocrRawPath?: string;
-	/** Normalized OCR findings — the cache source for unchanged-diff rounds. */
-	ocrFindings: OcrFinding[];
+	/** True when this round injected a delegated code review spec. */
+	codeReviewEnabled: boolean;
 	diffFingerprint: string;
 	deltaUnknown: boolean;
 	fileHashes: Record<string, string>;
 	untrackedHashes: Record<string, string>;
 	todoHash: string;
-	/** Hash of the authoritative reviewer inputs (requirements/plan/todos/OCR
-	 *  flag/model) plus any present non-authoritative Work feedback. Identical
-	 *  inputs + identical diff ⇒ same verdict. */
+	/** Hash of the authoritative reviewer inputs (requirements/plan/todos/
+	 *  code-review flag/model) plus any present non-authoritative Work
+	 *  feedback. Identical inputs + identical diff ⇒ same verdict. */
 	taskInputHash: string;
 	/** True when this round was short-circuited (reused the previous round). */
 	shortCircuited: boolean;
@@ -185,13 +178,14 @@ export function saveReviewRound(
 /**
  * Compute the workspace diff snapshot in `cwd` (main checkout or active
  * worktree). Covers staged+unstaged changes vs HEAD and untracked file
- * contents — the same scope OCR reviews. Git failures (no repo, unborn HEAD)
+ * contents — the same scope the delegated code review covers. Git failures
+ * (no repo, unborn HEAD)
  * degrade to "no tracked changes" rather than aborting the review loop.
  */
 export function computeWorkspaceDiffSnapshot(cwd: string): WorkspaceDiffSnapshot {
 	// Not a git repository (or git unavailable): diff detection is unreliable,
-	// so mark the snapshot unknown — callers then skip OCR caching and the
-	// same-input short-circuit (a file change without git would otherwise look
+	// so mark the snapshot unknown — callers then skip the same-input
+	// short-circuit (a file change without git would otherwise look
 	// like "nothing changed").
 	const gitDir = runGit(["rev-parse", "--git-dir"], cwd).trim();
 	if (!gitDir) {
@@ -202,7 +196,7 @@ export function computeWorkspaceDiffSnapshot(cwd: string): WorkspaceDiffSnapshot
 	// `git diff HEAD` needs a commit. On an unborn HEAD fall back to
 	// worktree-vs-index + index-vs-empty so staged files still register.
 	// A diff exceeding maxBuffer must NOT be treated as "no changes" — it
-	// marks the snapshot unknown so callers skip OCR caching/short-circuit.
+	// marks the snapshot unknown so callers skip the short-circuit.
 	let unknown = false;
 	let diffOut: string;
 	try {
@@ -229,7 +223,7 @@ export function computeWorkspaceDiffSnapshot(cwd: string): WorkspaceDiffSnapshot
 	}
 
 	// Untracked files: hash contents (bounded). Beyond the bounds the diff is
-	// unverifiable — mark unknown so callers skip OCR caching/short-circuit.
+	// unverifiable — mark unknown so callers skip the short-circuit.
 	const untrackedHashes: Record<string, string> = {};
 	const untrackedNames = runGit(["ls-files", "--others", "--exclude-standard"], cwd)
 		.split("\n")
@@ -429,10 +423,10 @@ export function normalizeWorkFeedback(raw: unknown): string | undefined {
 
 /**
  * Hash of every reviewer task input: authoritative inputs (requirements,
- * plan, approved + current todos, the OCR flag, the configured review model,
- * the current reviewer protocol text) plus, when present, the non-authoritative
- * Work feedback. Two rounds with the same hash AND the same diff fingerprint
- * receive the same verdict.
+ * plan, approved + current todos, the code-review flag, the configured review
+ * model, the current reviewer protocol text) plus, when present, the
+ * non-authoritative Work feedback. Two rounds with the same hash AND the same
+ * diff fingerprint receive the same verdict.
  *
  * `protocolText` comes from buildImplementationReviewProtocolText() — the
  * single constant source of the reviewer's behavioral protocol — so a
@@ -456,7 +450,7 @@ export function computeTaskInputHash(input: {
 	planMarkdown?: string;
 	approvedTodos?: TodoItem[];
 	todos: TodoItem[];
-	includeOcr: boolean;
+	includeCodeReview: boolean;
 	reviewModel: string;
 	/** Current Implementation Review protocol text (single constant source). */
 	protocolText: string;
@@ -476,7 +470,7 @@ export function computeTaskInputHash(input: {
 			t.notes ?? "",
 		]),
 		todos: input.todos.map((t) => [t.id, t.title, t.status, t.notes ?? ""]),
-		includeOcr: input.includeOcr,
+		includeCodeReview: input.includeCodeReview,
 		reviewModel: input.reviewModel,
 		protocolText: input.protocolText,
 		...(input.reviewerContext !== undefined

@@ -10,11 +10,12 @@
  * multi-turn) that inherits the parent Plan information-tool surface.
  * The unified on-demand Review (/workflow:review → workflow_review) launches an
  * independent reviewer over the current workspace and, when codeReview.enabled
- * is true, folds workspace OCR findings into the same review. Review output is
- * transient and never gates /workflow:commit. Review rounds are persisted per work run
- * (review-history.ts) so the next round re-dispositions the previous round's
- * findings instead of re-deriving everything, reuses cached OCR findings when
- * the workspace diff is unchanged, and short-circuits identical re-reviews.
+ * is true, injects a delegated code review spec (reviewable files + rules from
+ * the local `ocr delegate` commands, zero LLM) into the reviewer task. Review
+ * output is transient and never gates /workflow:commit. Review rounds are
+ * persisted per work run (review-history.ts) so the next round re-dispositions
+ * the previous round's findings instead of re-deriving everything, and
+ * short-circuits identical re-reviews.
  * Plan review rounds are persisted per plan run (plan-review-history.ts) so
  * repeated workflow_plan_review calls reuse identical rounds, run incremental
  * re-reviews focused on changed plan sections / new confirmed decisions, and

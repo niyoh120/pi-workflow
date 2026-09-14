@@ -120,61 +120,21 @@ export interface WorkflowConfig {
 	 * On-demand unified Review — gated by this enabled flag. When enabled
 	 * (default), `/workflow:review` and the `workflow_review` tool are available in Work
 	 * Mode. The Review Agent independently verifies requirements/plan/todos and,
-	 * when `codeReview.enabled` is true, folds workspace OCR findings into the
-	 * same review. Review output is transient (a tool result); it never gates
-	 * `/workflow:commit` and is never persisted to WorkflowState.
+	 * when `codeReview.enabled` is true, injects a delegated code review spec
+	 * into the same review. Review output is transient (a tool result); it never
+	 * gates `/workflow:commit` and is never persisted to WorkflowState.
 	 */
 	review: {
 		enabled: boolean;
 	};
-	/** OCR toggle for the unified Review. When true, `workflow_review` runs the
-	 *  workspace `ocr review` and feeds normalized findings into the reviewer
-	 *  task. When false, the Review Agent reviews without OCR. */
+	/** Delegated code review toggle for the unified Review. When true,
+	 *  `workflow_review` runs the local `ocr delegate` commands (zero LLM) to
+	 *  build a review spec (reviewable files + rules) that is injected into the
+	 *  reviewer task. When false, the Review Agent reviews without the
+	 *  delegated code-review section. */
 	codeReview: {
 		enabled: boolean;
 	};
-}
-
-// ── OCR normalized finding/result types (cross-module) ─────────────────────
-
-/** Severity bucket for display ordering; preserves unknown values. */
-export type OcrSeverity = "critical" | "high" | "medium" | "low" | "info" | (string & {});
-
-/** A single normalized OCR finding. `existingCode` is dropped from the
- *  model-visible view (it duplicates repo source); kept only in raw JSON. */
-export interface OcrFinding {
-	/** Stable fingerprint-based id (sha1 of normalized identity). */
-	id: string;
-	severity: OcrSeverity;
-	/** Model-generated rule/category, e.g. bug, security. Preserved verbatim. */
-	rule: string;
-	file: string;
-	/** 1-based start line; undefined when absent. */
-	line?: number;
-	/** 1-based end line (inclusive); undefined when absent. */
-	endLine?: number;
-	message: string;
-	/** Proposed fix from the reviewer; omitted when empty. */
-	suggestion?: string;
-}
-
-/** Compact review result sent to the model (content) and tools (details). */
-export interface OcrReviewResult {
-	status: string;
-	/** Present on the no-comments success path. */
-	message?: string;
-	/** Absolute path to the saved raw JSON file. */
-	rawPath: string;
-	findings: OcrFinding[];
-	/** Per-severity counts (keys are the observed severity strings). */
-	counts: Record<string, number>;
-	/** Files reviewed + token usage from summary, when present. */
-	stats?: {
-		filesReviewed?: number;
-		totalTokens?: number;
-		elapsed?: string;
-	};
-	sessionId?: string;
 }
 
 /**

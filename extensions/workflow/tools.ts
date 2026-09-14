@@ -1306,7 +1306,7 @@ export function registerReviewTool(
 		name: "workflow_review",
 		label: "Workflow Review",
 		description:
-			"Launch an independent reviewer that reviews the Work agent's implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work), using its own exploration of the actual repository. Work Mode only, on-demand (triggered by /workflow:review). The reviewer task is assembled from workflow state. Optional `feedback` (free text) lets the Work agent respond to a prior round's disputed Critical/Important findings; it is injected as a clearly-labeled UNTRUSTED section that the reviewer must independently verify against the repository before it carries any weight — requirements/plan/todos remain the authoritative inputs. When codeReview.enabled is true, a workspace OCR review runs first and its normalized findings are folded into the reviewer task; when false the reviewer covers the implementation directly. Returns structured findings + a PASS/FAIL verdict that signals whether this review loop can end (never gates /workflow:commit and is not persisted).",
+			"Launch an independent reviewer that reviews the Work agent's implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work), using its own exploration of the actual repository. Work Mode only, on-demand (triggered by /workflow:review). The reviewer task is assembled from workflow state. Optional `feedback` (free text) lets the Work agent respond to a prior round's disputed Critical/Important findings; it is injected as a clearly-labeled UNTRUSTED section that the reviewer must independently verify against the repository before it carries any weight — requirements/plan/todos remain the authoritative inputs. When codeReview.enabled is true, the local `ocr delegate` commands (zero LLM) build a code review spec (reviewable files + rules) that is injected into the reviewer task, and the reviewer produces the code-level findings itself; when false the reviewer covers the implementation directly. Returns structured findings + a PASS/FAIL verdict that signals whether this review loop can end (never gates /workflow:commit and is not persisted).",
 		parameters: Type.Object({
 			feedback: Type.Optional(
 				Type.String({
@@ -1346,9 +1346,10 @@ export function registerReviewTool(
 				planMarkdown = requirePlanMarkdown(ctx.cwd, state.planPath!);
 			}
 
-			// codeReview.enabled controls whether the unified review folds workspace
-			// OCR findings into the reviewer task. It does not gate the tool itself.
-			const includeOcr = config.codeReview.enabled;
+			// codeReview.enabled controls whether the unified review injects a
+			// delegated code review spec (files + rules, zero LLM) into the
+			// reviewer task. It does not gate the tool itself.
+			const includeCodeReview = config.codeReview.enabled;
 
 			// Optional non-authoritative Work feedback on a prior round's disputed
 			// findings. Normalized once (trim + 20k budget + blank→undefined) so the
@@ -1358,10 +1359,9 @@ export function registerReviewTool(
 			// ── Review round continuity ──
 			// The reviewer is a FRESH agent every round and cannot see the previous
 			// round's findings, so it re-derives the whole review from scratch each
-			// time. Persist each round (verdict + output + OCR findings + diff
-			// fingerprint + task-input hash) so the next round can re-disposition
-			// prior findings instead of re-deriving, reuse cached OCR findings when
-			// the diff is unchanged, and short-circuit a review whose inputs + diff
+			// time. Persist each round (verdict + output + diff fingerprint +
+			// task-input hash) so the next round can re-disposition prior findings
+			// instead of re-deriving, and short-circuit a review whose inputs + diff
 			// are identical to the last round. The verdict stays transient: this
 			// lives in a session-scoped file, never in WorkflowState.
 			const branch = ctx.sessionManager?.getBranch?.();
@@ -1386,7 +1386,7 @@ export function registerReviewTool(
 				return {
 					isError: true,
 					content: [{ type: "text", text: `Review failed: ${reason}` }],
-					details: { ocrEnabled: includeOcr, error: true, reason },
+					details: { codeReviewEnabled: includeCodeReview, error: true, reason },
 				};
 			}
 
@@ -1403,7 +1403,7 @@ export function registerReviewTool(
 				planMarkdown,
 				approvedTodos: state.approvedTodos,
 				todos: state.todos,
-				includeOcr,
+				includeCodeReview,
 				reviewModel,
 				protocolText,
 				reviewerContext: prepared.contextBasis,
@@ -1424,11 +1424,11 @@ export function registerReviewTool(
 
 			let result: ReviewResult;
 			let shortCircuited = false;
-			let ocrCachedRound: number | undefined;
 			if (diffUnchanged && lastRound.taskInputHash === taskInputHash) {
 				// Same diff + same authoritative inputs as the last round — the
 				// reviewer would reach the same verdict, so reuse it instead of
-				// burning minutes on an identical re-review.
+				// burning minutes on an identical re-review. The delegate spec is
+				// deterministic from the diff, so it is not rebuilt either.
 				shortCircuited = true;
 				const prev = lastRound;
 				result = {
@@ -1448,29 +1448,13 @@ export function registerReviewTool(
 					verdict: prev.verdict,
 					verdictReason: prev.verdictReason,
 					madeRepoToolCall: prev.madeRepoToolCall,
-					ocr: {
-						enabled: includeOcr,
-						findings: prev.ocrCount,
-						counts: prev.ocrCounts,
-						rawPath: prev.ocrRawPath,
+					codeReview: {
+						enabled: includeCodeReview,
+						files: 0,
+						rulesTruncated: false,
 					},
-					ocrFindingsList: prev.ocrFindings,
 				};
 			} else {
-				// OCR cache: when the diff is unchanged since the previous round, the
-				// OCR findings are identical — reuse them instead of re-running the
-				// expensive `ocr review` CLI.
-				const cachedOcr =
-					includeOcr && diffUnchanged && lastRound?.ocrEnabled
-						? {
-								findings: lastRound.ocrFindings,
-								counts: lastRound.ocrCounts,
-								rawPath: lastRound.ocrRawPath,
-								fromRound: lastRound.round,
-							}
-						: undefined;
-				ocrCachedRound = cachedOcr?.fromRound;
-
 				const previousRound: PreviousReviewRoundInput | undefined = lastRound
 					? {
 							round: lastRound.round,
@@ -1485,8 +1469,6 @@ export function registerReviewTool(
 									: filesChangedSince(lastRound, diffSnapshot),
 							deltaUnknown: lastRound.deltaUnknown || diffSnapshot.unknown,
 							todosChanged: lastRound.todoHash !== todoHash,
-							ocrCached: !!cachedOcr,
-							ocrFindings: lastRound.ocrCount,
 						}
 					: undefined;
 
@@ -1504,9 +1486,8 @@ export function registerReviewTool(
 						currentTodos: state.todos,
 						reviewCwd,
 						primaryCwd,
-						includeOcr,
+						includeCodeReview,
 						previousRound,
-						cachedOcr,
 						feedback,
 						parentSignal: signal,
 						onProgress: (text) => {
@@ -1517,11 +1498,12 @@ export function registerReviewTool(
 						},
 					});
 				} catch (err) {
-					// Reviewer/OCR run failure (CLI missing, OCR exec failure, JSON parse
-					// failure, timeout/abort/model error) surfaces as an explicit tool
-					// error so the review loop does not treat it as success. No verdict is
-					// produced. AbortError from a cancelled signal is rethrown so the
-					// platform handles cancellation.
+					// Reviewer/delegate run failure (CLI missing, delegate exec
+					// failure, preview parse failure, timeout/abort/model error)
+					// surfaces as an explicit tool error so the review loop does not
+					// treat it as success. No verdict is produced. AbortError from a
+					// cancelled signal is rethrown so the platform handles
+					// cancellation.
 					if (err instanceof Error && err.name === "AbortError") throw err;
 					const reason = err instanceof Error ? err.message : String(err);
 					return {
@@ -1532,7 +1514,7 @@ export function registerReviewTool(
 								text: `Review failed: ${reason}`,
 							},
 						],
-						details: { ocrEnabled: includeOcr, error: true, reason },
+						details: { codeReviewEnabled: includeCodeReview, error: true, reason },
 					};
 				}
 			}
@@ -1554,11 +1536,7 @@ export function registerReviewTool(
 					toolCalls: result.toolCalls,
 					madeRepoToolCall: result.madeRepoToolCall,
 					reviewerText: result.text,
-					ocrEnabled: includeOcr,
-					ocrCount: result.ocr.findings,
-					ocrCounts: result.ocr.counts,
-					ocrRawPath: result.ocr.rawPath,
-					ocrFindings: result.ocrFindingsList,
+					codeReviewEnabled: includeCodeReview,
 					diffFingerprint: diffSnapshot.fingerprint,
 					deltaUnknown: diffSnapshot.unknown,
 					fileHashes: diffSnapshot.fileHashes,
@@ -1587,7 +1565,7 @@ export function registerReviewTool(
 				`turns: ${result.turns}`,
 				`tool calls: ${result.toolCalls}`,
 				`repo tool used: ${result.madeRepoToolCall ? "yes" : "NO"}`,
-				`ocr: ${result.ocr.enabled ? `enabled (${result.ocr.findings} findings${ocrCachedRound !== undefined ? `, cached from round ${ocrCachedRound}` : ""})` : "disabled"}`,
+				`code review: ${!result.codeReview.enabled ? "disabled" : shortCircuited ? "delegated (not re-run — short-circuited)" : `delegated (${result.codeReview.files} file(s)${result.codeReview.rulesTruncated ? ", rules truncated" : ""})`}`,
 				`verdict: ${result.verdict}${result.verdictReason ? ` (${result.verdictReason})` : ""}`,
 			];
 			if (result.unavailableTools.length) {
@@ -1630,10 +1608,9 @@ export function registerReviewTool(
 					verdict: result.verdict,
 					verdictReason: result.verdictReason,
 					madeRepoToolCall: result.madeRepoToolCall,
-					ocr: result.ocr,
+					codeReview: result.codeReview,
 					round: nextRound,
 					shortCircuited,
-					ocrCachedRound,
 				},
 				usage: result.usage,
 			};

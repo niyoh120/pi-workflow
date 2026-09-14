@@ -325,7 +325,8 @@ assert(
 	"mode.ts: WORKFLOW_GATED_TOOLS includes workflow_review",
 );
 // Unified review is gated by review.enabled; codeReview.enabled does NOT change
-// the Work tool set (it only toggles OCR inside the review).
+// the Work tool set (it only toggles the delegated code review spec inside the
+// review).
 const workComputeBlock = mode.slice(
 	mode.indexOf("case \"work\": {"),
 	mode.indexOf("case \"explore\":", mode.indexOf("case \"work\": {")),

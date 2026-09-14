@@ -791,7 +791,8 @@ console.log("\n=== Check 7: Code review tooling ===");
 		!/export\s+function\s+registerPlanImplementationReviewTool\s*\(/.test(toolsTs),
 		"tools.ts no longer exports registerPlanImplementationReviewTool",
 	);
-	// The unified tool is zero-argument and folds OCR in via codeReview.enabled.
+	// The unified tool is zero-argument and injects the delegated code review
+	// spec via codeReview.enabled.
 	const reviewToolStart = toolsTs.indexOf("export function registerReviewTool");
 	const reviewToolEnd = toolsTs.indexOf("// ── Bulk registration", reviewToolStart);
 	assert(reviewToolStart >= 0 && reviewToolEnd > reviewToolStart, "tools.ts: unified review tool block anchors exist");
@@ -810,42 +811,119 @@ console.log("\n=== Check 7: Code review tooling ===");
 	assert(/computeTaskInputHash\(\{[\s\S]*?feedback/.test(reviewToolBlock), "tools.ts: workflow_review passes feedback into computeTaskInputHash");
 	assert(/runReviewAgent\(\{[\s\S]*?feedback/.test(reviewToolBlock), "tools.ts: workflow_review passes feedback into runReviewAgent");
 	assert(reviewToolBlock.includes("runReviewAgent("), "tools.ts: workflow_review invokes runReviewAgent");
-	assert(reviewToolBlock.includes("config.codeReview.enabled"), "tools.ts: workflow_review passes config.codeReview.enabled as includeOcr");
+	assert(reviewToolBlock.includes("config.codeReview.enabled"), "tools.ts: workflow_review passes config.codeReview.enabled as includeCodeReview");
+assert(reviewToolBlock.includes("includeCodeReview"), "tools.ts: workflow_review wires the delegated code review flag into the task hash and runReviewAgent");
+assert(!reviewToolBlock.includes("cachedOcr"), "tools.ts: workflow_review no longer carries the OCR findings cache branch");
 	assert(reviewToolBlock.includes("config.models.review"), "tools.ts: workflow_review uses config.models.review");
 
-	// OCR helpers — verify exports and that buildReviewArgv body has required flags
+	// OCR delegate helpers — verify exports, argv shapes, and preview parsing.
 	assert(
-		/export\s+function\s+buildReviewArgv\s*\(/.test(ocrHelpersTs),
-		"ocr-helpers.ts: exports buildReviewArgv",
+		/export\s+function\s+buildDelegatePreviewArgv\s*\(/.test(ocrHelpersTs),
+		"ocr-helpers.ts: exports buildDelegatePreviewArgv",
+	);
+	assert(
+		/export\s+function\s+buildDelegateRuleArgv\s*\(/.test(ocrHelpersTs),
+		"ocr-helpers.ts: exports buildDelegateRuleArgv",
 	);
 	assert(
 		/export\s+function\s+checkOcrAvailable\s*\(/.test(ocrHelpersTs),
 		"ocr-helpers.ts: exports checkOcrAvailable",
 	);
-	const buildArgvStart = ocrHelpersTs.indexOf(
-		"export function buildReviewArgv",
-	);
-	const buildArgvEnd = ocrHelpersTs.indexOf(
-		"export function ocrCommandSummary",
-		buildArgvStart,
-	);
-	const buildArgvBody = ocrHelpersTs.slice(
-		buildArgvStart,
-		buildArgvEnd > 0 ? buildArgvEnd : ocrHelpersTs.length,
-	);
-	// buildReviewArgv is workspace-only: required flags present, scope flags gone.
 	assert(
-		buildArgvBody.includes("--audience"),
-		"ocr-helpers.ts: buildReviewArgv body uses --audience flag",
+		/export\s+function\s+parseDelegatePreviewOutput\s*\(/.test(ocrHelpersTs),
+		"ocr-helpers.ts: exports parseDelegatePreviewOutput",
 	);
 	assert(
-		buildArgvBody.includes("--background"),
-		"ocr-helpers.ts: buildReviewArgv body uses --background flag",
+		/export\s+async\s+function\s+runOcrCli\s*\(/.test(ocrHelpersTs),
+		"ocr-helpers.ts: exports runOcrCli (generic argv executor)",
+	);
+	// checkOcrAvailable probes the delegate subcommand — a capability probe,
+	// so old ocr versions without delegation fail with an explicit error.
+	const checkAvailStart = ocrHelpersTs.indexOf("export function checkOcrAvailable");
+	const checkAvailEnd = ocrHelpersTs.indexOf("// ── Argv construction", checkAvailStart);
+	const checkAvailBody = ocrHelpersTs.slice(checkAvailStart, checkAvailEnd > 0 ? checkAvailEnd : ocrHelpersTs.length);
+	assert(
+		checkAvailBody.includes('"delegate", "--help"'),
+		"ocr-helpers.ts: checkOcrAvailable probes `ocr delegate --help`",
+	);
+	// Delegate argvs are workspace-only: no ocr-review flags in the builder
+	// bodies (the docstring may mention the excluded flags).
+	const argvBuildersStart = ocrHelpersTs.indexOf("export function buildDelegatePreviewArgv");
+	const argvBuildersEnd = ocrHelpersTs.indexOf("export function ocrCommandSummary", argvBuildersStart);
+	const argvBuildersBody = ocrHelpersTs.slice(argvBuildersStart, argvBuildersEnd > 0 ? argvBuildersEnd : ocrHelpersTs.length);
+	assert(
+		!/ReviewScopeKind|--audience|--format json|--from|--to|--commit/.test(argvBuildersBody),
+		"ocr-helpers.ts: delegate argv builders carry no ocr-review / scope flags (workspace-only)",
 	);
 	assert(
-		!/ReviewScopeKind|--from|--to|--commit|--preview/.test(ocrHelpersTs),
-		"ocr-helpers.ts: ReviewScopeKind and range/commit/preview flags removed (workspace-only)",
+		argvBuildersBody.includes('"delegate", "preview"'),
+		"ocr-helpers.ts: buildDelegatePreviewArgv returns the zero-arg workspace delegate preview argv",
 	);
+	assert(
+		argvBuildersBody.includes('"delegate", "rule", ...files'),
+		"ocr-helpers.ts: buildDelegateRuleArgv appends the preview file paths",
+	);
+	// Behavioral fixture: header count must match the parsed file lines —
+	// fail-closed against CLI format drift. ocr-helpers.ts imports
+	// ./terminal-text.js, which Node's native loader does not rewrite, so the
+	// pure parsing section is sliced into a standalone temp module instead of
+	// importing the real file.
+	const parseSectionStart = ocrHelpersTs.indexOf("// ── Preview output parsing");
+	assert(parseSectionStart > 0, "ocr-helpers.ts: preview parsing section anchor exists");
+	const parseSectionSrc = ocrHelpersTs.slice(parseSectionStart);
+	const tmpDir7 = fs.mkdtempSync(path.join(os.tmpdir(), "wf-ocr-parse-"));
+	const tmpModPath = path.join(tmpDir7, "ocr-parse-fixture.ts");
+	fs.writeFileSync(tmpModPath, parseSectionSrc, "utf8");
+	const ocrHelpersMod = await import(pathToFileURL(tmpModPath).href);
+	const previewParsed = ocrHelpersMod.parseDelegatePreviewOutput(
+		[
+			"# Files (2 reviewable / 3 total)",
+			"",
+			"- mode: workspace",
+			"- total_insertions: 17",
+			"- total_deletions: 3",
+			"",
+			"  - `src/a.ts` [modified] +12/-3",
+			"  - `src/b.ts` [added] +5/-0",
+			"~~- `notes.txt` [added] +1/-0 (excluded: unsupported_ext)~~",
+			"",
+		].join("\n"),
+	);
+	assert(
+		previewParsed.reviewableCount === 2 && previewParsed.totalCount === 3,
+		"preview parse: header counts extracted",
+	);
+	assert(previewParsed.files.length === 2, "preview parse: excluded (struck-through) files skipped");
+	assert(
+		previewParsed.files[0].path === "src/a.ts" &&
+			previewParsed.files[0].status === "modified" &&
+			previewParsed.files[0].insertions === 12 &&
+			previewParsed.files[0].deletions === 3,
+		"preview parse: file path/status/insertions/deletions extracted",
+	);
+	assert(
+		(() => {
+			try {
+				ocrHelpersMod.parseDelegatePreviewOutput("# Files (2 reviewable / 3 total)\n\n  - `src/a.ts` [modified] +1/-1\n");
+				return false;
+			} catch {
+				return true;
+			}
+		})(),
+		"preview parse: header count vs parsed-line mismatch fails closed",
+	);
+	assert(
+		(() => {
+			try {
+				ocrHelpersMod.parseDelegatePreviewOutput("unexpected output");
+				return false;
+			} catch {
+				return true;
+			}
+		})(),
+		"preview parse: missing header fails closed",
+	);
+	fs.rmSync(tmpDir7, { recursive: true, force: true });
 
 	// /workflow:review owns the unified workflow_review review/fix loop
 	const reviewCmdStart = commandsTs.indexOf(
@@ -1704,8 +1782,8 @@ function validateWorktreeIntegrationStatic() {
 	);
 
 	// The unified workflow_review resolves the same worktree-aware cwd and
-	// passes it to runReviewAgent so OCR + reviewer run against the active
-	// worktree's working tree and branch.
+	// passes it to runReviewAgent so the delegate commands + reviewer run
+	// against the active worktree's working tree and branch.
 	const crStart = tools.indexOf("export function registerReviewTool");
 	const crEnd = tools.indexOf("// ── Bulk registration", crStart);
 	assert(
@@ -1727,8 +1805,8 @@ function validateWorktreeIntegrationStatic() {
 		"workflow_review passes the resolved reviewCwd to runReviewAgent (ctx.cwd replaced)",
 	);
 	assert(
-		crBlock.includes("includeOcr"),
-		"workflow_review forwards codeReview.enabled as includeOcr",
+		crBlock.includes("includeCodeReview"),
+		"workflow_review forwards codeReview.enabled as includeCodeReview",
 	);
 	assert(
 		crBlock.includes("active worktree") || /worktree/.test(crBlock),
@@ -2192,18 +2270,19 @@ console.log("\n=== Check 18: hardened error paths + shared invariants ===");
 	assert(/workflow_plan_save requires non-blank markdown/.test(toolsSrc18), "tools.ts: plan_save rejects blank markdown");
 	assert(/Active plan is missing or empty/.test(toolsSrc18), "tools.ts: plan_read surfaces missing/empty plan error");
 
-	// OCR parse failure (and other review failures) surface as a tool error from
-	// workflow_review; runReviewAgent throws with rawPath on parse failure.
+	// Delegate failure (and other review failures) surface as a tool error from
+	// workflow_review; runReviewAgent throws explicit errors per failure kind.
 	const reviewAgentSrc18 = fs.readFileSync(path.join(CWD, "extensions/workflow/review-agent.ts"), "utf8");
-	assert(/parseOcrReviewJson\(rawOutput\)/.test(reviewAgentSrc18), "review-agent.ts: enabled branch parses OCR via parseOcrReviewJson");
-	assert(/OcrParseError|rawPath/.test(reviewAgentSrc18), "review-agent.ts: parse failure surfaces rawPath");
-	assert(/runOcrReview\(/.test(reviewAgentSrc18), "review-agent.ts: enabled branch runs runOcrReview");
+	assert(/parseDelegatePreviewOutput\(previewOutput\)/.test(reviewAgentSrc18), "review-agent.ts: enabled branch parses the delegate preview via parseDelegatePreviewOutput");
+	assert(/Code review spec could not be built/.test(reviewAgentSrc18), "review-agent.ts: preview parse failure surfaces an explicit error");
+	assert(/ocr delegate preview failed/.test(reviewAgentSrc18), "review-agent.ts: preview exec failure surfaces an explicit error");
+	assert(/ocr delegate rule failed/.test(reviewAgentSrc18), "review-agent.ts: rule exec failure surfaces an explicit error");
 	const reviewCatchStart = toolsSrc18.indexOf("} catch (err) {");
 	const reviewCatchEnd = toolsSrc18.indexOf("const passed", reviewCatchStart);
 	assert(reviewCatchStart >= 0 && reviewCatchEnd > reviewCatchStart, "tools.ts: workflow_review catch block anchors exist");
 	const reviewCatchBlock = toolsSrc18.slice(reviewCatchStart, reviewCatchEnd);
 	assert(/isError: true/.test(reviewCatchBlock), "workflow_review failure returns isError: true");
-	assert(/ocrEnabled: includeOcr/.test(reviewCatchBlock), "workflow_review failure details include ocrEnabled");
+	assert(/codeReviewEnabled: includeCodeReview/.test(reviewCatchBlock), "workflow_review failure details include codeReviewEnabled");
 
 	// Pure path getters: no directory creation as a side effect.
 	const pathsMod = await import(
@@ -2232,12 +2311,11 @@ console.log("\n=== Check 18: hardened error paths + shared invariants ===");
 	assert(ttMod.stripTerminalControl("a\x1B[31mb\nc\td") === "abcd", "stripTerminalControl: default removes newlines + tabs");
 	assert(ttMod.stripTerminalControl("a\x1B[31mb\nc\td", { keepNewlines: true }) === "ab\nc\td", "stripTerminalControl: keepNewlines preserves LF + tab");
 	assert(ttMod.stripTerminalControl("a\u0000b\x07c") === "abc", "stripTerminalControl: strips C0/C1 controls");
-	// ocr-result.ts no longer sanitizes anything (preview compaction removed);
+	// ocr-result.ts is gone (delegate mode has no JSON to parse);
 	// ocr-helpers.ts still delegates to the shared terminal-text sanitizer.
 	// review-tui.ts was removed (no scope UI anymore).
-	const ocrResultSrc = fs.readFileSync(path.join(CWD, "extensions/workflow/ocr-result.ts"), "utf8");
+	assert(!fs.existsSync(path.join(CWD, "extensions/workflow/ocr-result.ts")), "ocr-result.ts removed (delegate mode has no LLM JSON path)");
 	const ocrHelpersSrc = fs.readFileSync(path.join(CWD, "extensions/workflow/ocr-helpers.ts"), "utf8");
-	assert(!/stripAnsi|stripTerminalControl/.test(ocrResultSrc), "ocr-result.ts no longer carries stripAnsi / stripTerminalControl (preview + sanitizer wrapper removed)");
 	assert(ocrHelpersSrc.includes('from "./terminal-text.js"') && !/function stripTerminalControlChars/.test(ocrHelpersSrc), "ocr-helpers.ts delegates to shared sanitizer, local impl removed");
 	assert(!fs.existsSync(path.join(CWD, "extensions/workflow/review-tui.ts")), "review-tui.ts removed (unified review has no scope UI)");
 

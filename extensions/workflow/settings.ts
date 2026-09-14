@@ -141,8 +141,9 @@ const THINKING_VALUES = [
 ] as const;
 
 /** Paths whose change requires /reload (or restart) to fully take effect.
- *  codeReview.enabled is intentionally excluded: it is a runtime OCR toggle
- *  for the unified Review (editable live, including Session scope). */
+ *  codeReview.enabled is intentionally excluded: it is a runtime delegated
+ *  code-review toggle for the unified Review (editable live, including
+ *  Session scope). */
 const RELOAD_SENSITIVE_IDS = new Set([
 	"workflow.autoEnter",
 	"planReview.enabled",
@@ -180,9 +181,9 @@ function buildDescriptors(): SettingDescriptor[] {
 		},
 		{
 			id: "codeReview.enabled",
-			label: "codeReview · enabled (Review OCR)",
+			label: "codeReview · enabled (Delegated Code Review)",
 			description:
-				"When true, the unified Review folds a workspace OCR review into the reviewer task. Editable live (including Session scope).",
+				"When true, the unified Review injects a delegated code review spec (reviewable files + rules from the local `ocr delegate` commands, zero LLM) into the reviewer task. Editable live (including Session scope).",
 			kind: "boolean",
 			path: ["codeReview", "enabled"],
 		},

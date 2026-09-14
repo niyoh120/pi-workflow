@@ -1,8 +1,8 @@
 # pi-workflow
 
-Lightweight software development workflow extension for pi-coding-agent: plan, optional independent plan-review agent, on-demand unified review (independent reviewer + optional workspace OCR), user-triggered branch integration (Merge Mode), and commit orchestration.
+Lightweight software development workflow extension for pi-coding-agent: plan, optional independent plan-review agent, on-demand unified review (independent reviewer + optional delegated code review), user-triggered branch integration (Merge Mode), and commit orchestration.
 
-**Zero external Pi extension dependencies.** Plan review and the unified Review run as fresh, in-memory child AgentSessions that independently re-validate the saved plan and review the implementation. When OCR is enabled, the Review runs the standalone `ocr review` CLI against the workspace and folds the normalized findings into the same reviewer. No `@tintinweb/pi-subagents` required.
+**Zero external Pi extension dependencies.** Plan review and the unified Review run as fresh, in-memory child AgentSessions that independently re-validate the saved plan and review the implementation. When delegated code review is enabled, the Review runs the local `ocr delegate` commands (zero LLM) to build a review spec — reviewable files plus resolved rules — and injects it into the reviewer task, which then produces the code-level findings itself. No `@tintinweb/pi-subagents` required.
 
 ## Installation
 
@@ -35,7 +35,7 @@ idle → explore → plan → work → [/workflow:review loop] → workflow:comm
 - **Mode context**: the current mode prompt and worktree notice are injected into the stable system prompt (via `before_agent_start`), and the Approved-Plan Work handoff is isolated via a canonical marker so Plan→Work transitions within the same agent run always see the latest mode. Dynamic state (todos, run IDs) comes from tool results, not the system prompt.
 - **Explore Mode**: Default landing after `/workflow:enable`. Read-only codebase exploration and Q&A (same permissions as Plan Mode). Explore exposes no workflow tools; a preserved plan is read in Plan Mode. Use `/workflow:plan` when ready to design.
 - **Plan Review** (optional): Model-initiated `workflow_plan_review` tool call — the plan agent may invoke it after saving a plan. Spawns a fresh, isolated in-memory AgentSession that inherits the parent Plan session's information-tool surface (minus workflow tools), independently explores the repository and active external tools, and returns structured Critical/Important/Minor/Summary findings grounded in repository evidence plus a transient PASS/FAIL evaluation signal submitted through the reviewer's own terminating `review_submit` tool call — the report and the submit call share the same final assistant message, and a missing submission resolves fail-closed to FAIL (never gates approval). Not a separate mode; runs within Plan Mode under a single 30-minute total timeout. Repeated calls reuse cached rounds for identical inputs and run incremental re-reviews focused on changed plan sections / new confirmed decisions; the planner may answer disputed findings via an optional UNTRUSTED `feedback` argument.
-- **Unified Review** (on-demand, configurable): `/workflow:review` (or a direct `workflow_review` call) in Work Mode launches a fresh, isolated in-memory AgentSession that independently reviews the implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work) by exploring the actual checkout/worktree itself — it does NOT receive the Work agent's execution summary, diffs, or test claims. The single explicit exception is an optional `feedback` argument the Work agent may pass to respond to a prior round's disputed findings — it is injected as a clearly-labeled UNTRUSTED section that the reviewer must independently verify against the repository before it carries any weight. When `codeReview.enabled` is true, a workspace `ocr review` runs first and its normalized findings are injected into the reviewer task (each finding must be dispositioned with repository evidence). It emits a coverage matrix, correctness/verification findings, OCR dispositions, and submits the final verdict through its own terminating `review_submit` tool call (report and submit share the same final assistant message; a missing submission resolves fail-closed to FAIL). The verdict is **transient**: it only signals whether this on-demand review loop can end — it is never written to workflow state and never gates `/workflow:commit`. Disable via `review.enabled: false` to hide `/workflow:review` and the tool; set `codeReview.enabled: false` to review without OCR.
+- **Unified Review** (on-demand, configurable): `/workflow:review` (or a direct `workflow_review` call) in Work Mode launches a fresh, isolated in-memory AgentSession that independently reviews the implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work) by exploring the actual checkout/worktree itself — it does NOT receive the Work agent's execution summary, diffs, or test claims. The single explicit exception is an optional `feedback` argument the Work agent may pass to respond to a prior round's disputed findings — it is injected as a clearly-labeled UNTRUSTED section that the reviewer must independently verify against the repository before it carries any weight. When `codeReview.enabled` is true, the local `ocr delegate preview` + `ocr delegate rule` commands (zero LLM) run first and the resulting spec — reviewable files plus resolved rules — is injected into the reviewer task; the reviewer reads the diff and full-file context and reports each code-level defect it finds as an F-numbered Code Rule Findings item with file:line evidence. It emits a coverage matrix, correctness/verification findings, code rule findings, and submits the final verdict through its own terminating `review_submit` tool call (report and submit share the same final assistant message; a missing submission resolves fail-closed to FAIL). The verdict is **transient**: it only signals whether this on-demand review loop can end — it is never written to workflow state and never gates `/workflow:commit`. Disable via `review.enabled: false` to hide `/workflow:review` and the tool; set `codeReview.enabled: false` to review without the delegated code review spec.
 
 ## Modes
 
@@ -48,7 +48,7 @@ Workflow tools and commands are **opt-in by default**: only `/workflow:enable` i
 | Explore Mode | `/workflow:explore` | Return to Explore Mode from any mode (non-destructive — keeps plan/todos) |
 | Plan Mode | `/workflow:plan` | Brainstorm and produce an implementation plan |
 | Work Mode | `/workflow:work` | Implement the approved plan |
-| Review/Fix Loop | `/workflow:review` | On-demand unified review of the current workspace (incl. active worktree); folds in workspace OCR when enabled |
+| Review/Fix Loop | `/workflow:review` | On-demand unified review of the current workspace (incl. active worktree); injects a delegated code review spec (zero LLM) when enabled |
 | Merge Mode | `/workflow:merge [--target <branch>] [指令]` | User-triggered branch integration: default rebase + fast-forward, or a custom strategy authorized by trailing instructions (see Merge Mode below) |
 | Commit Mode | `/workflow:commit` | Generate and execute a conventional commit (always available, no review gate) |
 
@@ -197,7 +197,7 @@ help locate a stale/lost override or a failed apply.
 
 ### Unified Review (on-demand tool)
 
-Review is an **on-demand** feature — when `review.enabled` is `true` (default), `/workflow:review` and the `workflow_review` tool become available in Work Mode. `codeReview.enabled` controls whether the Review folds a workspace OCR pass into the reviewer task.
+Review is an **on-demand** feature — when `review.enabled` is `true` (default), `/workflow:review` and the `workflow_review` tool become available in Work Mode. `codeReview.enabled` controls whether the Review injects a delegated code review spec into the reviewer task.
 
 The reviewer is a **fresh, independent AgentSession** (no subprocess, no RPC): `SessionManager.inMemory(...)` gives it isolated, non-persistent conversation state. It runs the configured `models.review` model and thinking level, and receives only authoritative inputs:
 
@@ -206,26 +206,26 @@ The reviewer is a **fresh, independent AgentSession** (no subprocess, no RPC): `
 
 The Work agent's reasoning, thinking, tool results, execution summaries, diffs, and test claims are **excluded by construction** — the reviewer re-derives its own view by exploring the repository. The single exception is the optional `feedback` argument: a free-text response to a prior round's disputed findings that the reviewer treats as UNTRUSTED and must independently verify against the repository before it can influence a finding's disposition or the verdict.
 
-**When OCR is enabled**, the reviewer first runs a workspace `ocr review` with a **fixed, bounded code-review `--background`** (a constant constraint card — no requirements/plan/todo text, no file paths) and receives the normalized findings. It must disposition **every** finding: confirm a real issue or refute a false positive, both backed by repository evidence. Confirmed Critical/Important findings contribute to the unified FAIL. The authoritative requirements/plan/todos go only to the independent reviewer, never to OCR.
+**When delegated code review is enabled**, the tool first runs `ocr delegate preview` + `ocr delegate rule` in the review cwd (local, zero LLM). The resulting spec — the reviewable file list plus the resolved rule-group text — is injected into the reviewer task as the Code Review Delegation section. The reviewer reads `git diff HEAD` plus full-file context itself, applies the injected rules, and reports every genuine code-level defect as an F-numbered Code Rule Findings item with file:line evidence. Confirmed Critical/Important findings contribute to the unified FAIL. The authoritative requirements/plan/todos go only to the independent reviewer; the delegate commands receive no task dynamics at all (they are purely diff/repo-derived). A preview with zero reviewable files tells the reviewer to skip the code-level diff review.
 
 **Inherited tool surface (best-effort).** At review time the parent's active tools are snapshotted, every workflow-owned tool is removed, and the remainder is reconstructed in the child: built-in tools (`read`/`bash`/`edit`/`write`/`grep`/`find`/`ls`) are rebuilt by `createAgentSession`; active extension/MCP/Web/remote/memory tools are rebuilt from their owning extension source paths via `DefaultResourceLoader({ noExtensions: true, additionalExtensionPaths })`. pi-workflow itself is never loaded into the child (its bash override is treated as builtin, so its path is never collected). Tool reconstruction differences never block review and surface only as `requestedTools`/`activeTools`/`unavailableTools` diagnostics.
 
 **Read-only safety boundary.** An inline child extension reuses the existing pure path guards: direct reads of `.pi/workflow/` are blocked (in BOTH the main checkout and active worktree), and `write`/`edit` are confined to the Plan scratch root (`/tmp/pi-workflow-plan-scratch/`). Bash mutation is governed by the reviewer system prompt (read-only + scratch probes only).
 
-**Runtime budget.** A single 30-minute total timeout (`1_800_000ms`) bounds the reviewer run, combined with the parent turn's AbortSignal. OCR shares the same parent signal. The child session is always disposed in `finally`; timeout or user cancellation aborts the active AgentSession and returns an explicit tool error.
+**Runtime budget.** A single 30-minute total timeout (`1_800_000ms`) bounds the reviewer run, combined with the parent turn's AbortSignal. The delegate commands share the same parent signal and are additionally bounded by a 30s local-execution timeout. The child session is always disposed in `finally`; timeout or user cancellation aborts the active AgentSession and returns an explicit tool error.
 
 **Model / settings preparation.** Before any cache decision, the tool layer prepares the reviewer child once: it creates the child ModelRuntime (same `auth.json`/`models.json` plus in-memory provider registrations), resolves the configured `models.planReview`/`models.review` model, applies the validated `contextWindow` clone when configured, and builds ONE SettingsManager that feeds the window-validation lower bound, the child `DefaultResourceLoader`, AND the child `AgentSession`. Project trust follows the parent session (`ctx.isProjectTrusted()`). Compatibility note: the child session previously defaulted to trusting the project; in untrusted projects the reviewer now uses global/default compaction settings. The structured context basis (configured override, Pi baseline, effective window, compaction snapshot) feeds both reviewer cache hashes, and an invalid configured window errors out before any cached verdict is returned.
 
-**Result.** The tool takes a single optional `feedback` argument (free text responding to a prior round's disputed findings); the reviewer task is otherwise assembled from workflow state. The final text keeps the `Critical / Important / Minor / Summary` structure with concrete repository evidence, and the result carries aggregated nested usage on its top-level `usage` field plus operational metadata (reviewer model/thinking, elapsed time, turns, tool-call count, requested/active/unavailable tools, OCR enabled/counts/rawPath, verdict, stop reason/error). The verdict is **transient**: PASS means the review loop can end; it is never written to workflow state and never gates `/workflow:commit`.
+**Result.** The tool takes a single optional `feedback` argument (free text responding to a prior round's disputed findings); the reviewer task is otherwise assembled from workflow state. The final text keeps the `Critical / Important / Minor / Summary` structure with concrete repository evidence, and the result carries aggregated nested usage on its top-level `usage` field plus operational metadata (reviewer model/thinking, elapsed time, turns, tool-call count, requested/active/unavailable tools, code review enabled/files/rulesTruncated, verdict, stop reason/error). The verdict is **transient**: PASS means the review loop can end; it is never written to workflow state and never gates `/workflow:commit`.
 
 ### Unified review (on-demand tool)
 
-The unified Review is **on-demand** — when `review.enabled` is `true` (default), `/workflow:review` and the `workflow_review` tool become available in Work Mode. `codeReview.enabled` toggles whether the Review includes a workspace OCR pass.
+The unified Review is **on-demand** — when `review.enabled` is `true` (default), `/workflow:review` and the `workflow_review` tool become available in Work Mode. `codeReview.enabled` toggles whether the Review includes a delegated code review spec (zero LLM).
 
 - **Workspace** (the only scope): reviews staged + unstaged + untracked changes; an active workflow worktree is reviewed against its working tree and branch.
-- The Review Agent passes OCR a fixed, bounded code-review `--background` (a constant constraint card under 2000 characters — no requirements/plan/todo text, no file paths); the authoritative requirements/plan/todos go only to the independent reviewer. The `/workflow:review` command enters Work runtime and prompts the model to call `workflow_review`, keeping the loop in the agent turn so confirmed Critical/Important findings are fixed and re-reviewed.
+- The delegate commands are purely local (git + repo rule files): they receive no requirements/plan/todo text, and the authoritative requirements/plan/todos go only to the independent reviewer. The `/workflow:review` command enters Work runtime and prompts the model to call `workflow_review`, keeping the loop in the agent turn so confirmed Critical/Important findings are fixed and re-reviewed.
 
-The `ocr` binary is assumed to be in PATH (hardcoded). No additional OCR configuration is exposed.
+The `ocr` binary is assumed to be in PATH (hardcoded) and must support the `ocr delegate` subcommands (older versions without delegation mode fail the availability probe with an explicit error). No additional OCR configuration is exposed.
 
 ### Project config
 
@@ -257,7 +257,7 @@ Flow:
    - `models.<role>.provider` / `models.<role>.model` — free-text input (clear the field to inherit).
    - `models.<role>.thinking` — cycle through `inherit / off / minimal / low / medium / high / xhigh / max`.
    - `models.<role>.contextWindow` — decimal-integer token input (blank = inherit). The row shows the Pi default window and the acceptable range; invalid input is rejected with an error and the config keeps its previous value. Changing a provider/model re-checks any retained window against the new model before the write.
-   - `workflow.autoEnter`, `planReview.enabled`, `review.enabled` — toggle through `inherit / true / false` (**Project / Global scopes only**, see below). `codeReview.enabled` (Review OCR toggle) is editable in all scopes including Session.
+   - `workflow.autoEnter`, `planReview.enabled`, `review.enabled` — toggle through `inherit / true / false` (**Project / Global scopes only**, see below). `codeReview.enabled` (Delegated Code Review toggle) is editable in all scopes including Session.
 3. Press Esc to return to the scope picker; pick **Done** to finish.
 
 **Reset Session** clears this Pi process's session overrides so it inherits Project / Global / default settings.
@@ -292,7 +292,7 @@ layer, letting lower layers take over.
   Project/Global layers. They are editable only in **Project** and **Global**
   scopes (the Session layer cannot influence load-time registration), and need
   `/reload` (or the next startup) to take effect. `codeReview.enabled` is a
-  runtime OCR toggle for the unified Review and is editable in all scopes
+  runtime delegated code-review toggle for the unified Review and is editable in all scopes
   (including Session) with immediate effect. The menu shows a reminder when
   you change a reload-sensitive option.
 
@@ -336,7 +336,7 @@ This prevents wasting tokens when the user still wants to refine the design.
 | `/workflow:plan` | Enter Plan Mode |
 | `/go [--force]` | Approve current plan and hand off to Work Mode |
 | `/workflow:work [task]` | Skip Plan Mode, go straight to implementation |
-| `/workflow:review` | On-demand unified review of the current workspace (incl. active worktree); folds in workspace OCR when `codeReview.enabled` is true |
+| `/workflow:review` | On-demand unified review of the current workspace (incl. active worktree); injects a delegated code review spec (zero LLM) when `codeReview.enabled` is true |
 | `/workflow:merge [--target <branch>] [指令]` | Enter Merge Mode: integrate the source branch (active workflow worktree branch, or the current ordinary local branch) into a target local branch |
 | `/workflow:commit [notes]` | Generate commit message and commit |
 | `/workflow:status` | Show current workflow state (mode, active runtime model/thinking vs configured role, plan path, run IDs) |
@@ -367,17 +367,17 @@ The unified Review runs an **on-demand, user-triggered** independent reviewer ov
 
 - **Independent** — a fresh in-memory AgentSession reviews the implementation through its own repository exploration (read, grep, find, ls, bash, git diff). It never sees the Work agent's execution summary, pre-selected diffs, test claims, or prior review output.
 - **Authoritative inputs only** — Approved Work: user requirements (plan lifecycle) + Final Plan + approved todo snapshot + current todos. Direct Work: Work-lifecycle user requirements + current todos.
-- **Optional workspace OCR** — when `codeReview.enabled` is true, a workspace `ocr review` runs first with a fixed code-review `--background` (bounded constraint card, path-free — no requirements/plan/todo text); its normalized findings are injected into the reviewer task, and every finding must be dispositioned (confirm with evidence or refute as a false positive). When false, the reviewer covers the implementation directly. Requirements/plan/todo coverage stays with the independent reviewer's authoritative task.
+- **Optional delegated code review** — when `codeReview.enabled` is true, the local `ocr delegate preview` + `ocr delegate rule` commands run first (zero LLM); the spec (reviewable files + resolved rules) is injected into the reviewer task, and the reviewer reports every code-level defect it finds as an F-numbered Code Rule Findings item with file:line evidence. When false, the reviewer covers the implementation directly. Requirements/plan/todo coverage stays with the independent reviewer's authoritative task.
 - **Validates against actual code** — every todo marked done should have concrete file/line evidence; plan coverage gaps and unverifiable completion claims force FAIL.
 - **Read-only** — `.pi/workflow/` reads blocked in BOTH the main checkout and active worktree; project writes confined to the Plan scratch root; git/source mutation forbidden by prompt.
 - **Bounded** — one 30-minute total timeout; uses `models.review`.
-- **Configurable** — set `models.review` for the reviewer model/thinking, `review.enabled` (default `true`) to toggle `/workflow:review` + the tool, and `codeReview.enabled` to toggle the OCR pass.
+- **Configurable** — set `models.review` for the reviewer model/thinking, `review.enabled` (default `true`) to toggle `/workflow:review` + the tool, and `codeReview.enabled` to toggle the delegated code review spec.
 - **Machine verdict** — submitted through the child-session-only `review_submit` tool (schema-validated PASS/FAIL enum, terminating) as the final action of the same assistant message that carries the complete report; fail-closed on a missing submission. The mandatory submit call never counts as repository inspection evidence.
 - **Transient verdict** — PASS means the review loop can end. It is never written to workflow state and never gates `/workflow:commit`.
 
 ### Flow to commit
 
-- Implement → optionally `/workflow:review` (with or without OCR) → fix → re-review → `/workflow:commit` (always available, no review gate).
+- Implement → optionally `/workflow:review` (with or without the delegated code review) → fix → re-review → `/workflow:commit` (always available, no review gate).
 
 ## Merge Mode (`/workflow:merge`)
 
@@ -394,17 +394,14 @@ The unified Review runs an **on-demand, user-triggered** independent reviewer ov
 - **Cancellation & recovery** — `workflow_merge_complete(status="cancelled")` aborts in-flight rebase/merge/cherry-pick/revert and reattaches a detached source checkout with a guarded `git checkout -f <sourceBranch>` (in-flight conflict resolution is discarded by design, matching `rebase --abort` semantics). Refs already moved by a custom strategy are reported, never rolled back implicitly. `/workflow:reset` reuses the same recovery before clearing state and stops if recovery fails.
 - **Hard guarantees** — the persisted `mergeContext` baseline (source/target, pre-rebase heads, commit counts, authorization) is saved atomically before the kickoff and rebuilt into the provider context every round, so reload/compaction cannot lose it. A `defaultStrategy` run can never degrade into the looser custom completion checks. Work Mode keeps its full Git-write prohibition; regular commits happen only through `/workflow:commit`; branch integration and its necessary commits happen only inside Merge Mode. Mode-switching commands (`/workflow:plan`, `/workflow:work`, `/workflow:review`, `/workflow:commit`, `/workflow:init`, `/workflow:disable`, …) refuse to drop an active merge — close it via `workflow_merge_complete` or hard-recover via `/workflow:reset`.
 
-## OCR (workspace findings)
+## Delegated Code Review (`ocr delegate`, zero LLM)
 
-When `codeReview.enabled` is true, the unified Review runs alibaba/open-code-review's `ocr review` CLI against the workspace before the reviewer:
+When `codeReview.enabled` is true, the unified Review builds its code-level review spec from alibaba/open-code-review's delegation mode before the reviewer starts:
 
-- **Deterministic rules** — Built-in detectors for NPE, thread safety, XSS, SQL injection, etc. Not LLM-dependent.
-- **Dedicated review tools** — `code_search` for cross-file reference checking, `code_comment` for line-level annotations.
-- **Parallel execution** — Per-file goroutines (default 8 concurrent).
-- **Line-level comments** — Precise issue locations, not vague text descriptions.
-- **Severity classification** — Security/Defect → Critical, Maintainability/Quality → Important.
+- `ocr delegate preview` — lists the reviewable files in the workspace (staged + unstaged + untracked changes) with status and +/- line counts. The header's reviewable count must match the parsed file list; a mismatch fails the round with an explicit error (fail-closed against CLI format drift).
+- `ocr delegate rule <files...>` — resolves the review rule groups for those files as text. The text is truncated at a 64KB budget with an explicit note in the task when truncation happens.
 
-The reviewer runs OCR with `--audience agent --format json` over the workspace (staged + unstaged + untracked changes), parses normalized findings, and dispositions them. Set `codeReview.enabled: false` to review without OCR.
+Both commands are purely local (git + repo rule files, zero LLM calls, millisecond-level) and run fresh every non-short-circuited round. The spec is injected as the Code Review Delegation section; the reviewer reads the diff and full-file context and produces the findings itself — OCR-side LLM configuration (`ocr config set llm.*`) is no longer needed. Set `codeReview.enabled: false` to review without the delegated spec, or `review.enabled: false` to hide `/workflow:review` entirely.
 
 ## RPC / Paseo Compatibility
 
@@ -460,7 +457,7 @@ Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) ar
 | `workflow_plan_clear` | Clear workflow state and return to idle mode |
 | `workflow_grill_record` | Record grilling decisions (batch `decisions[]`; legacy single fields accepted) |
 | `workflow_plan_review` | Launch the independent plan-reviewer agent (zero-argument, optional) |
-| `workflow_review` | Launch the on-demand unified reviewer agent (optional `feedback`, Work Mode; folds in workspace OCR when `codeReview.enabled`) |
+| `workflow_review` | Launch the on-demand unified reviewer agent (optional `feedback`, Work Mode; injects a delegated code review spec when `codeReview.enabled`) |
 
 ### workflow_plan_review
 
@@ -475,11 +472,11 @@ Launch the on-demand unified reviewer agent (available in Work Mode when `review
 - **Approved Work** input: plan-lifecycle user requirements + Final Plan + approved todo snapshot + current todos.
 - **Direct Work** input: Work-lifecycle user requirements + current todos.
 - **`feedback` (optional)**: a free-text response to a prior round's disputed Critical/Important findings. It is the only Work-agent-provided channel into the task, injected as a clearly-labeled **UNTRUSTED** section; the reviewer must independently verify each claim against the repository before it can influence a finding's disposition or the verdict. Requirements/plan/todos remain the authoritative inputs. A blank or omitted `feedback` is equivalent.
-- When `codeReview.enabled` is true, a workspace `ocr review` runs first and its normalized findings are injected; the reviewer dispositions every finding.
-- Returns a coverage matrix, Implementation Correctness / Verification findings, OCR dispositions (when OCR ran), Critical/Important/Minor, and a final PASS/FAIL verdict submitted via `review_submit`.
+- When `codeReview.enabled` is true, the local `ocr delegate` commands run first and the spec (reviewable files + rules) is injected as the Code Review Delegation section; the reviewer applies the rules to the current diff and reports its own F-numbered Code Rule Findings. A zero-reviewable-file workspace skips the code-level diff review.
+- Returns a coverage matrix, Implementation Correctness / Verification findings, Code Rule Findings (when the delegated spec was injected), Critical/Important/Minor, and a final PASS/FAIL verdict submitted via `review_submit`.
 - PASS requires both a PASS verdict AND at least one actually-started repository tool call (fail-closed otherwise; `review_submit` itself never counts).
-- **Round continuity** — each round (verdict, full output, OCR findings, diff fingerprint, task-input hash) is persisted per work run in session-scoped `review-history.json` (newest 3 kept): the next round injects the previous findings for re-disposition, reuses cached OCR findings on an unchanged diff, and short-circuits identically when the diff AND every task input — including the current reviewer protocol text — are unchanged. A protocol change therefore invalidates reuse of rounds produced under the older protocol exactly once.
-- The verdict is **transient** — it only signals whether this review loop can end. It is never written to workflow state and never gates `/workflow:commit`. Operational metadata (reviewer model, elapsed, turns, tool calls, repo-tool-used, OCR enabled/counts/rawPath, verdict) is in `details`.
+- **Round continuity** — each round (verdict, full output, diff fingerprint, task-input hash) is persisted per work run in session-scoped `review-history.json` (newest 3 kept): the next round injects the previous findings for re-disposition, and short-circuits identically when the diff AND every task input — including the current reviewer protocol text — are unchanged. A protocol change therefore invalidates reuse of rounds produced under the older protocol exactly once. Short-circuited rounds skip the delegate commands (the spec is deterministic from the diff).
+- The verdict is **transient** — it only signals whether this review loop can end. It is never written to workflow state and never gates `/workflow:commit`. Operational metadata (reviewer model, elapsed, turns, tool calls, repo-tool-used, code review enabled/files/rulesTruncated, verdict) is in `details`.
 
 | Path | Purpose |
 |------|---------|

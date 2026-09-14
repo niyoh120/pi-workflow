@@ -8,22 +8,23 @@
  *    todo snapshot + current todos.
  *  - Direct Work: Work-lifecycle user requirements + current todos.
  *
- * When OCR is enabled (`codeReview.enabled: true`), a workspace `ocr review`
- * runs first in the validated review cwd with a FIXED, bounded code-review
- * constraint card as `--background` (no dynamic requirements/plan/todo text,
- * no file paths — see `buildOcrBackground()`); its normalized findings are
- * injected into the reviewer task, and the reviewer must disposition each
- * finding (confirm with repository evidence or explain a false positive). OCR
- * is scoped to code-level defects over the current diff; requirements, Final
- * Plan, and todo coverage stay with the independent reviewer's authoritative
- * task. When OCR is disabled, the reviewer covers requirements/plan/todos/
- * implementation/tests and error paths directly.
+ * When delegated code review is enabled (`codeReview.enabled: true`), the
+ * local `ocr delegate` commands run first in the validated review cwd (zero
+ * LLM calls): `ocr delegate preview` yields the reviewable file list and
+ * `ocr delegate rule` yields the resolved rule groups. Both are injected into
+ * the reviewer task as the Code Review Delegation spec, and the reviewer
+ * produces the code-level findings ITSELF (F-numbered, with file:line
+ * evidence) while reading the diff and full-file context. Requirements, Final
+ * Plan, and todo coverage stay governed by the reviewer's authoritative task.
+ * When code review is disabled, the reviewer covers requirements/plan/todos/
+ * implementation/tests and error paths directly without the delegation
+ * section.
  *
  * The reviewer explores the actual checkout/worktree itself (read, grep, find,
  * ls, bash, git diff) and does NOT receive the parent Work agent's execution
  * summary, pre-selected diff, test claims, or prior review output. It produces
- * a structured coverage matrix + correctness/verification findings + OCR
- * finding dispositions, then submits the verdict via review_submit.
+ * a structured coverage matrix + correctness/verification findings + code
+ * rule findings, then submits the verdict via review_submit.
  *
  * The reviewer submits its final verdict through the child-only
  * `review_submit` tool (schema-validated PASS/FAIL enum, terminating): the
@@ -35,7 +36,7 @@
  * disputed findings. The reviewer must re-verify every claim in it against the
  * repository before it carries any weight, so feedback cannot smuggle in
  * execution summaries, diffs, or test claims as authoritative fact; the
- * authoritative task inputs (requirements/Final Plan/todos/OCR findings) stay
+ * authoritative task inputs (requirements/Final Plan/todos/code review spec) stay
  * the sole basis for PASS/FAIL.
  *
  * The verdict is TRANSIENT: it only signals whether this on-demand review loop
@@ -45,7 +46,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { ModelSpec, OcrFinding, TodoItem } from "./types.js";
+import type { ModelSpec, TodoItem } from "./types.js";
 import {
 	type ReviewBranchEntry,
 	type PlanReviewAgentResult,
@@ -54,14 +55,20 @@ import {
 	runIndependentReviewer,
 	type ReviewerSafetyRoots,
 } from "./plan-review-agent.js";
-import { checkOcrAvailable, buildReviewArgv, ocrCommandSummary, runOcrReview } from "./ocr-helpers.js";
-import { parseOcrReviewJson, OcrParseError } from "./ocr-result.js";
+import {
+	type DelegatePreview,
+	type DelegatePreviewFile,
+	DELEGATE_RULE_BUDGET_CHARS,
+	DELEGATE_TIMEOUT_MS,
+	OCR_BINARY,
+	buildDelegatePreviewArgv,
+	buildDelegateRuleArgv,
+	checkOcrAvailable,
+	ocrCommandSummary,
+	parseDelegatePreviewOutput,
+	runOcrCli,
+} from "./ocr-helpers.js";
 import { normalizeWorkFeedback } from "./review-history.js";
-
-// ── OCR constants (internal, no longer configurable) ────────────────────────
-
-export const OCR_BINARY = "ocr";
-export const OCR_TIMEOUT_MS = 1_800_000;
 
 // ── Reviewer submit protocol (single source for task + task-input hash) ────
 
@@ -102,80 +109,28 @@ export function formatTodosForReview(todos: TodoItem[] | undefined): string {
 		.join("\n");
 }
 
-// ── OCR background ──────────────────────────────────────────────────────────
+// ── Code review context ─────────────────────────────────────────────────────
 
 /**
- * Build the FIXED OCR `--background` for the workspace code review.
- *
- * This is a constant, bounded, path-free code-review constraint card: it only
- * states OCR's responsibility (code-level defect scanning over the current Git
- * diff / live repository). It intentionally receives NO task dynamics — the
- * full user messages, Final Plan, todos, file lists, or execution summaries
- * must not enter `--background`, so historical/stale file paths can never be
- * fed to OCR's file-reading steps. Requirements/plan/todo coverage belongs to
- * the independent reviewer's authoritative task, not to OCR.
- *
- * Zero-argument and deterministic. Kept under 2000 characters. Pure function.
+ * Delegated code review spec passed into the reviewer task. When `enabled`
+ * is false the task explicitly records the skip reason; when true, `files`
+ * carries the reviewable file list from `ocr delegate preview` and `rules`
+ * the resolved rule-group text from `ocr delegate rule` (both local, zero
+ * LLM). The reviewer reads the diff and full-file context itself and
+ * produces the code-level findings.
  */
-export function buildOcrBackground(): string {
-	return [
-		"Review the current Git workspace changes for code-level defects.",
-		"",
-		"Focus:",
-		"- runtime correctness and regressions",
-		"- error, cancellation, timeout, cleanup, and recovery paths",
-		"- API/type contracts and cross-module integration",
-		"- security, concurrency, resource leaks, and performance hazards",
-		"",
-		"Evidence scope:",
-		"Use the current Git diff and live repository as the source of file and symbol scope.",
-		"Report concrete actionable defects with file and line evidence.",
-		"",
-		"The independent reviewer handles requirements, plan, and todo coverage.",
-	].join("\n");
-}
-
-// ── OCR context ─────────────────────────────────────────────────────────────
-
-/**
- * OCR status passed into the reviewer task. When `enabled` is false the task
- * explicitly records the skip reason; when true, `findings` carries the
- * normalized workspace findings the reviewer must disposition.
- */
-export interface OcrContext {
+export interface CodeReviewContext {
 	enabled: boolean;
-	findings: OcrFinding[];
-	counts: Record<string, number>;
-	rawPath?: string;
-	/** Reason OCR was skipped/disabled (used when enabled is false). */
+	/** Reviewable files selected by `ocr delegate preview`. */
+	files: DelegatePreviewFile[];
+	/** Total files considered by the preview (incl. excluded), when known. */
+	totalFiles?: number;
+	/** Resolved rule-group text injected verbatim into the task. */
+	rules: string;
+	/** True when the rules text was truncated to the character budget. */
+	rulesTruncated: boolean;
+	/** Reason the delegated code review was skipped/disabled (used when enabled is false). */
 	skippedReason?: string;
-	/** Round number the findings were reused from (workspace diff unchanged). */
-	cachedFromRound?: number;
-}
-
-// ── OCR finding formatting ──────────────────────────────────────────────────
-
-/**
- * Format the normalized OCR findings as a numbered list for the reviewer task.
- * Mirrors the compact model-visible view so the reviewer cross-references the
- * exact file/line/severity it must disposition. Pure function.
- */
-export function formatOcrFindings(findings: OcrFinding[]): string {
-	if (findings.length === 0) return "(no findings)";
-	return findings
-		.map((f, i) => {
-			const loc =
-				f.line === undefined
-					? f.file
-					: f.endLine !== undefined && f.endLine !== f.line
-						? `${f.file}:${f.line}-${f.endLine}`
-						: `${f.file}:${f.line}`;
-			const suggestion = f.suggestion
-				? `\n   suggestion: ${f.suggestion.replace(/\r\n|\n|\r/g, " ")}`
-				: "";
-			return `${i + 1}. [${f.severity}] ${f.rule} @ ${loc} — ${f.message}${suggestion}`;
-		})
-		.join("\n");
 }
 
 // ── Previous-round context ─────────────────────────────────────────────────
@@ -199,11 +154,6 @@ export interface PreviousReviewRoundInput {
 	deltaUnknown: boolean;
 	/** True when todos changed since that round. */
 	todosChanged: boolean;
-	/** True when this round's OCR findings were reused from the previous round
-	 *  (workspace diff unchanged). */
-	ocrCached: boolean;
-	/** Number of OCR findings in the previous round. */
-	ocrFindings: number;
 }
 
 /**
@@ -220,15 +170,10 @@ export function formatPreviousReviewRound(
 		: prev.changedFiles.length > 0
 			? prev.changedFiles.join(", ")
 			: "(none — the workspace diff is unchanged since that round)";
-	const ocrNote = prev.ocrCached
-		? ` — OCR findings reused from round ${prev.round} (workspace diff unchanged)`
-		: prev.ocrFindings > 0
-			? ` — OCR: ${prev.ocrFindings} finding(s)`
-			: "";
 	return [
 		`# Previous Review Round (round ${prev.round})`,
 		"",
-		`The previous independent review round reached **Verdict: ${prev.verdict}**${ocrNote}.`,
+		`The previous independent review round reached **Verdict: ${prev.verdict}**.`,
 		`Files changed since that round: ${delta}`,
 		`Todos changed since that round: ${prev.todosChanged ? "yes" : "no"}`,
 		"",
@@ -277,15 +222,16 @@ export function formatWorkFeedback(feedback: string | undefined): string {
 /**
  * Build the authoritative task for an Approved-Plan Work review. Includes:
  * user requirements (plan lifecycle), Final Plan, approved todo snapshot,
- * current todos, and (when present) the OCR findings to disposition. Excludes
- * the parent Work agent's summaries, diffs, and test claims. Pure function.
+ * current todos, and (when present) the delegated code review spec (files +
+ * rules). Excludes the parent Work agent's summaries, diffs, and test claims.
+ * Pure function.
  */
 export function buildApprovedReviewTask(opts: {
 	requirements: string[];
 	planMarkdown: string;
 	approvedTodos: TodoItem[] | undefined;
 	currentTodos: TodoItem[];
-	ocr: OcrContext;
+	codeReview: CodeReviewContext;
 	previousRound?: PreviousReviewRoundInput;
 	/** Optional non-authoritative Work feedback (already normalized). */
 	feedback?: string;
@@ -297,7 +243,7 @@ export function buildApprovedReviewTask(opts: {
 		!opts.approvedTodos || opts.approvedTodos.length === 0
 			? "\n\n⚠️ Approved todo snapshot is MISSING (older session). Compare the Final Plan against the current todos directly and flag this as a Minor coverage gap."
 			: "";
-	const ocrSection = renderOcrSection(opts.ocr);
+	const codeReviewSection = renderCodeReviewSection(opts.codeReview);
 	const previousRoundSection = formatPreviousReviewRound(opts.previousRound);
 	const feedbackSection = formatWorkFeedback(opts.feedback);
 	return [
@@ -317,7 +263,7 @@ export function buildApprovedReviewTask(opts: {
 		"",
 		formatTodosForReview(opts.currentTodos),
 		"",
-		ocrSection,
+		codeReviewSection,
 		"",
 		...(previousRoundSection ? [previousRoundSection, ""] : []),
 		...(feedbackSection ? [feedbackSection, ""] : []),
@@ -332,13 +278,13 @@ export function buildApprovedReviewTask(opts: {
 
 /**
  * Build the authoritative task for a Direct Work review. Includes: Work-lifecycle
- * user requirements, current todos, and (when present) the OCR findings.
- * Pure function.
+ * user requirements, current todos, and (when present) the delegated code
+ * review spec. Pure function.
  */
 export function buildDirectReviewTask(opts: {
 	requirements: string[];
 	currentTodos: TodoItem[];
-	ocr: OcrContext;
+	codeReview: CodeReviewContext;
 	previousRound?: PreviousReviewRoundInput;
 	/** Optional non-authoritative Work feedback (already normalized). */
 	feedback?: string;
@@ -346,7 +292,7 @@ export function buildDirectReviewTask(opts: {
 	const requirements = opts.requirements.length
 		? opts.requirements.map((r) => r.trim()).join("\n\n---\n\n")
 		: "(none captured — Direct Work had no scorable user requirements; verify the current todos are genuinely complete and flag the gap if material)";
-	const ocrSection = renderOcrSection(opts.ocr);
+	const codeReviewSection = renderCodeReviewSection(opts.codeReview);
 	const previousRoundSection = formatPreviousReviewRound(opts.previousRound);
 	const feedbackSection = formatWorkFeedback(opts.feedback);
 	return [
@@ -358,7 +304,7 @@ export function buildDirectReviewTask(opts: {
 		"",
 		formatTodosForReview(opts.currentTodos),
 		"",
-		ocrSection,
+		codeReviewSection,
 		"",
 		...(previousRoundSection ? [previousRoundSection, ""] : []),
 		...(feedbackSection ? [feedbackSection, ""] : []),
@@ -372,44 +318,63 @@ export function buildDirectReviewTask(opts: {
 }
 
 /**
- * Render the OCR section for the reviewer task. When OCR ran, lists findings
- * and the per-finding disposition requirement; when skipped, records the reason
- * explicitly so the reviewer reviews without OCR. Pure function.
+ * Render the Code Review Delegation section for the reviewer task. When
+ * enabled, lists the reviewable files from `ocr delegate preview`, the
+ * resolved rule text from `ocr delegate rule` (with an explicit truncation
+ * note when the budget cut it), and the review instructions; when skipped,
+ * records the reason explicitly. When the preview found zero reviewable
+ * files, the reviewer is told to skip the code-level diff review. Pure
+ * function.
  */
-function renderOcrSection(ocr: OcrContext): string {
-	if (!ocr.enabled) {
+function renderCodeReviewSection(cr: CodeReviewContext): string {
+	if (!cr.enabled) {
 		return [
-			"# OCR Workspace Findings",
+			"# Code Review Delegation",
 			"",
-			`OCR is disabled for this review (${ocr.skippedReason ?? "codeReview.enabled is false"}). Review requirements, plan/todos, implementation, tests, and error paths directly.`,
+			`Delegated code review is disabled for this review (${cr.skippedReason ?? "codeReview.enabled is false"}). Review requirements, plan/todos, implementation, tests, and error paths directly.`,
 		].join("\n");
 	}
-	const summary =
-		ocr.findings.length > 0
-			? `${ocr.findings.length} finding(s)` +
-				(Object.keys(ocr.counts).length > 0
-					? ` — by severity: ${Object.entries(ocr.counts).map(([k, n]) => `${k}=${n}`).join(", ")}`
-					: "")
-			: "no findings";
-	const sourceNote =
-		ocr.cachedFromRound !== undefined
-			? ` OCR findings reused from round ${ocr.cachedFromRound} (workspace diff unchanged).`
+	if (cr.files.length === 0) {
+		return [
+			"# Code Review Delegation",
+			"",
+			"The workspace has no reviewable changes (ocr delegate preview found 0 reviewable file(s)). Skip the code-level diff review; still review requirements, plan/todos, implementation, tests, and error paths.",
+		].join("\n");
+	}
+	const fileList = cr.files
+		.map((f) => {
+			const delta =
+				f.insertions !== undefined || f.deletions !== undefined
+					? ` +${f.insertions ?? 0}/-${f.deletions ?? 0}`
+					: "";
+			return `  - \`${f.path}\` [${f.status}]${delta}`;
+		})
+		.join("\n");
+	const totalNote =
+		cr.totalFiles !== undefined && cr.totalFiles !== cr.files.length
+			? ` (out of ${cr.totalFiles} changed file(s) considered; the rest are excluded by rule config, e.g. unsupported extensions)`
 			: "";
 	return [
-		"# OCR Workspace Findings",
+		"# Code Review Delegation",
 		"",
-		`OCR reviewed the workspace changes (raw JSON: ${ocr.rawPath ?? "(unavailable)"}). ${summary}.${sourceNote}`,
+		"`ocr delegate` (local, zero-LLM) selected the following reviewable file(s) for code-level review:" + totalNote,
 		"",
-		formatOcrFindings(ocr.findings),
-		...(ocr.findings.length === 0
-			? []
-			: [
+		fileList,
+		"",
+		"## Resolved Review Rules",
+		"",
+		cr.rules || "(no rules resolved)",
+		...(cr.rulesTruncated
+			? [
 					"",
-					"Disposition EVERY OCR finding:",
-					"- For each finding, verify with your own repository evidence whether it is a genuine issue or a false positive / out-of-scope.",
-					"- Cite the concrete file path + line range (or command result) that confirms or refutes it.",
-					"- Fold every CONFIRMED Critical/Important finding into the unified verdict (FAIL). Document dismissed findings as false positives with evidence.",
-				]),
+					`⚠️ The rules text above was truncated to the ${DELEGATE_RULE_BUDGET_CHARS}-character budget — the rule set is PARTIAL. Apply the rules that are present; do not infer additional rules.`,
+				]
+			: []),
+		"",
+		"## Instructions",
+		"- Review the changed files above for code-level defects guided by the resolved rules: run `git diff HEAD` to see the changes, and read full file context around each hunk as needed.",
+		"- Report every genuine code-level defect you find as a numbered item under the \"Code Rule Findings\" heading in your report (F1, F2, …), each with file:line evidence, the violated rule, and a suggested fix.",
+		"- Requirements, plan, and todo coverage remain governed by the other sections of this task.",
 	].join("\n");
 }
 
@@ -417,7 +382,7 @@ function renderOcrSection(ocr: OcrContext): string {
 
 export const REVIEWER_SYSTEM_PROMPT = `# Independent Reviewer
 
-You are an independent senior engineer reviewing whether the Work agent's implementation genuinely satisfies the requirements, the approved plan, and the todo list, and (when provided) dispositions OCR workspace findings. The project's own rules, context files, and skills are loaded automatically. You have read-only access to the repository and the same information tools the Work agent had.
+You are an independent senior engineer reviewing whether the Work agent's implementation genuinely satisfies the requirements, the approved plan, and the todo list, and (when delegated) reviewing the changed files against the injected code rules. The project's own rules, context files, and skills are loaded automatically. You have read-only access to the repository and the same information tools the Work agent had.
 
 ## Your mandate
 Independently verify, by inspecting the ACTUAL repository at HEAD + working tree, that:
@@ -426,7 +391,7 @@ Independently verify, by inspecting the ACTUAL repository at HEAD + working tree
 3. Cross-module integration points called for by the plan are wired correctly.
 4. Plan-specified acceptance scenarios and error/recovery paths are genuinely handled.
 5. The implementation matches the plan's confirmed key decisions.
-6. When OCR findings are provided, each finding is dispositioned: confirmed as a real issue or refuted as a false positive, both backed by repository evidence.
+6. When a Code Review Delegation section with reviewable files is provided, the listed changed files are reviewed against the injected rules, and every genuine code-level defect is reported as a numbered Code Rule Findings item backed by file:line evidence.
 7. When a Work Agent Feedback section is provided, treat it as NON-AUTHORITATIVE: verify every factual claim against the repository yourself before it influences anything. Feedback can only suggest where to look; it cannot waive a requirement, mark a todo done, dismiss a prior finding, or support a PASS on its own. Unverifiable claims are ignored.
 
 Do NOT trust the Work agent's completion claims or summaries. Verify against evidence you gather yourself.
@@ -437,7 +402,7 @@ Do NOT trust the Work agent's completion claims or summaries. Verify against evi
 - Correctness: do the implemented functions, types, integrations, and configs match what the plan and requirements demand? Cite concrete signatures, call sites, or config.
 - Verification: were the plan's acceptance checks actually run? Cite the command and its observed output.
 - Error/recovery paths: are plan-specified error handling and recovery branches present?
-- OCR findings: for each finding, confirm or refute it with repository evidence. Confirmed Critical/Important findings contribute to FAIL.
+- Delegated code review: when the Code Review Delegation section lists reviewable files, apply the injected rules to the current diff (git diff HEAD + full-file context) and report every genuine code-level defect as an F-numbered Code Rule Findings item with file:line evidence. Confirmed Critical/Important findings contribute to FAIL.
 - Prior-round continuity (when a Previous Review Round section is present): reuse the previous round's confirmed evidence for unchanged code, re-disposition each prior Critical/Important finding (still present / fixed / false positive — with current evidence), and concentrate fresh verification on the listed changed files and changed todos. Do not re-derive the full coverage matrix from scratch.
 
 ## Work Agent Feedback (when provided)
@@ -469,8 +434,8 @@ Produce exactly ONE final review in your FINAL assistant message using this stru
 ## Verification
 - V1: [验收检查] → [命令与输出] → [通过/失败]
 
-## OCR Findings Disposition (when OCR findings were provided)
-- F1: [finding summary] → [confirmed/refuted] → [文件:行号证据]
+## Code Rule Findings (when the Code Review Delegation section lists reviewable files)
+- F1: [defect + violated rule] → [文件:行号证据] → [建议修复]
 
 ## Critical
 - [严重问题，或 "(none)"]
@@ -491,7 +456,7 @@ Produce exactly ONE final review in your FINAL assistant message using this stru
 - When a Previous Review Round section is present, you may reference that round's confirmed evidence instead of re-deriving it, but any conclusion you rely on must still hold against the repository as it stands now.
 - Do not fabricate findings to seem thorough. Only flag genuine concerns.
 - If you could not verify something, state it explicitly as an unverified assumption.
-- PASS requires that every todo marked done has real implementation evidence AND no Critical findings AND no plan-coverage gaps AND no unconfirmed Critical/Important OCR findings. Any gap or unverifiable done claim → FAIL.
+- PASS requires that every todo marked done has real implementation evidence AND no Critical findings AND no plan-coverage gaps AND no unconfirmed Critical/Important code rule findings. Any gap or unverifiable done claim → FAIL.
 - Submit the verdict ONLY through the \`review_submit\` tool (verdict PASS or FAIL), exactly once, as the final action of the same final assistant message that contains the complete report. Submitting ends the review; do not emit another assistant response afterwards.
 `;
 
@@ -503,16 +468,15 @@ export interface ReviewResult extends PlanReviewAgentResult {
 	 *  STARTED calls (calledToolNames) so the mandatory review_submit
 	 *  submission can never satisfy repo inspection. */
 	madeRepoToolCall: boolean;
-	/** OCR run diagnostics for tool output. */
-	ocr: {
+	/** Delegated code review diagnostics for tool output. */
+	codeReview: {
 		enabled: boolean;
-		findings: number;
-		counts: Record<string, number>;
-		rawPath?: string;
+		/** Number of reviewable files in the injected spec (0 when disabled or
+		 *  the workspace had no reviewable changes). */
+		files: number;
+		/** True when the injected rules text hit the character budget. */
+		rulesTruncated: boolean;
 	};
-	/** Normalized OCR findings of this round (empty when disabled). Persisted
-	 *  to the review history so unchanged-diff rounds can reuse them. */
-	ocrFindingsList: OcrFinding[];
 }
 
 // ── Runner ──────────────────────────────────────────────────────────────────
@@ -550,19 +514,12 @@ export interface RunReviewAgentOptions {
 	reviewCwd: string;
 	/** Main checkout cwd (for dual workflow-root protection). */
 	primaryCwd: string;
-	/** Whether to run workspace OCR and feed findings into the reviewer task. */
-	includeOcr: boolean;
+	/** Whether to build and inject the delegated code review spec (files +
+	 *  rules, zero LLM) into the reviewer task. */
+	includeCodeReview: boolean;
 	/** Previous review round context (findings/evidence/delta) carried into this
 	 *  round so the reviewer re-dispositions instead of re-deriving. */
 	previousRound?: PreviousReviewRoundInput;
-	/** Cached normalized OCR findings to reuse instead of re-running `ocr review`
-	 *  (the workspace diff fingerprint is unchanged since the cached round). */
-	cachedOcr?: {
-		findings: OcrFinding[];
-		counts: Record<string, number>;
-		rawPath?: string;
-		fromRound: number;
-	};
 	/** Parent tool AbortSignal (user cancellation / turn abort). */
 	parentSignal?: AbortSignal;
 	/** Optional non-authoritative Work feedback on a prior round's disputed
@@ -573,17 +530,19 @@ export interface RunReviewAgentOptions {
 }
 
 /**
- * Run the unified Review Agent. When `includeOcr` is true, runs a workspace
- * `ocr review` in the validated review cwd, parses normalized findings, and
- * injects them into the reviewer task. When false, the reviewer reviews
- * directly with an explicit OCR-disabled marker.
+ * Run the unified Review Agent. When `includeCodeReview` is true, runs the
+ * local `ocr delegate preview` + `ocr delegate rule` commands in the validated
+ * review cwd (zero LLM) and injects the resulting spec (reviewable files +
+ * resolved rules) into the reviewer task; the reviewer produces the
+ * code-level findings itself. When false, the reviewer reviews directly with
+ * an explicit code-review-disabled marker.
  *
  * Assembles the authoritative task based on Work kind (Approved vs Direct),
  * delegates to the shared independent reviewer runner, and parses the verdict.
  *
- * OCR CLI absence, execution failure, or JSON parse failure throw an explicit
- * error so the caller (the workflow_review tool) surfaces a tool error and no
- * verdict is produced for this round.
+ * ocr CLI absence, delegate execution failure, or preview parse failure throw
+ * an explicit error so the caller (the workflow_review tool) surfaces a tool
+ * error and no verdict is produced for this round.
  */
 export async function runReviewAgent(
 	opts: RunReviewAgentOptions,
@@ -601,7 +560,7 @@ export async function runReviewAgent(
 		currentTodos,
 		reviewCwd,
 		primaryCwd,
-		includeOcr,
+		includeCodeReview,
 	} = opts;
 
 	const isApprovedWork = !!planMarkdown;
@@ -617,36 +576,69 @@ export async function runReviewAgent(
 		? extractUserRequirements(branch, planStartEntryId)
 		: extractUserRequirements(branch, workStartEntryId);
 
-	// ── Optional OCR workspace review ──
-	let ocrContext: OcrContext;
-	if (includeOcr) {
-		if (opts.cachedOcr) {
-			// Workspace diff fingerprint is unchanged since the cached round — the
-			// findings are identical, so skip the expensive `ocr review` run.
-			ocrContext = {
+	// ── Optional delegated code review spec (local, zero LLM) ──
+	let codeReviewContext: CodeReviewContext;
+	if (includeCodeReview) {
+		if (!checkOcrAvailable(OCR_BINARY)) {
+			throw new Error(
+				"ocr CLI not found (or too old for `ocr delegate`). " +
+					"Install alibaba/open-code-review: npm i -g @alibaba-group/open-code-review",
+			);
+		}
+
+		// Step 1: which files are reviewable in this workspace.
+		opts.onProgress?.("[review] building code review spec (ocr delegate preview)");
+		const previewArgv = buildDelegatePreviewArgv();
+		const previewSummary = ocrCommandSummary(OCR_BINARY, previewArgv);
+		let previewOutput: string;
+		try {
+			previewOutput = await runOcrCli(OCR_BINARY, reviewCwd, previewArgv, DELEGATE_TIMEOUT_MS, opts.parentSignal);
+		} catch (err) {
+			// AbortError from cancelled signal — rethrow so the platform handles cancellation.
+			if (err instanceof Error && err.name === "AbortError") throw err;
+			const errMsg = err instanceof Error ? err.message : String(err);
+			const stderr =
+				typeof err === "object" && err !== null && "stderr" in err
+					? (err as { stderr?: unknown }).stderr
+					: "";
+			throw new Error(
+				`ocr delegate preview failed.\n\n` +
+					`Command: ${previewSummary}\n` +
+					`Error: ${errMsg}\n` +
+					`stderr: ${String(stderr).slice(0, 2000)}`,
+			);
+		}
+		let preview: DelegatePreview;
+		try {
+			preview = parseDelegatePreviewOutput(previewOutput);
+		} catch (parseErr) {
+			const errMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+			throw new Error(
+				`Code review spec could not be built.\n` +
+					`Error: ${errMsg}\n\n` +
+					`Command: ${previewSummary}`,
+			);
+		}
+
+		if (preview.files.length === 0) {
+			// Empty workspace: reviewer skips the code-level diff review but still
+			// covers requirements/plan/todos.
+			codeReviewContext = {
 				enabled: true,
-				findings: opts.cachedOcr.findings,
-				counts: opts.cachedOcr.counts,
-				rawPath: opts.cachedOcr.rawPath,
-				cachedFromRound: opts.cachedOcr.fromRound,
+				files: [],
+				totalFiles: preview.totalCount,
+				rules: "",
+				rulesTruncated: false,
 			};
 		} else {
-			if (!checkOcrAvailable(OCR_BINARY)) {
-				throw new Error(
-					"ocr CLI not found. " +
-						"Install alibaba/open-code-review: npm i -g @alibaba-group/open-code-review\n" +
-						"Then configure LLM with ocr config set llm.url / llm.auth_token / llm.model.",
-				);
-			}
-			const background = buildOcrBackground();
-			const argv = buildReviewArgv(background);
-			const cmdSummary = ocrCommandSummary(OCR_BINARY, argv);
-			opts.onProgress?.("[review] running workspace OCR review");
-			let rawOutput: string;
+			// Step 2: resolved rule groups for the reviewable files.
+			opts.onProgress?.(`[review] resolving review rules for ${preview.files.length} file(s)`);
+			const ruleArgv = buildDelegateRuleArgv(preview.files.map((f) => f.path));
+			const ruleSummary = ocrCommandSummary(OCR_BINARY, ruleArgv);
+			let ruleOutput: string;
 			try {
-				rawOutput = await runOcrReview(OCR_BINARY, reviewCwd, argv, OCR_TIMEOUT_MS, opts.parentSignal);
+				ruleOutput = await runOcrCli(OCR_BINARY, reviewCwd, ruleArgv, DELEGATE_TIMEOUT_MS, opts.parentSignal);
 			} catch (err) {
-				// AbortError from cancelled signal — rethrow so the platform handles cancellation.
 				if (err instanceof Error && err.name === "AbortError") throw err;
 				const errMsg = err instanceof Error ? err.message : String(err);
 				const stderr =
@@ -654,38 +646,27 @@ export async function runReviewAgent(
 						? (err as { stderr?: unknown }).stderr
 						: "";
 				throw new Error(
-					`ocr review failed.\n\n` +
-						`Command: ${cmdSummary}\n` +
+					`ocr delegate rule failed.\n\n` +
+						`Command: ${ruleSummary}\n` +
 						`Error: ${errMsg}\n` +
-						`stderr: ${String(stderr).slice(0, 2000)}\n\n` +
-						`Check ocr config and LLM connectivity: ocr llm test`,
+						`stderr: ${String(stderr).slice(0, 2000)}`,
 				);
 			}
-			let result;
-			try {
-				result = parseOcrReviewJson(rawOutput);
-			} catch (parseErr) {
-				const rawPath = parseErr instanceof OcrParseError ? parseErr.rawPath : "";
-				const errMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
-				throw new Error(
-					`Code review output could not be processed.` +
-						(rawPath ? `\nRaw output saved to: ${rawPath}` : "") +
-						`\nError: ${errMsg}` +
-						`\n\nCommand: ${cmdSummary}`,
-				);
-			}
-			ocrContext = {
+			const rulesTruncated = ruleOutput.length > DELEGATE_RULE_BUDGET_CHARS;
+			codeReviewContext = {
 				enabled: true,
-				findings: result.findings,
-				counts: result.counts,
-				rawPath: result.rawPath,
+				files: preview.files,
+				totalFiles: preview.totalCount,
+				rules: rulesTruncated ? ruleOutput.slice(0, DELEGATE_RULE_BUDGET_CHARS) : ruleOutput,
+				rulesTruncated,
 			};
 		}
 	} else {
-		ocrContext = {
+		codeReviewContext = {
 			enabled: false,
-			findings: [],
-			counts: {},
+			files: [],
+			rules: "",
+			rulesTruncated: false,
 			skippedReason: "codeReview.enabled is false",
 		};
 	}
@@ -698,7 +679,7 @@ export async function runReviewAgent(
 			planMarkdown: planMarkdown!,
 			approvedTodos,
 			currentTodos,
-			ocr: ocrContext,
+			codeReview: codeReviewContext,
 			previousRound: opts.previousRound,
 			feedback,
 		});
@@ -706,7 +687,7 @@ export async function runReviewAgent(
 		task = buildDirectReviewTask({
 			requirements,
 			currentTodos,
-			ocr: ocrContext,
+			codeReview: codeReviewContext,
 			previousRound: opts.previousRound,
 			feedback,
 		});
@@ -742,12 +723,10 @@ export async function runReviewAgent(
 	return {
 		...result,
 		madeRepoToolCall,
-		ocr: {
-			enabled: ocrContext.enabled,
-			findings: ocrContext.findings.length,
-			counts: ocrContext.counts,
-			rawPath: ocrContext.rawPath,
+		codeReview: {
+			enabled: codeReviewContext.enabled,
+			files: codeReviewContext.files.length,
+			rulesTruncated: codeReviewContext.rulesTruncated,
 		},
-		ocrFindingsList: ocrContext.findings,
 	};
 }

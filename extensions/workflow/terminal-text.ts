@@ -1,12 +1,12 @@
 /**
  * terminal-text.ts — stateless ANSI / control-character sanitization.
  *
- * Single source for the terminal-text cleaning rules that OCR result parsing,
- * OCR command-summary rendering, and the review TUI previously duplicated.
- * Two explicit semantics are exposed:
+ * Single source for the terminal-text cleaning rules that ocr command-summary
+ * rendering and the review TUI previously duplicated. Two explicit semantics
+ * are exposed:
  *
- *  - `keepNewlines: true`  — preserve LF (and TAB) so multi-line review text
- *    stays readable. Used for OCR JSON body and preview compaction.
+ *  - `keepNewlines: true`  — preserve LF (and TAB) so multi-line text stays
+ *    readable.
  *  - `keepNewlines: false` (default) — strip every C0/C1 control character
  *    including newlines and tabs. Used for single-line command summaries and
  *    TUI input values where a stray newline would break layout or quoting.

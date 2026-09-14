@@ -1063,7 +1063,7 @@ export function registerWorkflowReviewCommand(
 ): void {
 	pi.registerCommand("workflow:review", {
 		description:
-			"Run the unified on-demand review of the current workspace (incl. active worktree). OCR is included when codeReview.enabled is true.",
+			"Run the unified on-demand review of the current workspace (incl. active worktree). A delegated code review spec (ocr delegate, zero LLM) is included when codeReview.enabled is true.",
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 
@@ -1446,7 +1446,7 @@ export function registerWorkflowStatusCommand(
 			msg += `\nworkflow.autoEnter: ${eff.workflow.autoEnter} (source: ${report.sources["workflow.autoEnter"]})`;
 			msg += `\nplanReview.enabled: ${eff.planReview.enabled} (source: ${report.sources["planReview.enabled"]})`;
 			msg += `\nreview.enabled: ${eff.review.enabled} (source: ${report.sources["review.enabled"]})`;
-			msg += `\ncodeReview.enabled (Review OCR): ${eff.codeReview.enabled} (source: ${report.sources["codeReview.enabled"]})`;
+			msg += `\ncodeReview.enabled (Delegated Code Review): ${eff.codeReview.enabled} (source: ${report.sources["codeReview.enabled"]})`;
 			for (const r of ["explore", "plan", "planReview", "review", "work", "commit"] as const) {
 				const spec = eff.models[r];
 				if (!spec) continue;
