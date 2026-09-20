@@ -1,6 +1,6 @@
 # pi-workflow
 
-Lightweight software development workflow extension for pi-coding-agent: plan, optional independent plan-review agent, on-demand unified review (independent reviewer + optional delegated code review), user-triggered branch integration (Merge Mode), and commit orchestration.
+Lightweight software development workflow extension for pi-coding-agent: plan, optional independent plan-review agent, on-demand unified review (independent reviewer + optional delegated code review), runtime QA (an independent agent that actually runs the affected functionality), user-triggered branch integration (Merge Mode), and commit orchestration.
 
 **Zero external Pi extension dependencies.** Plan review and the unified Review run as fresh, in-memory child AgentSessions that independently re-validate the saved plan and review the implementation. When delegated code review is enabled, the Review runs the local `ocr delegate` commands (zero LLM) to build a review spec — reviewable files plus resolved rules — and injects it into the reviewer task, which then produces the code-level findings itself. No `@tintinweb/pi-subagents` required.
 
@@ -26,7 +26,7 @@ pi install .
 ## Architecture
 
 ```
-idle → explore → plan → work → [/workflow:review loop] → workflow:commit → idle
+idle → explore → plan → work → [/workflow:review loop → /workflow:qa] → workflow:commit → idle
                                                  ↘ /workflow:merge (Merge Mode: rebase + ff) → returns to the prior mode
 ```
 
@@ -36,6 +36,7 @@ idle → explore → plan → work → [/workflow:review loop] → workflow:comm
 - **Explore Mode**: Default landing after `/workflow:enable`. Read-only codebase exploration and Q&A (same permissions as Plan Mode). Explore exposes no workflow tools; a preserved plan is read in Plan Mode. Use `/workflow:plan` when ready to design.
 - **Plan Review** (optional): Model-initiated `workflow_plan_review` tool call — the plan agent may invoke it after saving a plan. Spawns a fresh, isolated in-memory AgentSession that inherits the parent Plan session's information-tool surface (minus workflow tools), independently explores the repository and active external tools, and returns structured Critical/Important/Minor/Summary findings grounded in repository evidence plus a transient PASS/FAIL evaluation signal submitted through the reviewer's own terminating `review_submit` tool call — the report and the submit call share the same final assistant message, and a missing submission resolves fail-closed to FAIL (never gates approval). Not a separate mode; runs within Plan Mode under a single 30-minute total timeout. Repeated calls reuse cached rounds for identical inputs and run incremental re-reviews focused on changed plan sections / new confirmed decisions; the planner may answer disputed findings via an optional UNTRUSTED `feedback` argument.
 - **Unified Review** (on-demand, configurable): `/workflow:review` (or a direct `workflow_review` call) in Work Mode launches a fresh, isolated in-memory AgentSession that independently reviews the implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work) by exploring the actual checkout/worktree itself — it does NOT receive the Work agent's execution summary, diffs, or test claims. The single explicit exception is an optional `feedback` argument the Work agent may pass to respond to a prior round's disputed findings — it is injected as a clearly-labeled UNTRUSTED section that the reviewer must independently verify against the repository before it carries any weight. When `codeReview.enabled` is true, the local `ocr delegate preview` + `ocr delegate rule` commands (zero LLM) run first and the resulting spec — reviewable files plus resolved rules — is injected into the reviewer task; the reviewer reads the diff and full-file context and reports each code-level defect it finds as an F-numbered Code Rule Findings item with file:line evidence. It emits a coverage matrix, correctness/verification findings, code rule findings, and submits the final verdict through its own terminating `review_submit` tool call (report and submit share the same final assistant message; a missing submission resolves fail-closed to FAIL). The verdict is **transient**: it only signals whether this on-demand review loop can end — it is never written to workflow state and never gates `/workflow:commit`. Disable via `review.enabled: false` to hide `/workflow:review` and the tool; set `codeReview.enabled: false` to review without the delegated code review spec.
+- **Runtime QA** (on-demand, configurable): `/workflow:qa` in Work Mode drives the delivery loop — unified Review to effective PASS first (when Review is enabled), then a fresh, isolated in-memory AgentSession that ACTUALLY RUNS the affected functionality (app, dev server, existing test suites, browser/terminal automation) and reports per-flow PASS/FAIL/BLOCKED/SKIPPED evidence against the same authoritative inputs as Review. The QA agent must never install/upgrade/auto-download QA dependencies (including implicit pulls via `npx`/`pnpm dlx`/`uvx` and browser/driver bootstrap downloads such as `playwright install`); missing capabilities produce a report prominently marked `QA status: BLOCKED` (submitted as FAIL through the shared `review_submit` protocol) and the driver STOPS for the user — no auto-fix, no auto-retry. QA defects loop back through Review before re-QA; rounds are persisted per work run (`qa-history.json`, newest 3 kept) for re-disposition, and every authorized call executes a real round (no unchanged-diff reuse — services/data/environment drift even when the diff does not). The verdict is transient: it never enters workflow state and never gates `/workflow:commit`. Disable via `qa.enabled: false`. QA runs under a 60-minute total timeout (the reviewers keep 30 minutes).
 
 ## Modes
 
@@ -49,6 +50,7 @@ Workflow tools and commands are **opt-in by default**: only `/workflow:enable` i
 | Plan Mode | `/workflow:plan` | Brainstorm and produce an implementation plan |
 | Work Mode | `/workflow:work` | Implement the approved plan |
 | Review/Fix Loop | `/workflow:review` | On-demand unified review of the current workspace (incl. active worktree); injects a delegated code review spec (zero LLM) when enabled |
+| QA Loop | `/workflow:qa` | Review → QA delivery loop: unified review to PASS, then an independent runtime QA agent that actually executes the affected functionality and reports per-flow evidence |
 | Merge Mode | `/workflow:merge [--target <branch>] [指令]` | User-triggered branch integration: default rebase + fast-forward, or a custom strategy authorized by trailing instructions (see Merge Mode below) |
 | Commit Mode | `/workflow:commit` | Generate and execute a conventional commit (always available, no review gate) |
 
@@ -104,6 +106,11 @@ Set `workflow.autoEnter: true` to enable workflow commands and tools automatical
       "model": "gpt-5.1",
       "thinking": "high"
     },
+    "qa": {
+      "provider": "openai",
+      "model": "gpt-5.1",
+      "thinking": "high"
+    },
     "work": {
       "provider": "anthropic",
       "model": "claude-sonnet-4-5",
@@ -119,6 +126,9 @@ Set `workflow.autoEnter: true` to enable workflow commands and tools automatical
     "enabled": true
   },
   "review": {
+    "enabled": true
+  },
+  "qa": {
     "enabled": true
   },
   "codeReview": {
@@ -287,7 +297,7 @@ layer, letting lower layers take over.
   configured `contextWindow` is re-applied idempotently when the active model
   matches the role config (see [Per-role context window](#per-role-context-window-contextwindow)). Use `/workflow:status`
   to compare the active runtime model/thinking/window against the configured role.
-- **`workflow.autoEnter`, `planReview.enabled`, `review.enabled`** gate
+- **`workflow.autoEnter`, `planReview.enabled`, `review.enabled`, `qa.enabled`** gate
   command/tool registration, which happens at extension load time using the
   Project/Global layers. They are editable only in **Project** and **Global**
   scopes (the Session layer cannot influence load-time registration), and need
@@ -337,6 +347,7 @@ This prevents wasting tokens when the user still wants to refine the design.
 | `/go [--force]` | Approve current plan and hand off to Work Mode |
 | `/workflow:work [task]` | Skip Plan Mode, go straight to implementation |
 | `/workflow:review` | On-demand unified review of the current workspace (incl. active worktree); injects a delegated code review spec (zero LLM) when `codeReview.enabled` is true |
+| `/workflow:qa` | Review → QA delivery loop: unified review to PASS, then an independent runtime QA agent that executes the affected functionality (per-flow PASS/FAIL/BLOCKED/SKIPPED evidence; BLOCKED stops the loop for the user) |
 | `/workflow:merge [--target <branch>] [指令]` | Enter Merge Mode: integrate the source branch (active workflow worktree branch, or the current ordinary local branch) into a target local branch |
 | `/workflow:commit [notes]` | Generate commit message and commit |
 | `/workflow:status` | Show current workflow state (mode, active runtime model/thinking vs configured role, plan path, run IDs) |
@@ -379,6 +390,20 @@ The unified Review runs an **on-demand, user-triggered** independent reviewer ov
 
 - Implement → optionally `/workflow:review` (with or without the delegated code review) → fix → re-review → `/workflow:commit` (always available, no review gate).
 
+## Runtime QA (On-Demand)
+
+`/workflow:qa` (Work Mode) runs the delivery-verification driver: unified Review to effective PASS first, then the independent runtime QA agent via `workflow_qa`. QA verifies the deliverable by ACTUAL EXECUTION and reports per-flow evidence.
+
+- **Independent execution** — a fresh in-memory AgentSession (shared reviewer runner, same tool inheritance / `.pi/workflow/` guards / scratch-only writes) builds its own coverage matrix (requirement/plan item → affected functionality/dependencies → test flow → expected → actual evidence), decides the minimal-sufficient test set, and runs it: app, dev server, existing test suites, or existing browser/terminal automation.
+- **Authoritative inputs only** — same scoping as Review: Approved Work uses plan-lifecycle requirements + Final Plan + approved todos + current todos; Direct Work uses Work-lifecycle requirements + current todos. Work summaries, diffs, and test claims stay excluded; optional `feedback` is a clearly-labeled UNTRUSTED section and is rejected when the work run has no previous QA round.
+- **Scope discipline** — covers delivered behavior, missing implementations, removed/migrated behavior, key error paths, and callers affected through shared modules/permissions/config/data contracts. No `ocr delegate` spec: implementation and code-rule review stay Review's job.
+- **No installs, immediate BLOCKED** — the QA agent must never install/upgrade/auto-download dependencies (package managers, `npx`/`pnpm dlx`/`uvx` temp pulls, `playwright install`, first-run browser/driver downloads, or skill instructions that would fetch components). Missing capabilities end the round: report marked `QA status: BLOCKED` at the top with missing capabilities, executed vs not-executed flows, and recovery conditions — submitted as FAIL through `review_submit`, and the driver STOPS for the user (environment blockers are user-handled; QA never re-runs automatically).
+- **Flow statuses & verdict** — each flow reports PASS/FAIL/BLOCKED/SKIPPED; the overall `review_submit` verdict stays PASS/FAIL. PASS requires an actually-executed passing flow plus verified critical items; overall BLOCKED, overall SKIPPED, or zero executed flows are FAIL with the reason. An effective PASS additionally requires at least one started repository tool call (shared `madeRepoToolCall` judgment).
+- **Round continuity, always fresh execution** — rounds persist per work run in session-scoped `qa-history.json` (newest 3 kept): the next round injects the bounded previous report plus the file/todo delta and requires per-item re-disposition with fresh evidence. There is deliberately NO unchanged-diff short circuit — every authorized call executes a real round because services, data, and environment drift. `/workflow:reset` clears the history.
+- **Source & hygiene boundaries** — project source/config/deps/Git refs stay unchanged (fixes belong to Work); temporary scripts and artifacts go to a fresh random subdirectory of the scratch root; resources the round started are shut down; a final `git status` check reports drift vs the recorded baseline without auto reset/clean. Cancel/timeout/crash can skip cleanup — external processes may need manual handling (prompt-governed; no process supervisor by design).
+- **Budget** — 60-minute total timeout (`models.qa`, default mirrors `models.review`); reviewers keep 30 minutes. `qa.enabled: false` hides `/workflow:qa` + the tool. `review.enabled: false` runs standalone QA with the Review stage explicitly absent: after a QA-driven fix the combined flow pauses for the user; Review + QA both passing is what completes the chain.
+- **Soft gate** — the verdict is transient (tool result + sidecar history): it never enters WorkflowState, never gates `/workflow:commit`, and `/workflow:commit` / `/workflow:merge` stay under explicit user control. Expected chain: implement → Review PASS → QA PASS → user commits → user merges.
+
 ## Merge Mode (`/workflow:merge`)
 
 `/workflow:merge` is the user-triggered Git integration entry. It works for both kinds of local source branches and enters a dedicated **Merge Mode** that reuses the `work` model role (no new model config):
@@ -413,6 +438,7 @@ pi-workflow adapts to Pi's run modes so Paseo (and other Pi RPC clients) can dri
 |---|---|---|---|
 | `/workflow:settings` | `SettingsList` overlay + searchable model picker | basic-dialog wizard: scope → setting → value (select/input) | stderr guidance, no UI |
 | `/workflow:review` | on-demand review of current workspace | on-demand review of current workspace | stderr guidance, no UI |
+| `/workflow:qa` | Review → QA delivery loop (BLOCKED stops for the user) | Review → QA delivery loop | stderr guidance, no UI |
 | `/workflow:status` | `notify` | `notify` (handled-command, Paseo surfaces it) | stderr text |
 | todo tool | `workflow_todo` + TUI overlay | `update_plan` alias (Paseo native TodoListCard) | provider-dependent |
 | `setStatus` / `setWidget` | footer + overlay widget | Pi emits events; Paseo currently ignores persistent status/widgets | n/a |
@@ -458,6 +484,7 @@ Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) ar
 | `workflow_grill_record` | Record grilling decisions (batch `decisions[]`; legacy single fields accepted) |
 | `workflow_plan_review` | Launch the independent plan-reviewer agent (zero-argument, optional) |
 | `workflow_review` | Launch the on-demand unified reviewer agent (optional `feedback`, Work Mode; injects a delegated code review spec when `codeReview.enabled`) |
+| `workflow_qa` | Launch the independent runtime QA agent (optional `feedback`, Work Mode; actually executes the affected functionality; `QA status: BLOCKED` reports stop the loop) |
 
 ### workflow_plan_review
 
@@ -478,9 +505,19 @@ Launch the on-demand unified reviewer agent (available in Work Mode when `review
 - **Round continuity** — each round (verdict, full output, diff fingerprint, task-input hash) is persisted per work run in session-scoped `review-history.json` (newest 3 kept): the next round injects the previous findings for re-disposition, and short-circuits identically when the diff AND every task input — including the current reviewer protocol text — are unchanged. A protocol change therefore invalidates reuse of rounds produced under the older protocol exactly once. Short-circuited rounds skip the delegate commands (the spec is deterministic from the diff).
 - The verdict is **transient** — it only signals whether this review loop can end. It is never written to workflow state and never gates `/workflow:commit`. Operational metadata (reviewer model, elapsed, turns, tool calls, repo-tool-used, code review enabled/files/rulesTruncated, verdict) is in `details`.
 
+### workflow_qa
+
+Launch the independent runtime QA agent (available in Work Mode when `qa.enabled: true`). Task assembled from workflow state (same authoritative inputs as `workflow_review`), plus a single optional `feedback` argument (rejected when the current work run has no previous QA round).
+
+- The QA agent actually RUNS the affected functionality and reports per-flow PASS/FAIL/BLOCKED/SKIPPED evidence; the overall verdict is submitted via the shared `review_submit` protocol (fail-closed on zero submissions).
+- Every authorized call executes a real QA round (no unchanged-diff short circuit); rounds persist per work run in `qa-history.json` (newest 3 kept) and the next round re-dispositions prior findings with fresh evidence.
+- A report marked `QA status: BLOCKED` means a required capability/condition is missing: the tool result orders an immediate loop stop — present the missing capabilities and recovery conditions to the user; never auto-install or auto-retry.
+- Effective PASS requires the submitted PASS AND at least one started repository tool call. The verdict is transient and never gates `/workflow:commit`. Operational metadata (QA model, elapsed, turns, tool calls, repo-tool-used, blocked, round) is in `details`.
+
 | Path | Purpose |
 |------|---------|
 | `.pi/workflow/config.json` | Project-level config |
 | `.pi/workflow/plan/` | Plan documents (shared, randomized filenames) |
 | `.pi/workflow/sessions/<key>/state.json` | Session-scoped runtime state |
+| `.pi/workflow/sessions/<key>/qa-history.json` | Session-scoped QA round history (per work run, newest 3) |
 | `~/.pi/agent/workflow/config.json` | Global config |

@@ -185,8 +185,9 @@ export function resolveConfigSources(
 		"workflow.autoEnter",
 		"planReview.enabled",
 		"review.enabled",
+		"qa.enabled",
 		"codeReview.enabled",
-		...(["explore", "plan", "planReview", "review", "work", "commit"] as const).flatMap(
+		...(["explore", "plan", "planReview", "review", "qa", "work", "commit"] as const).flatMap(
 			(role) => [
 				`models.${role}.provider`,
 				`models.${role}.model`,
@@ -256,6 +257,11 @@ export function normalizeConfig(cfg: any): WorkflowConfig {
 		cfg.review = { enabled: !!cfg.review.enabled };
 	}
 
+	// Strip unknown qa fields — only enabled is supported.
+	if (cfg.qa && typeof cfg.qa === "object") {
+		cfg.qa = { enabled: !!cfg.qa.enabled };
+	}
+
 	// Strip unknown codeReview fields — only enabled is supported.
 	if (cfg.codeReview && typeof cfg.codeReview === "object") {
 		cfg.codeReview = { enabled: !!cfg.codeReview.enabled };
@@ -270,6 +276,7 @@ export function normalizeConfig(cfg: any): WorkflowConfig {
 		"explore",
 		"plan",
 		"planReview",
+		"qa",
 		"work",
 		"commit",
 		"review",

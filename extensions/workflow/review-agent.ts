@@ -481,14 +481,30 @@ export interface ReviewResult extends PlanReviewAgentResult {
 
 // ── Runner ──────────────────────────────────────────────────────────────────
 
-/** Repository-inspection tool names the reviewer is expected to use. */
-const REPO_TOOL_NAMES = new Set([
+/** Repository-inspection tool names the reviewer is expected to use. Exported
+ *  as the single shared facility so the runtime QA agent judges repo
+ *  inspection with the SAME semantics as Implementation Review (started calls
+ *  via calledToolNames) instead of drifting with a private copy. */
+export const REPO_TOOL_NAMES = new Set([
 	"read",
 	"bash",
 	"grep",
 	"find",
 	"ls",
 ]);
+
+/**
+ * Shared repo-inspection judgment over STARTED tool calls (calledToolNames):
+ * the mandatory review_submit submission is also a tool call, so the
+ * intersection must come from the started-call list to keep the submission
+ * from ever satisfying repo inspection on its own. Used by Implementation
+ * Review and the runtime QA agent. Pure.
+ */
+export function madeRepoToolCallFrom(
+	calledToolNames: string[] | undefined,
+): boolean {
+	return (calledToolNames ?? []).some((name) => REPO_TOOL_NAMES.has(name));
+}
 
 export interface RunReviewAgentOptions {
 	ctx: ExtensionContext;
@@ -714,9 +730,7 @@ export async function runReviewAgent(
 	// check uses STARTED calls (calledToolNames) so the mandatory review_submit
 	// submission — also a tool call — can never satisfy the repo-inspection
 	// requirement on its own.
-	const madeRepoToolCall = (result.calledToolNames ?? []).some((name) =>
-		REPO_TOOL_NAMES.has(name),
-	);
+	const madeRepoToolCall = madeRepoToolCallFrom(result.calledToolNames);
 
 	// The verdict rides on the shared runner result (submitted via the
 	// child-only review_submit tool; fail-closed). No text parsing happens here.

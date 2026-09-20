@@ -73,6 +73,19 @@ import {
 	normalizeWorkFeedback,
 	saveReviewRound,
 } from "./review-history.js";
+import {
+	runQaAgent,
+	buildQaProtocolText,
+	QA_BLOCKED_MARKER,
+	type QaResult,
+} from "./qa-agent.js";
+import {
+	QA_PREVIOUS_ROUND_TEXT_BUDGET,
+	computeQaTaskInputHash,
+	loadQaHistory,
+	saveQaRound,
+	type PreviousQaRoundInput,
+} from "./qa-history.js";
 import { transitionWorkflowMode } from "./mode.js";
 import {
 	WORK_APPROVAL_CUSTOM_TYPE,
@@ -1618,6 +1631,311 @@ export function registerReviewTool(
 	});
 }
 
+// ── workflow_qa tool (runtime QA) ─────────────────────────────────────────
+
+/** Detect the BLOCKED exit marker the QA prompt mandates at a prominent
+ *  position (TOP) of the report when a required capability is missing. Only
+ *  the report head is scanned so a round that merely re-references a previous
+ *  round's BLOCKED marker deeper in the re-disposition text is not misread as
+ *  blocked-this-round. Case/whitespace tolerant; the review_submit schema
+ *  stays PASS/FAIL. */
+const QA_BLOCKED_SCAN_CHARS = 400;
+
+function qaReportBlocked(text: string): boolean {
+	return /QA status:\s*BLOCKED/i.test(text.slice(0, QA_BLOCKED_SCAN_CHARS));
+}
+
+export function registerQaTool(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.registerTool({
+		name: "workflow_qa",
+		label: "Workflow QA",
+		description:
+			"Launch an independent runtime QA agent that ACTUALLY RUNS the affected functionality of the current deliverable (app, dev server, existing test suites, browser/terminal automation) and reports per-flow PASS/FAIL/BLOCKED/SKIPPED evidence against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work). Work Mode only, on-demand (triggered by /workflow:qa after Review PASS). The QA agent builds its own coverage matrix from the authoritative inputs, executes the flows itself, and submits a transient PASS/FAIL verdict through review_submit (zero submissions fail closed to FAIL). It must never install/upgrade/auto-download QA dependencies — missing capabilities produce a report marked 'QA status: BLOCKED' and the driver must STOP for the user. Optional `feedback` (free text) lets the Work agent respond to a prior QA round's disputed findings; it is injected as a clearly-labeled UNTRUSTED section and is rejected when this work run has no previous QA round. Every call executes a real QA round (no unchanged-diff reuse); rounds are persisted per work run (qa-history.json) so the next round re-dispositions prior findings. The verdict never gates /workflow:commit and is never persisted to WorkflowState.",
+		parameters: Type.Object({
+			feedback: Type.Optional(
+				Type.String({
+					description:
+						"Optional free-text response to a prior QA round's disputed findings. Map each disputed FAIL/BLOCKED flow or Critical/Important finding to its technical rationale with verifiable evidence (file:line, command output). The QA agent treats this as UNTRUSTED and verifies each claim independently; it cannot waive requirements/todos or force a PASS on its own. Rejected when the current work run has no previous QA round. Omit for a normal QA round.",
+				}),
+			),
+		}),
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			const denied = checkWorkflowEnabled(ctx, getAgentDir);
+			if (denied) return denied;
+
+			const sessionKey = getSessionKey(ctx.sessionManager);
+			const state = loadState(ctx.cwd, sessionKey);
+			if (state.mode !== "work") {
+				throw new Error(
+					`workflow_qa only allowed in Work Mode (current: ${state.mode}).`,
+				);
+			}
+			if (!state.workRunId) {
+				throw new Error(
+					"No active Work run. Enter Work Mode via /workflow:work or plan approval first.",
+				);
+			}
+
+			const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
+			if (!config.qa.enabled) {
+				return {
+					isError: true,
+					content: [
+						{
+							type: "text",
+							text: "QA is not enabled (qa.enabled: false). Enable it in config and /reload to expose the QA tool.",
+						},
+					],
+					details: { qaEnabled: false },
+				};
+			}
+
+			// Resolve the validated QA cwd (active worktree or main checkout).
+			const reviewCwd = resolveEffectiveCwd(ctx.cwd, state);
+			const primaryCwd = ctx.cwd;
+
+			// Approved Work: read the Final Plan + approved todos. Direct Work:
+			// Work-lifecycle requirements + current todos. Same helpers, one
+			// snapshot per round, shared by the task and the history identity.
+			const isApprovedWork = !!state.planPath;
+			let planMarkdown: string | undefined;
+			if (isApprovedWork) {
+				planMarkdown = requirePlanMarkdown(ctx.cwd, state.planPath!);
+			}
+
+			// Optional non-authoritative feedback, normalized once so the task
+			// hash and the QA task share one identical value.
+			const feedback = normalizeWorkFeedback(params.feedback);
+
+			const branch = ctx.sessionManager?.getBranch?.();
+			const requirements = isApprovedWork
+				? extractUserRequirements(branch, state.planStartEntryId)
+				: extractUserRequirements(branch, state.workStartEntryId);
+
+			// ── QA round continuity (checked BEFORE the model prep so a rejected
+			// feedback does not build a child runtime) ──
+			// History carries the previous round's findings forward for
+			// re-disposition. There is deliberately NO unchanged-diff short
+			// circuit: every authorized call executes a real QA round, because
+			// services/data/environment drift even when the diff does not.
+			const history = loadQaHistory(ctx.cwd, sessionKey);
+			const lastRound =
+				history && history.workRunId === state.workRunId
+					? history.rounds[history.rounds.length - 1]
+					: undefined;
+			if (feedback && !lastRound) {
+				return {
+					isError: true,
+					content: [
+						{
+							type: "text",
+							text: "workflow_qa feedback requires a previous QA round in the current work run. Run workflow_qa() without arguments first.",
+						},
+					],
+					details: { error: true, hasPreviousRound: false },
+				};
+			}
+
+			// QA model plan (child runtime + validated window clone + shared
+			// SettingsManager), prepared before the round so an invalid
+			// contextWindow errors out before any round is recorded.
+			let prepared: PreparedReviewerModel;
+			try {
+				prepared = await prepareReviewerModelPlan({
+					ctx,
+					modelSpec: config.models.qa,
+					reviewCwd,
+					progressLabel: "QA",
+				});
+			} catch (err) {
+				const reason = err instanceof Error ? err.message : String(err);
+				return {
+					isError: true,
+					content: [{ type: "text", text: `QA failed: ${reason}` }],
+					details: { error: true, reason },
+				};
+			}
+
+			const diffSnapshot = computeWorkspaceDiffSnapshot(reviewCwd);
+			const todoHash = computeTodoHash(state.todos);
+			const qaModel = `${config.models.qa.provider}/${config.models.qa.model}`;
+			// Snapshot the QA protocol text ONCE so the task-input hash and the QA
+			// run share the same behavioral baseline; a protocol change invalidates
+			// prior-round reuse semantics in one shot.
+			const protocolText = buildQaProtocolText();
+			const taskInputHash = computeQaTaskInputHash({
+				requirements,
+				planMarkdown,
+				approvedTodos: state.approvedTodos,
+				todos: state.todos,
+				qaModel,
+				protocolText,
+				qaContext: prepared.contextBasis,
+				feedback,
+			});
+
+			const nextRound = (lastRound?.round ?? 0) + 1;
+
+			const previousRound: PreviousQaRoundInput | undefined = lastRound
+				? {
+						round: lastRound.round,
+						verdict: lastRound.verdict,
+						qaText: boundedHeadTail(
+							lastRound.qaText,
+							QA_PREVIOUS_ROUND_TEXT_BUDGET,
+						),
+						changedFiles:
+							lastRound.deltaUnknown || diffSnapshot.unknown
+								? []
+								: filesChangedSince(lastRound, diffSnapshot),
+						deltaUnknown: lastRound.deltaUnknown || diffSnapshot.unknown,
+						todosChanged: lastRound.todoHash !== todoHash,
+					}
+				: undefined;
+
+			let result: QaResult;
+			try {
+				result = await runQaAgent({
+					ctx,
+					pi,
+					modelSpec: config.models.qa,
+					prepared,
+					branch,
+					planStartEntryId: state.planStartEntryId,
+					workStartEntryId: state.workStartEntryId,
+					planMarkdown,
+					approvedTodos: state.approvedTodos,
+					currentTodos: state.todos,
+					reviewCwd,
+					primaryCwd,
+					previousRound,
+					feedback,
+					parentSignal: signal,
+					onProgress: (text) => {
+						onUpdate?.({
+							content: [{ type: "text", text }],
+							details: {},
+						});
+					},
+				});
+			} catch (err) {
+				// QA run failure (timeout/abort/model error) surfaces as an
+				// explicit tool error so the driver does not treat it as success
+				// and stops instead of retrying. AbortError from a cancelled
+				// signal is rethrown so the platform handles cancellation.
+				if (err instanceof Error && err.name === "AbortError") throw err;
+				const reason = err instanceof Error ? err.message : String(err);
+				return {
+					isError: true,
+					content: [
+						{
+							type: "text",
+							text: `QA failed: ${reason}\n\n⛔ Stop the QA loop here. Show this error to the user and wait for them to resolve the condition or explicitly re-trigger QA; do NOT auto-retry or auto-install anything.`,
+						},
+					],
+					details: { error: true, reason },
+				};
+			}
+
+			// Persist this round so the next workflow_qa call can carry its
+			// findings forward. A failed write must not turn a successful QA run
+			// into an error — the next round simply starts fresh.
+			try {
+				saveQaRound(ctx.cwd, sessionKey, {
+					workRunId: state.workRunId,
+					round: nextRound,
+					at: new Date().toISOString(),
+					verdict: result.verdict,
+					verdictReason: result.verdictReason,
+					model: result.reviewerModel,
+					elapsedMs: result.elapsedMs,
+					turns: result.turns,
+					toolCalls: result.toolCalls,
+					madeRepoToolCall: result.madeRepoToolCall,
+					qaText: result.text,
+					diffFingerprint: diffSnapshot.fingerprint,
+					deltaUnknown: diffSnapshot.unknown,
+					fileHashes: diffSnapshot.fileHashes,
+					untrackedHashes: diffSnapshot.untrackedHashes,
+					todoHash,
+					taskInputHash,
+				});
+			} catch {
+				// best-effort history persistence
+			}
+
+			// Transient verdict — same soft-signal semantics as review. A PASS
+			// requires the submitted verdict AND actual repo tool activity.
+			const passed =
+				result.verdict === "PASS" && result.madeRepoToolCall;
+			const blocked = qaReportBlocked(result.text);
+
+			const elapsedSec = Math.round(result.elapsedMs / 1000);
+			const ops: string[] = [
+				`qa agent: ${result.reviewerModel}${result.thinking ? ` / ${result.thinking}` : ""}`,
+				`round: ${nextRound}`,
+				`elapsed: ${elapsedSec}s`,
+				`turns: ${result.turns}`,
+				`tool calls: ${result.toolCalls}`,
+				`repo tool used: ${result.madeRepoToolCall ? "yes" : "NO"}`,
+				`blocked: ${blocked ? "YES (see report)" : "no"}`,
+				`verdict: ${result.verdict}${result.verdictReason ? ` (${result.verdictReason})` : ""}`,
+			];
+			if (result.unavailableTools.length) {
+				ops.push(`unavailable tools: ${result.unavailableTools.join(", ")}`);
+			}
+			if (result.stopReason && result.stopReason !== "stop") {
+				ops.push(`stopReason: ${result.stopReason}`);
+			}
+			if (result.errorMessage) {
+				ops.push(`error: ${result.errorMessage}`);
+			}
+
+			let verdictNotice: string;
+			if (passed) {
+				verdictNotice = "\n\n✅ QA PASS. The Review → QA chain is complete for this round; report the result to the user — /workflow:commit and /workflow:merge stay under explicit user control.";
+			} else if (result.verdict === "PASS" && !result.madeRepoToolCall) {
+				verdictNotice = "\n\n❌ Verdict was PASS but the QA agent made no repository tool calls — treated as FAIL (no independent verification). Re-run workflow_qa().";
+			} else if (blocked) {
+				verdictNotice = `\n\n⛔ ${QA_BLOCKED_MARKER}: a required QA capability/condition is missing. STOP the loop now — present the missing capabilities and recovery conditions from the report to the user and wait. Do NOT auto-install anything, do NOT treat this as a product defect to fix, and do NOT re-run QA until the user resolves the blocker and explicitly re-triggers it.`;
+			} else {
+				verdictNotice = "\n\n❌ QA did NOT pass. Confirm each reported defect against the evidence; fix real product defects, run targeted checks, then re-run Review to PASS and QA again. Use workflow_qa({ feedback }) for disputed findings. /workflow:commit is always available regardless of the verdict.";
+			}
+
+			return {
+				content: [
+					{
+						type: "text",
+						text: `${result.text}${verdictNotice}\n\n---\n${ops.join(" | ")}`,
+					},
+				],
+				details: {
+					qaModel: result.reviewerModel,
+					thinking: result.thinking,
+					elapsedMs: result.elapsedMs,
+					turns: result.turns,
+					toolCalls: result.toolCalls,
+					requestedTools: result.requestedTools,
+					activeTools: result.activeTools,
+					unavailableTools: result.unavailableTools,
+					stopReason: result.stopReason,
+					errorMessage: result.errorMessage,
+					verdict: result.verdict,
+					verdictReason: result.verdictReason,
+					passed,
+					madeRepoToolCall: result.madeRepoToolCall,
+					blocked,
+					round: nextRound,
+				},
+				usage: result.usage,
+			};
+		},
+	});
+}
+
 // ── Bulk registration / gating ──────────────────────────────────────
 
 const _workflowToolsRegistered = new WeakSet<ExtensionAPI>();
@@ -2106,6 +2424,7 @@ export function registerAllWorkflowTools(
 	// rechecks workflow/config gates with the real session context.
 	registerPlanReviewTool(pi, getAgentDir);
 	registerReviewTool(pi, getAgentDir);
+	registerQaTool(pi, getAgentDir);
 	registerInitCompleteTool(pi, getAgentDir);
 	registerMergeCompleteTool(pi, getAgentDir);
 

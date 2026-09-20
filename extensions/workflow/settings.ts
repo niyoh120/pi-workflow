@@ -128,7 +128,7 @@ interface SettingDescriptor {
 	reloadSensitive?: boolean;
 }
 
-const ROLES = ["explore", "plan", "planReview", "review", "work", "commit"] as const;
+const ROLES = ["explore", "plan", "planReview", "review", "qa", "work", "commit"] as const;
 
 const THINKING_VALUES = [
 	"off",
@@ -148,6 +148,7 @@ const RELOAD_SENSITIVE_IDS = new Set([
 	"workflow.autoEnter",
 	"planReview.enabled",
 	"review.enabled",
+	"qa.enabled",
 ]);
 
 function buildDescriptors(): SettingDescriptor[] {
@@ -177,6 +178,15 @@ function buildDescriptors(): SettingDescriptor[] {
 				"Expose /workflow:review and the workflow_review tool (requires /reload to register/unregister).",
 			kind: "boolean",
 			path: ["review", "enabled"],
+			reloadSensitive: true,
+		},
+		{
+			id: "qa.enabled",
+			label: "qa · enabled (Runtime QA)",
+			description:
+				"Expose /workflow:qa and the workflow_qa tool: an independent QA agent that actually runs the affected functionality and reports per-flow PASS/FAIL/BLOCKED/SKIPPED evidence (requires /reload to register/unregister).",
+			kind: "boolean",
+			path: ["qa", "enabled"],
 			reloadSensitive: true,
 		},
 		{

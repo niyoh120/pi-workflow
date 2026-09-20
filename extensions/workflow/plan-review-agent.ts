@@ -1018,6 +1018,11 @@ export interface RunIndependentReviewerOptions {
 	onProgress?: (text: string) => void;
 	/** Label for timeout/abort messages, e.g. "Plan review" / "Implementation review". */
 	progressLabel: string;
+	/** Optional total-timeout override in ms. Omitted → the shared 30-minute
+	 *  REVIEWER_TOTAL_TIMEOUT_MS default (both existing reviewers). Runtime QA
+	 *  passes its own 60-minute constant. The value is used verbatim in the
+	 *  timeout error message. */
+	totalTimeoutMs?: number;
 	/** Precomputed tool surface snapshot (Plan Review passes the same snapshot
 	 *  it hashed into the review basis). When omitted the runner reconstructs
 	 *  it internally — the Implementation Review default path. */
@@ -1170,11 +1175,14 @@ export async function runIndependentReviewer(
 		}
 	});
 
-	// Total timeout + parent-signal linkage.
+	// Total timeout + parent-signal linkage. The timeout defaults to the shared
+	// 30-minute reviewer budget; callers may pass their own total budget (QA
+	// uses 60 minutes).
+	const totalTimeoutMs = opts.totalTimeoutMs ?? REVIEWER_TOTAL_TIMEOUT_MS;
 	const controller = new AbortController();
 	const timer = setTimeout(
 		() => controller.abort(),
-		REVIEWER_TOTAL_TIMEOUT_MS,
+		totalTimeoutMs,
 	);
 	const onParentAbort = () => controller.abort();
 	if (opts.parentSignal) {
@@ -1266,7 +1274,7 @@ export async function runIndependentReviewer(
 
 	if (aborted) {
 		const reason = timedOut()
-			? `${progressLabel} timed out after ${REVIEWER_TOTAL_TIMEOUT_MS}ms`
+			? `${progressLabel} timed out after ${totalTimeoutMs}ms`
 			: `${progressLabel} aborted`;
 		throw new Error(
 			`${reason} (model: ${reviewerLabel}, turns: ${turns}, tools: ${toolCalls}).`,

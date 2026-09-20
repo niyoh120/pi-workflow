@@ -23,6 +23,7 @@ export const WORKFLOW_GATED_TOOLS = [
 	"workflow_grill_record",
 	"workflow_plan_review",
 	"workflow_review",
+	"workflow_qa",
 	"workflow_init_complete",
 	"workflow_merge_complete",
 ] as const;
@@ -62,10 +63,10 @@ const MERGE_WORKFLOW_TOOL_NAMES = ["workflow_merge_complete"];
 /**
  * Modes that may call gated workflow tools. Each mode's allowed set is
  * resolved by computeWorkflowToolNames. Explore exposes no workflow tools;
- * Work exposes todo (+ optional code review); Plan keeps plan read/save and
- * grilling; Init exposes only init_complete; Merge exposes only
- * merge_complete (todo/review/plan tools stay off so the merge stays
- * focused on the branch integration).
+ * Work exposes todo (+ optional unified review and runtime QA); Plan keeps
+ * plan read/save and grilling; Init exposes only init_complete; Merge
+ * exposes only merge_complete (todo/review/qa/plan tools stay off so the
+ * merge stays focused on the branch integration).
  */
 export function isWorkflowToolMode(mode: Mode): boolean {
 	return mode === "plan" || mode === "work" || mode === "init" || mode === "merge";
@@ -100,6 +101,7 @@ export function computeWorkflowToolNames(
 		case "work": {
 			const names = withTodoToolName([...WORK_WORKFLOW_TOOL_NAMES], todoToolName);
 			if (config.review.enabled) names.push("workflow_review");
+			if (config.qa.enabled) names.push("workflow_qa");
 			return names;
 		}
 		case "explore":

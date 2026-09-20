@@ -21,7 +21,7 @@ import {
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
 import { DEFAULT_STATE } from "./defaults.js";
-import { planDir, planReviewHistoryPath, reviewHistoryPath } from "./paths.js";
+import { planDir, planReviewHistoryPath, qaHistoryPath, reviewHistoryPath } from "./paths.js";
 import { loadConfigForContext, resolveConfigSources } from "./config.js";
 import { PASEO_VERIFIED_VERSION } from "./todo-compat.js";
 import {
@@ -845,6 +845,9 @@ export function registerAllWorkflowCommands(
 	// Register the command definition unconditionally. The handler resolves
 	// codeReview.enabled with the real trusted session context before running.
 	registerWorkflowReviewCommand(pi, getAgentDir);
+	// Register the QA command definition unconditionally. The handler resolves
+	// qa.enabled with the real trusted session context before running.
+	registerWorkflowQaCommand(pi, getAgentDir);
 	registerWorkflowMergeCommand(pi, getAgentDir);
 	registerWorkflowCommitCommand(pi, getAgentDir);
 	registerWorkflowStatusCommand(pi, getAgentDir);
@@ -1158,6 +1161,121 @@ Review scope: 当前 workspace（含 active worktree）。
 	pi.sendUserMessage(promptText);
 }
 
+// registerWorkflowQaCommand — Review → QA delivery-verification driver.
+export function registerWorkflowQaCommand(
+	pi: ExtensionAPI,
+	getAgentDir: () => string,
+): void {
+	pi.registerCommand("workflow:qa", {
+		description:
+			"Run the Review → QA delivery loop: unified review to PASS, then an independent runtime QA agent that actually executes the affected functionality.",
+		handler: async (_args, ctx) => {
+			await ctx.waitForIdle();
+
+			const sessionKey = ctxSessionKey(ctx);
+			const current = loadState(ctx.cwd, sessionKey);
+			const mergeDenial = activeMergeDenial(current);
+			if (mergeDenial) {
+				ctx.ui.notify(mergeDenial, "error");
+				return;
+			}
+			// Init Mode must finish first: switching modes here would clear
+			// initTargetPath/initReturnMode and orphan the init run.
+			if (current.mode === "init") {
+				ctx.ui.notify(
+					"当前处于 Init Mode。请先调用 workflow_init_complete 完成或取消初始化，再执行 /workflow:qa。",
+					"error",
+				);
+				return;
+			}
+			const config = loadConfigForContext(ctx.cwd, getAgentDir(), sessionKey, ctx);
+			if (!config.qa.enabled) {
+				ctx.ui.notify(
+					"QA is not enabled. Set qa.enabled: true in config and /reload.",
+					"error",
+				);
+				return;
+			}
+
+			// JSON/print: no UI surface; stderr keeps stdout protocol/print output clean.
+			if (ctx.mode === "json" || ctx.mode === "print") {
+				console.error(
+					"workflow qa: /workflow:qa requires interactive mode (TUI/RPC). " +
+						"In JSON/print mode, call workflow_qa directly.",
+				);
+				return;
+			}
+
+			await startQaLoop(pi, ctx, getAgentDir, sessionKey, config.review.enabled);
+			return;
+		},
+	});
+}
+
+/**
+ * Shared Review → QA loop kickoff. Validates the worktree, moves the next
+ * agent turn into Work runtime, and sends the driver prompt: unified review
+ * to effective PASS first (when review is enabled), then workflow_qa; QA
+ * defects loop back through Review before re-QA; a "QA status: BLOCKED"
+ * report STOPS the loop for the user (no auto-install, no auto-retry).
+ */
+async function startQaLoop(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	getAgentDir: () => string,
+	sessionKey: string,
+	reviewEnabled: boolean,
+): Promise<void> {
+	const current = loadState(ctx.cwd, sessionKey);
+	if (current.worktreePath) {
+		const validation = validateWorktreeState(ctx.cwd, current);
+		if (!validation.ok) {
+			ctx.ui.notify(
+				`Active worktree is invalid: ${validation.reason}. Run /workflow:status or /workflow:reset.`,
+				"error",
+			);
+			return;
+		}
+	}
+	const state: WorkflowState = {
+		...current,
+		mode: "work",
+		workRunId: current.workRunId ?? crypto.randomUUID(),
+	};
+	const result = await transitionWorkflowMode({
+		pi,
+		ctx,
+		sessionKey,
+		nextState: state,
+		getAgentDir,
+	});
+	if (!result.ok) {
+		ctx.ui.notify(result.reason, "error");
+		return;
+	}
+
+	const reviewStage = reviewEnabled
+		? [
+				"1. 先执行统一 Review 循环至有效 PASS：调用 `workflow_review()`，确认存在的问题逐条修复并运行最相关测试，或对误判在下一轮提交 `workflow_review({ feedback: \"...\" })`（附 file:line / 命令输出等可复核证据），直到 PASS；相同输入短路会直接复用上一轮结论。第一轮就没有 Critical/Important 问题时直接结束 Review 阶段。2-3 轮仍有分歧时停止交用户裁决。",
+			].join("\n")
+		: [
+				"1. Review 阶段缺席（review.enabled=false）：明确向用户说明后将直接进入 QA 阶段。QA 发现缺陷并修复后，暂停组合流程并交用户决定恢复 Review 或下一步；Review 与 QA 都实际通过才算组合链路完成。",
+			].join("\n");
+	const promptText = `请执行 Review → QA 交付验证流程。
+
+Scope: 当前 workspace（含 active worktree）。
+
+要求：
+${reviewStage}
+2. Review 有效 PASS 后调用 \`workflow_qa()\`（无参数）启动独立运行时 QA；QA agent 会实际运行受影响功能并逐流报告 PASS/FAIL/BLOCKED/SKIPPED 证据。
+3. QA 报告产品缺陷时：逐条对照证据确认 → 修复 → 运行针对性检查 → 重新 Review 至 PASS → 再次 \`workflow_qa()\`。每次实现变化后重新核对这两个阶段。对争议 finding 使用各自 feedback 通道（\`workflow_review({ feedback })\` / \`workflow_qa({ feedback })\`，feedback 须逐条附可复核证据）；约 3 次修复/复核仍无进展时停止并交用户裁决；Minor 项按价值处理。
+4. QA 报告 "QA status: BLOCKED" 时立即结束本次流程：向用户展示缺失工具/能力、受阻测试流和需要用户处理的条件。禁止自行安装/升级/自动下载 QA 依赖，禁止把环境阻塞当产品缺陷修复，禁止自动重试 QA；用户处理阻塞并明确重新触发后才继续。工具错误和用户取消同样停止自动循环。
+5. QA PASS 后向用户报告结果。\`/workflow:commit\` 与 \`/workflow:merge\` 始终由用户显式触发，你不得自动执行。`;
+	ctx.ui.notify("Starting Review → QA delivery loop: workspace.", "info");
+	pi.setSessionName("qa: workspace");
+	pi.sendUserMessage(promptText);
+}
+
 
 export function registerWorkflowCommitCommand(
 	pi: ExtensionAPI,
@@ -1446,8 +1564,9 @@ export function registerWorkflowStatusCommand(
 			msg += `\nworkflow.autoEnter: ${eff.workflow.autoEnter} (source: ${report.sources["workflow.autoEnter"]})`;
 			msg += `\nplanReview.enabled: ${eff.planReview.enabled} (source: ${report.sources["planReview.enabled"]})`;
 			msg += `\nreview.enabled: ${eff.review.enabled} (source: ${report.sources["review.enabled"]})`;
+			msg += `\nqa.enabled (Runtime QA): ${eff.qa.enabled} (source: ${report.sources["qa.enabled"]})`;
 			msg += `\ncodeReview.enabled (Delegated Code Review): ${eff.codeReview.enabled} (source: ${report.sources["codeReview.enabled"]})`;
-			for (const r of ["explore", "plan", "planReview", "review", "work", "commit"] as const) {
+			for (const r of ["explore", "plan", "planReview", "review", "qa", "work", "commit"] as const) {
 				const spec = eff.models[r];
 				if (!spec) continue;
 				msg += `\nmodels.${r}: ${spec.provider}/${spec.model} / ${spec.thinking ?? "(none)"} / ctx ${
@@ -1643,6 +1762,9 @@ export function registerWorkflowResetCommand(pi: ExtensionAPI): void {
 			// Drop the plan-review round history too (session-scoped per-plan-run
 			// cache powering reuse/incremental rounds).
 			fs.rmSync(planReviewHistoryPath(ctx.cwd, sessionKey), { force: true });
+			// Drop the QA round history (session-scoped per-work-run sidecar) so
+			// a new work run starts with no stale QA findings.
+			fs.rmSync(qaHistoryPath(ctx.cwd, sessionKey), { force: true });
 
 			ctx.ui.setStatus("lite-sp", undefined);
 			ctx.ui.notify("已清空 workflow 状态。", "info");

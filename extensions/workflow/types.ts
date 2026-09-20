@@ -8,12 +8,15 @@ export type Thinking = ModelThinkingLevel;
  *  structurally identical local aliases). */
 export type ReviewerVerdict = "PASS" | "FAIL";
 
-/** Workflow roles — only the ones we actively configure models for. */
+/** Workflow roles — only the ones we actively configure models for.
+ *  `qa` is the runtime QA child-agent role (workflow_qa); the parent Work
+ *  session keeps using the `work` role. */
 export type Role =
 	| "explore"
 	| "plan"
 	| "planReview"
 	| "review"
+	| "qa"
 	| "work"
 	| "commit";
 
@@ -103,6 +106,7 @@ export interface WorkflowConfigOverride {
 	workflow?: Partial<WorkflowConfig["workflow"]>;
 	planReview?: Partial<WorkflowConfig["planReview"]>;
 	review?: Partial<WorkflowConfig["review"]>;
+	qa?: Partial<WorkflowConfig["qa"]>;
 	codeReview?: Partial<WorkflowConfig["codeReview"]>;
 }
 
@@ -125,6 +129,18 @@ export interface WorkflowConfig {
 	 * gates `/workflow:commit` and is never persisted to WorkflowState.
 	 */
 	review: {
+		enabled: boolean;
+	};
+	/**
+	 * Runtime QA via an independent QA agent — gated by this enabled flag.
+	 * When enabled (default), the `workflow_qa` tool is available in Work Mode
+	 * and `/workflow:qa` drives the Review → QA loop. The QA agent actually
+	 * RUNS the affected functionality (app, dev server, tests, browser/terminal
+	 * automation) and reports per-flow PASS/FAIL/BLOCKED/SKIPPED evidence. The
+	 * verdict is transient (tool output + sidecar history); it never gates
+	 * `/workflow:commit` and is never persisted to WorkflowState.
+	 */
+	qa: {
 		enabled: boolean;
 	};
 	/** Delegated code review toggle for the unified Review. When true,

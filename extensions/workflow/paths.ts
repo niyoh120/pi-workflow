@@ -63,6 +63,16 @@ export function planReviewHistoryPath(cwd: string, sessionKey: string): string {
 }
 
 /**
+ * Session-scoped QA round history path. Separate from state.json so the
+ * transient QA verdict stays out of WorkflowState (it never gates
+ * /workflow:commit). Managed exclusively by the workflow_qa tool. Does NOT
+ * create directories.
+ */
+export function qaHistoryPath(cwd: string, sessionKey: string): string {
+  return path.join(sessionDir(cwd, sessionKey), "qa-history.json");
+}
+
+/**
  * Derive a safe session key for filesystem use.
  * Hashes the session identity so raw ids/paths never become path segments directly.
  */

@@ -211,7 +211,7 @@ console.log("\n=== Part 2: reviewer tool-surface reconstruction ===");
 			return new Set([
 				"workflow_todo", "workflow_plan_read", "workflow_plan_save",
 				"workflow_plan_approve", "workflow_plan_clear", "workflow_grill_record",
-				"workflow_plan_review", "workflow_review",
+				"workflow_plan_review", "workflow_review", "workflow_qa",
 				"workflow_init_complete", "workflow_merge_complete",
 				"update_plan",
 			]);
@@ -263,7 +263,7 @@ console.log("\n=== Part 2: reviewer tool-surface reconstruction ===");
 	const stubGated = new Set([
 		"workflow_todo", "workflow_plan_read", "workflow_plan_save",
 		"workflow_plan_approve", "workflow_plan_clear", "workflow_grill_record",
-		"workflow_plan_review", "workflow_review",
+		"workflow_plan_review", "workflow_review", "workflow_qa",
 		"workflow_init_complete", "workflow_merge_complete",
 	]);
 	const realGated = new Set(realManagedNames);
@@ -1232,7 +1232,7 @@ console.log("\n=== Part 10: review config role + enabled flag ===");
 	assert(!/"implementationReview"/.test(configTs), "config.ts: VALID_ROLES no longer includes implementationReview");
 	assert(/review && typeof cfg\.review === "object"/.test(configTs), "config.ts: normalizeConfig strips unknown review fields");
 	assert(configTs.includes('"review.enabled"'), "config.ts: leafPaths includes review.enabled");
-	assert(/"planReview", "review", "work"/.test(configTs), "config.ts: leafPaths models list includes review");
+	assert(/"planReview", "review", "qa", "work"/.test(configTs), "config.ts: leafPaths models list includes review and qa");
 
 	// settings.ts: ROLES + RELOAD_SENSITIVE_IDS + descriptors.
 	assert(settingsTs.includes('"review"'), "settings.ts: ROLES includes review");
@@ -1251,7 +1251,9 @@ console.log("\n=== Part 10: review config role + enabled flag ===");
 
 	// tools.ts: unified review handler uses models.review + codeReview.enabled.
 	const reviewToolStart = toolsTs.indexOf("export function registerReviewTool");
-	const reviewToolEnd = toolsTs.indexOf("// ── Bulk registration", reviewToolStart);
+	// Stop at the workflow_qa tool marker: the QA tool block sits between the
+	// unified review tool and the bulk-registration section.
+	const reviewToolEnd = toolsTs.indexOf("// ── workflow_qa tool", reviewToolStart);
 	const reviewToolBlock = toolsTs.slice(reviewToolStart, reviewToolEnd);
 	assert(reviewToolBlock.includes("config.models.review"), "tools.ts: unified review handler uses config.models.review");
 	assert(reviewToolBlock.includes("config.codeReview.enabled"), "tools.ts: unified review handler passes config.codeReview.enabled as includeCodeReview");
@@ -1690,7 +1692,8 @@ console.log("\n=== Part 12: protocol single source + verdicts + evidence ===");
 	assert(["read"].some((n) => implRepoMod.REPO_TOOL_NAMES.has(n)), "a started repo tool satisfies Implementation repo evidence");
 	assert(!["review_submit"].some((n) => planRepoMod.PLAN_REPO_TOOL_NAMES.has(n)), "submit-only completions do NOT satisfy Plan repo evidence");
 	assert(["read"].every((n) => planRepoMod.PLAN_REPO_TOOL_NAMES.has(n)), "a successful repo tool completion satisfies Plan repo evidence");
-	assert(/madeRepoToolCall = \(result\.calledToolNames \?\? \[\]\)\.some\(\(name\) =>\s*REPO_TOOL_NAMES\.has\(name\)/.test(reviewTs), "Implementation madeRepoToolCall derives from calledToolNames ∩ REPO_TOOL_NAMES");
+	assert(reviewTs.includes("export function madeRepoToolCallFrom"), "madeRepoToolCallFrom shared helper exported from review-agent.ts (QA reuses the same judgment)");
+	assert(/const madeRepoToolCall = madeRepoToolCallFrom\(result\.calledToolNames\)/.test(reviewTs), "Implementation madeRepoToolCall derives from the shared calledToolNames ∩ REPO_TOOL_NAMES helper");
 	assert(/hasSuccessfulRepoInspection = successful\.some\(\(name\) =>\s*PLAN_REPO_TOOL_NAMES\.has\(name\)/.test(agentTs), "runPlanReviewAgent derives hasSuccessfulRepoInspection from successfulToolNames ∩ PLAN_REPO_TOOL_NAMES");
 	assert(agentTs.includes("export interface PlanReviewResult extends PlanReviewAgentResult"), "PlanReviewResult extends the shared runner result");
 	assert(/verdict: ReviewerVerdict;/.test(agentTs), "shared runner result carries the submitted verdict");

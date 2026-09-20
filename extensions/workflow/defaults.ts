@@ -22,6 +22,11 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
 			model: "gpt-5.1",
 			thinking: "high",
 		},
+		qa: {
+			provider: "openai",
+			model: "gpt-5.1",
+			thinking: "high",
+		},
 		work: {
 			provider: "anthropic",
 			model: "claude-sonnet-4-5",
@@ -40,6 +45,9 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
 		enabled: true,
 	},
 	review: {
+		enabled: true,
+	},
+	qa: {
 		enabled: true,
 	},
 	codeReview: {

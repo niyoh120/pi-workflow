@@ -794,7 +794,10 @@ console.log("\n=== Check 7: Code review tooling ===");
 	// The unified tool is zero-argument and injects the delegated code review
 	// spec via codeReview.enabled.
 	const reviewToolStart = toolsTs.indexOf("export function registerReviewTool");
-	const reviewToolEnd = toolsTs.indexOf("// ── Bulk registration", reviewToolStart);
+	// The QA tool block was inserted between the unified review tool and the
+	// bulk-registration section; stop the extraction at the QA marker so the
+	// review-block assertions do not scan workflow_qa content.
+	const reviewToolEnd = toolsTs.indexOf("// ── workflow_qa tool", reviewToolStart);
 	assert(reviewToolStart >= 0 && reviewToolEnd > reviewToolStart, "tools.ts: unified review tool block anchors exist");
 	const reviewToolBlock = toolsTs.slice(reviewToolStart, reviewToolEnd);
 	// The unified tool takes a single OPTIONAL feedback field; workflow_review()
@@ -1785,7 +1788,7 @@ function validateWorktreeIntegrationStatic() {
 	// passes it to runReviewAgent so the delegate commands + reviewer run
 	// against the active worktree's working tree and branch.
 	const crStart = tools.indexOf("export function registerReviewTool");
-	const crEnd = tools.indexOf("// ── Bulk registration", crStart);
+	const crEnd = tools.indexOf("// ── workflow_qa tool", crStart);
 	assert(
 		crStart >= 0 && crEnd > crStart,
 		"tools.ts: unified review block anchors exist for cwd assertion",
