@@ -35,6 +35,7 @@ import {
 	deactivateWorkflowTools,
 	setWorkflowStatus,
 	transitionWorkflowMode,
+	type WorkflowModeTransitionResult,
 	isWorkflowToolMode,
 	workflowManagedToolNames,
 	computeWorkflowToolNames,
@@ -46,8 +47,12 @@ import {
 import { execSync } from "node:child_process";
 import path from "node:path";
 import {
+	buildWorktreeBranchName,
+	createWorktree,
 	deleteWorktreeBranch,
 	gitStatusInWorktree,
+	parseWorkCommandArgs,
+	removeCreatedWorktree,
 	removeWorktree,
 	validateWorktreeState,
 	validateMergeWorktreeState,
@@ -981,17 +986,35 @@ export function registerWorkflowWorkCommand(
 	getAgentDir: () => string,
 ): void {
 	pi.registerCommand("workflow:work", {
-		description: "跳过计划，直接进入 Work Mode",
+		description:
+			"跳过计划，直接进入 Work Mode；--worktree|-w [分支名] 在独立 Git worktree 中执行，任务正文用独立 -- 分隔",
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
 			const sessionKey = ctxSessionKey(ctx);
 
-			const workArgs = args.trim();
+			// Parse args first — a parse error must produce zero side effects.
+			const parsed = parseWorkCommandArgs(args ?? "");
+			if (!parsed.ok) {
+				ctx.ui.notify(parsed.error, "error");
+				return;
+			}
+			const { worktree: wantWorktree, semanticBranch } = parsed.value;
+			const workTask = parsed.value.task;
 
 			const current = loadState(ctx.cwd, sessionKey);
 			const mergeDenial = activeMergeDenial(current);
 			if (mergeDenial) {
 				ctx.ui.notify(mergeDenial, "error");
+				return;
+			}
+			// The worktree-creation path is refused in Init Mode so a mode switch
+			// cannot drop the single-file init lifecycle; the plain path keeps its
+			// existing behavior.
+			if (wantWorktree && current.mode === "init") {
+				ctx.ui.notify(
+					"当前处于 Init Mode。请先调用 workflow_init_complete 完成或取消初始化，再执行 /workflow:work --worktree。",
+					"error",
+				);
 				return;
 			}
 			if (current.worktreePath) {
@@ -1005,16 +1028,74 @@ export function registerWorkflowWorkCommand(
 				}
 			}
 
+			// Resolve worktree fields BEFORE any git side effect. The plain path
+			// keeps the existing selection logic: stay in the current directory, or
+			// reuse an already-active worktree together with its workRunId.
+			let workRunId: string;
+			let worktreePath: string | undefined;
+			let worktreeBranch: string | undefined;
+			let worktreeBaseBranch: string | undefined;
+			/** The worktree created BY THIS invocation — the only resource rollback may clean. */
+			let createdWorktree: { path: string; branch: string } | undefined;
+
+			if (current.worktreePath) {
+				// Re-entry: always reuse the active worktree. An explicit semantic
+				// name is only accepted when it maps to the current workRunId's full
+				// branch name; anything else means the user wants a DIFFERENT task —
+				// point them at a fresh Pi session instead of silently reusing.
+				if (wantWorktree && semanticBranch) {
+					const expected = buildWorktreeBranchName(
+						current.workRunId ?? "",
+						semanticBranch,
+					);
+					if (expected !== current.worktreeBranch) {
+						ctx.ui.notify(
+							`当前会话已绑定 active worktree（分支 ${current.worktreeBranch}），与指定的分支名 ${semanticBranch}（将生成分支 ${expected}）不匹配。` +
+								`如需并行任务，请新开一个独立 Pi 会话执行 /workflow:work --worktree ${semanticBranch}。`,
+							"error",
+						);
+						return;
+					}
+				}
+				workRunId = current.workRunId ?? crypto.randomUUID();
+				worktreePath = current.worktreePath;
+				worktreeBranch = current.worktreeBranch;
+				worktreeBaseBranch = current.worktreeBaseBranch;
+			} else if (wantWorktree) {
+				// Fresh workflow-managed worktree from the current checkout's commit
+				// baseline. Uncommitted changes stay in the source checkout; git's
+				// atomic `worktree add -b` rejects path/branch collisions.
+				workRunId = crypto.randomUUID();
+				try {
+					const created = createWorktree(ctx.cwd, workRunId, semanticBranch);
+					worktreePath = created.path;
+					worktreeBranch = created.branch;
+					worktreeBaseBranch = created.baseBranch;
+					createdWorktree = { path: created.path, branch: created.branch };
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					// No predictive cleanup: a collision or partial residue may belong
+					// to a concurrent creator; report the helper error and let the user
+					// inspect before anything is deleted.
+					ctx.ui.notify(
+						`创建 worktree 失败：${message}\n` +
+							"未修改 workflow 状态。如产生残留，可用 /workflow:status、git worktree list 或 /workflow:reset 检查清理。",
+						"error",
+					);
+					return;
+				}
+			} else {
+				workRunId = crypto.randomUUID();
+			}
+
 			const state: WorkflowState = {
 				...DEFAULT_STATE,
 				workflowEnabled: current.workflowEnabled,
 				mode: "work",
-				workRunId: current.worktreePath
-					? current.workRunId ?? crypto.randomUUID()
-					: crypto.randomUUID(),
-				worktreePath: current.worktreePath,
-				worktreeBranch: current.worktreeBranch,
-				worktreeBaseBranch: current.worktreeBaseBranch,
+				workRunId,
+				worktreePath,
+				worktreeBranch,
+				worktreeBaseBranch,
 				// Capture the session leaf so the Implementation Reviewer can scope
 				// authoritative requirement extraction to this Direct Work lifecycle.
 				workStartEntryId:
@@ -1025,35 +1106,122 @@ export function registerWorkflowWorkCommand(
 				approvedTodos: undefined,
 			};
 
-			const overlay = getWorkflowOverlay();
-			if (overlay) {
-				overlay.clearBookkeeping();
-				overlay.update(state.todos);
+			// transitionWorkflowMode persists state BEFORE runtime activation, so a
+			// {ok:false} result or a throw can happen after the state was written.
+			// Wrap the transition so both failure shapes share the rollback below.
+			let result: WorkflowModeTransitionResult;
+			try {
+				result = await transitionWorkflowMode({
+					pi,
+					ctx,
+					sessionKey,
+					nextState: state,
+					getAgentDir,
+				});
+			} catch (err) {
+				result = {
+					ok: false,
+					state,
+					reason: err instanceof Error ? err.message : String(err),
+				};
 			}
-
-			const result = await transitionWorkflowMode({
-				pi,
-				ctx,
-				sessionKey,
-				nextState: state,
-				getAgentDir,
-			});
 			if (!result.ok) {
-				ctx.ui.notify(result.reason, "error");
+				// Restore the original state snapshot (state + runtime) via the same
+				// transition helper, then only on a verified restore clean up the
+				// worktree this invocation created.
+				let restored = false;
+				let restoreError: string | undefined;
+				try {
+					const restore = await transitionWorkflowMode({
+						pi,
+						ctx,
+						sessionKey,
+						nextState: current,
+						getAgentDir,
+					});
+					restored = restore.ok;
+					if (!restore.ok) restoreError = restore.reason;
+				} catch (err) {
+					restoreError = err instanceof Error ? err.message : String(err);
+				}
+				if (restored) {
+					let cleanupNote = "";
+					if (createdWorktree) {
+						const cleanup = removeCreatedWorktree(
+							ctx.cwd,
+							createdWorktree.path,
+							createdWorktree.branch,
+						);
+						if (!cleanup.ok) {
+							cleanupNote = `\n清理本次创建的 worktree 失败：\n${cleanup.diagnostics.join("\n")}`;
+						}
+					}
+					ctx.ui.notify(
+						`进入 Work Mode 失败：${result.reason}。已恢复原 workflow 状态。${cleanupNote}`,
+						"error",
+					);
+				} else {
+					// Restore failed or is indeterminate: keep every resource so the
+					// persisted state never points at a deleted directory, and hand
+					// the user explicit recovery entries.
+					const residue = createdWorktree
+						? `已保留本次创建的 worktree：${createdWorktree.path}（分支 ${createdWorktree.branch}）。`
+						: "";
+					ctx.ui.notify(
+						`进入 Work Mode 失败：${result.reason}\n` +
+							`恢复原状态失败：${restoreError ?? "(unknown)"}\n${residue}\n` +
+							"请用 /workflow:status 检查当前状态，并按需用 /workflow:reset 恢复。",
+						"error",
+					);
+				}
 				return;
 			}
 
-			const sessionName = workArgs
-				? `work: ${workArgs.slice(0, 40)}`
-				: "workflow: work";
-			pi.setSessionName(sessionName);
+			// Success-only side effects. If any of them fails, keep the activated
+			// worktree (state already references it) and report loudly.
+			try {
+				const overlay = getWorkflowOverlay();
+				if (overlay) {
+					overlay.clearBookkeeping();
+					overlay.update(state.todos);
+				}
 
-			ctx.ui.notify("已进入 Work Mode。可以直接描述任务。", "info");
+				const sessionName = workTask
+					? `work: ${workTask.slice(0, 40)}`
+					: "workflow: work";
+				pi.setSessionName(sessionName);
 
-			// Worktree notice is injected into the stable system prompt by
-			// buildModeMessageBody; do not repeat it in the kickoff message.
-			if (workArgs) {
-				pi.sendUserMessage(workArgs);
+				if (createdWorktree) {
+					ctx.ui.notify(
+						`已进入 Work Mode（独立 worktree）。\n目录：${createdWorktree.path}\n分支：${worktreeBranch}（基于 ${worktreeBaseBranch} 的提交基线）\n` +
+							"当前目录的未提交修改保留在原目录；提交用 /workflow:commit，集成用 /workflow:merge。" +
+							(workTask ? "" : "可直接描述任务。"),
+						"info",
+					);
+				} else if (worktreePath) {
+					ctx.ui.notify(
+						`已进入 Work Mode（复用 active worktree）。\n目录：${worktreePath}\n分支：${worktreeBranch}`,
+						"info",
+					);
+				} else {
+					ctx.ui.notify("已进入 Work Mode。可以直接描述任务。", "info");
+				}
+
+				// Worktree notice is injected into the stable system prompt by
+				// buildModeMessageBody; do not repeat it in the kickoff message.
+				if (workTask) {
+					pi.sendUserMessage(workTask);
+				}
+			} catch (sideEffectErr) {
+				console.error(
+					`[workflow] /workflow:work post-transition side effects failed (worktree kept): ${sideEffectErr instanceof Error ? sideEffectErr.message : sideEffectErr}`,
+				);
+				try {
+					ctx.ui.notify(
+						"Work Mode 已激活；会话命名/通知/任务发送部分失败，可直接继续输入任务。",
+						"error",
+					);
+				} catch { /* UI unavailable — the console error already records it */ }
 			}
 		},
 	});

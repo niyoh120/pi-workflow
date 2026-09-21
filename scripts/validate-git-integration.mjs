@@ -112,7 +112,14 @@ const {
 	detectSequencer,
 	resolveDefaultTargetBranch,
 } = gitIntegration;
-const { validateWorktreeState, validateMergeWorktreeState } = worktreeMod;
+const {
+	validateWorktreeState,
+	validateMergeWorktreeState,
+	parseWorkCommandArgs,
+	removeCreatedWorktree,
+	createWorktree,
+	validateSemanticBranchName,
+} = worktreeMod;
 
 assert(typeof parseMergeCommandArgs === "function", "git-integration.ts exports parseMergeCommandArgs");
 assert(typeof runMergePreflight === "function", "git-integration.ts exports runMergePreflight");
@@ -120,6 +127,10 @@ assert(typeof finalizeDefaultFf === "function", "git-integration.ts exports fina
 assert(typeof verifyDefaultCompletion === "function", "git-integration.ts exports verifyDefaultCompletion");
 assert(typeof cancelActiveMergeGit === "function", "git-integration.ts exports cancelActiveMergeGit");
 assert(typeof validateMergeWorktreeState === "function", "worktree.ts exports validateMergeWorktreeState");
+assert(typeof parseWorkCommandArgs === "function", "worktree.ts exports parseWorkCommandArgs");
+assert(typeof removeCreatedWorktree === "function", "worktree.ts exports removeCreatedWorktree");
+assert(typeof createWorktree === "function", "worktree.ts exports createWorktree");
+assert(typeof validateSemanticBranchName === "function", "worktree.ts exports validateSemanticBranchName");
 
 // ── 0. command parsing ──────────────────────────────────────────────────────
 
@@ -153,7 +164,60 @@ console.log("\n=== 0. /workflow:merge argument parsing ===");
 	assert(r.ok && !r.value.targetBranch && !r.value.instructions, "parse: empty input → default strategy");
 }
 
-// ── 1. ordinary feature branch scenario ─────────────────────────────────────
+// ── 0b. /workflow:work argument parsing (Direct Work --worktree) ──────────
+
+console.log("\n=== 0b. /workflow:work argument parsing ===");
+{
+	// Table-driven: [input, expected value]. Task body is end-trimmed only;
+	// internal whitespace/quotes/newlines and option-looking tokens survive.
+	const okCases = [
+		["修复提示文案", { worktree: false, task: "修复提示文案" }],
+		["", { worktree: false }],
+		["   ", { worktree: false }],
+		["--worktree", { worktree: true }],
+		["-w", { worktree: true }],
+		["--worktree fix/log-rotation -- 修复日志轮转", { worktree: true, semanticBranch: "fix/log-rotation", task: "修复日志轮转" }],
+		["-w fix/log-rotation -- 修复日志轮转", { worktree: true, semanticBranch: "fix/log-rotation", task: "修复日志轮转" }],
+		["--worktree -- 修复提示文案", { worktree: true, task: "修复提示文案" }],
+		["--worktree --", { worktree: true }],
+		["-w --  task with  spaces ", { worktree: true, task: "task with  spaces" }],
+		["-- --worktree 是这里的任务正文", { worktree: false, task: "--worktree 是这里的任务正文" }],
+		["-- 保留 -- 与 -w 原文", { worktree: false, task: "保留 -- 与 -w 原文" }],
+		["-- 多行\n任务\n正文", { worktree: false, task: "多行\n任务\n正文" }],
+		["  --worktree   name  ", { worktree: true, semanticBranch: "name" }],
+		["task with --worktree inside", { worktree: false, task: "task with --worktree inside" }],
+	];
+	for (const [input, expected] of okCases) {
+		const r = parseWorkCommandArgs(input);
+		assert(
+			r.ok && JSON.stringify(r.value) === JSON.stringify(expected),
+			`parse work: ${JSON.stringify(input)} -> ${JSON.stringify(r.ok ? r.value : r.error)}`,
+		);
+	}
+
+	// Errors: repeated flags, extra tokens, unknown options — all with usage.
+	const errCases = [
+		["--worktree --worktree", /重复的 worktree 标志/],
+		["-w -w", /重复的 worktree 标志/],
+		["-w --worktree", /重复的 worktree 标志/],
+		["--worktree name extra -- task", /分支名后最多一个 token/],
+		["--worktree name task", /分支名后最多一个 token/],
+		["--worktreefoo task", /未识别的选项/],
+		["-wname", /未识别的选项/],
+		["--verbose", /未识别的选项/],
+		["-x task", /未识别的选项/],
+		["- 修复", /未识别的选项/],
+	];
+	for (const [input, re] of errCases) {
+		const r = parseWorkCommandArgs(input);
+		assert(
+			!r.ok && re.test(r.error) && r.error.includes("用法：/workflow:work"),
+			`parse work error: ${JSON.stringify(input)} -> ${r.ok ? "(parsed!)" : r.error.slice(0, 40)}`,
+		);
+	}
+}
+
+// ── 1. ordinary feature branch scenario ──────────────────────────────────────
 
 console.log("\n=== 1. ordinary feature branch ===");
 {
@@ -516,6 +580,94 @@ console.log("\n=== 3. failure & recovery ===");
 		} finally {
 			cleanupRepo(repo);
 		}
+	}
+}
+
+// ── 4. Direct Work --worktree: creation isolation & diagnosable cleanup ──
+
+console.log("\n=== 4. Direct Work --worktree: creation isolation & cleanup ===");
+{
+	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-workflow-work-4-"));
+	const branchExists = (r, branch) =>
+		git(r, ["for-each-ref", `refs/heads/${branch}`, "--format=%(refname)"]).trim().length > 0;
+	try {
+		git(repo, ["init", "-b", "master"]);
+		commitFile(repo, "base.txt", "base\n", "base commit");
+
+		// Illegal semantic branch name is denied before any git side effect.
+		assert(validateSemanticBranchName(repo, "bad..name") !== null, "semantic validation denies bad..name");
+		let threw = false;
+		try { createWorktree(repo, "abcd1234", "bad..name"); } catch { threw = true; }
+		assert(threw, "createWorktree throws on an illegal semantic branch name");
+
+		// Path collision: deterministic dir already present → explicit failure.
+		const plannedDir = path.join(path.dirname(repo), `${path.basename(repo)}-wf-abcd1234`);
+		fs.mkdirSync(plannedDir, { recursive: true });
+		threw = false;
+		try { createWorktree(repo, "abcd1234", "feat"); } catch (e) { threw = /Worktree path already exists/.test(e.message); }
+		assert(threw, "createWorktree refuses an existing worktree path (foreign path untouched)");
+		fs.rmSync(plannedDir, { recursive: true, force: true });
+
+		// Branch collision: git's atomic `worktree add -b` refuses; no partial dir.
+		git(repo, ["branch", "feat@wf-abcd1234"]);
+		threw = false;
+		try { createWorktree(repo, "abcd1234", "feat"); } catch { threw = true; }
+		assert(threw, "createWorktree refuses an existing branch atomically");
+		assert(!fs.existsSync(plannedDir), "no partial worktree dir left after branch collision");
+		git(repo, ["branch", "-D", "feat@wf-abcd1234"]);
+
+		// Two independent runs → two distinct dirs/branches; state-field validity.
+		const wt1 = createWorktree(repo, "11111111");
+		const wt2 = createWorktree(repo, "22222222", "feat/app");
+		assert(wt1.path !== wt2.path && wt1.branch !== wt2.branch, "two runs create distinct dirs/branches");
+		assert(wt1.branch === "wf/11111111" && wt2.branch === "feat/app@wf-22222222", "branch naming: legacy and semantic forms");
+		assert(wt1.baseBranch === "master" && wt2.baseBranch === "master", "both created from the current checkout's commit baseline");
+		for (const [label, wt] of [["wt1", wt1], ["wt2", wt2]]) {
+			assert(
+				validateWorktreeState(repo, { worktreePath: wt.path, worktreeBranch: wt.branch }).ok === true,
+				`${label}: strict validator accepts the freshly created worktree fields`,
+			);
+			assert(fs.existsSync(path.join(wt.path, "base.txt")), `${label}: contains the commit baseline`);
+		}
+
+		// Isolation: uncommitted source content stays put; per-worktree writes
+		// are invisible to the source checkout and to the sibling worktree.
+		fs.writeFileSync(path.join(repo, "uncommitted.txt"), "source-local\n", "utf8");
+		fs.writeFileSync(path.join(wt1.path, "task1.txt"), "task one\n", "utf8");
+		assert(!fs.existsSync(path.join(repo, "task1.txt")), "worktree write invisible to source checkout");
+		assert(!fs.existsSync(path.join(wt2.path, "task1.txt")), "worktree write invisible to sibling worktree");
+		assert(!fs.existsSync(path.join(wt1.path, "uncommitted.txt")), "source uncommitted file absent from new worktree");
+		assert(
+			fs.readFileSync(path.join(repo, "uncommitted.txt"), "utf8") === "source-local\n",
+			"source uncommitted content unchanged",
+		);
+
+		// Happy cleanup: dir + branch both gone; the sibling worktree untouched.
+		// (Remove the isolation-test write first: non-forced remove refuses a
+		// dirty worktree — exactly the residue-preservation behavior under test.)
+		fs.rmSync(path.join(wt1.path, "task1.txt"));
+		const clean = removeCreatedWorktree(repo, wt1.path, wt1.branch);
+		assert(clean.ok && clean.diagnostics.length === 0, "happy cleanup reports ok with no diagnostics");
+		assert(!fs.existsSync(wt1.path) && !branchExists(repo, wt1.branch), "happy cleanup removed dir and branch");
+		assert(fs.existsSync(wt2.path) && branchExists(repo, wt2.branch), "sibling worktree/branch retained");
+
+		// Dirty worktree: non-forced remove refuses, branch delete is skipped,
+		// residue diagnostics name the leftover path.
+		fs.writeFileSync(path.join(wt2.path, "dirty.txt"), "dirty\n", "utf8");
+		const dirty = removeCreatedWorktree(repo, wt2.path, wt2.branch);
+		assert(!dirty.ok && dirty.diagnostics.some((d) => d.includes("残留目录")), "dirty remove keeps residue and reports diagnostics");
+		assert(fs.existsSync(wt2.path) && branchExists(repo, wt2.branch), "dirty worktree: dir and branch both retained");
+		fs.rmSync(path.join(wt2.path, "dirty.txt"));
+
+		// Unmerged branch: worktree removed, safe branch delete refuses, residue
+		// diagnostics name the leftover branch.
+		commitFile(wt2.path, "committed.txt", "c\n", "wt2 commit");
+		const unmerged = removeCreatedWorktree(repo, wt2.path, wt2.branch);
+		assert(!unmerged.ok && unmerged.diagnostics.some((d) => d.includes("残留分支")), "unmerged branch delete refused with diagnostics");
+		assert(!fs.existsSync(wt2.path), "unmerged-branch cleanup still removed the worktree dir");
+		assert(branchExists(repo, wt2.branch), "unmerged branch retained (no force delete)");
+	} finally {
+		cleanupRepo(repo);
 	}
 }
 

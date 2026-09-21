@@ -382,3 +382,173 @@ export function gitStatusInWorktree(
 		return err instanceof Error ? err.message : String(err);
 	}
 }
+
+// ── /workflow:work command parsing ─────────────────────────────────────────
+
+/** Usage line shown with every /workflow:work argument error. */
+export const WORK_COMMAND_USAGE =
+	"用法：/workflow:work [任务描述] 或 /workflow:work [--worktree|-w [分支名] [--] 任务描述]；" +
+	"以 -- 开头时后续内容按字面任务正文处理（如：/workflow:work -- --worktree 是任务正文）";
+
+export interface ParsedWorkCommand {
+	/** The leading --worktree/-w option requested a workflow-managed worktree. */
+	worktree: boolean;
+	/** Optional semantic branch name — a single token directly after the option. */
+	semanticBranch?: string;
+	/** Task body after end-trim; internal whitespace/quotes/newlines preserved. */
+	task?: string;
+}
+
+export type ParseWorkCommandResult =
+	| { ok: true; value: ParsedWorkCommand }
+	| { ok: false; error: string };
+
+function isSpaceChar(ch: string | undefined): boolean {
+	return ch !== undefined && /\s/.test(ch);
+}
+
+function readToken(s: string, start: number): string {
+	let end = start;
+	while (end < s.length && !isSpaceChar(s[end])) end++;
+	return s.slice(start, end);
+}
+
+function workCommandError(token: string, kind: "unknown" | "duplicate"): ParseWorkCommandResult {
+	const label = kind === "duplicate" ? `重复的 worktree 标志：${token}。` : `未识别的选项：${token}。`;
+	return { ok: false, error: `${label}${WORK_COMMAND_USAGE}` };
+}
+
+/**
+ * Parse `/workflow:work [--worktree|-w [分支名] [--] 任务描述]`.
+ *
+ * Only the three leading control tokens are reserved: a leading standalone
+ * `--`, `--worktree`, and `-w`. Everything else stays plain task text with the
+ * historical whole-string trim. Inside the worktree-option region at most one
+ * branch-name token may precede the `--` separator; the separator tail is the
+ * literal task body (end-trim only, so internal spaces/quotes/newlines and
+ * option-looking tokens survive verbatim). Repeated flags, extra tokens, and
+ * unknown options fail with the usage line. Pure string parsing — no git, no
+ * state, no side effects, directly importable by the no-build validation
+ * scripts.
+ */
+export function parseWorkCommandArgs(raw: string): ParseWorkCommandResult {
+	const s = typeof raw === "string" ? raw : "";
+	let i = 0;
+	while (i < s.length && isSpaceChar(s[i])) i++;
+	if (i >= s.length) return { ok: true, value: { worktree: false } };
+
+	// Leading standalone `--`: the remainder is the literal task body.
+	if (s.startsWith("--", i) && (i + 2 >= s.length || isSpaceChar(s[i + 2]))) {
+		const task = s.slice(i + 2).trim();
+		return { ok: true, value: { worktree: false, task: task || undefined } };
+	}
+
+	// Leading worktree option: --worktree or -w, then an optional branch token.
+	if (s.startsWith("--worktree", i)) {
+		const after = i + "--worktree".length;
+		if (after < s.length && !isSpaceChar(s[after])) {
+			return workCommandError(readToken(s, i), "unknown");
+		}
+		i = after;
+	} else if (s[i] === "-") {
+		const token = readToken(s, i);
+		if (token === "-w" && (i + 2 >= s.length || isSpaceChar(s[i + 2]))) {
+			i += 2;
+		} else {
+			return workCommandError(
+				token,
+				// A second worktree flag in the option position is a duplicate;
+				// any other dash token is an unknown option.
+				token === "--worktree" || token === "-w" ? "duplicate" : "unknown",
+			);
+		}
+	} else {
+		// Plain task text — existing whole-string trim behavior.
+		const task = s.slice(i).trim();
+		return { ok: true, value: { worktree: false, task: task || undefined } };
+	}
+
+	// Worktree-option region: at most one branch-name token, then the optional
+	// standalone `--` separator; the tail after `--` is the literal task body.
+	let semanticBranch: string | undefined;
+	while (i < s.length) {
+		while (i < s.length && isSpaceChar(s[i])) i++;
+		if (i >= s.length) break;
+		if (s.startsWith("--", i) && (i + 2 >= s.length || isSpaceChar(s[i + 2]))) {
+			const task = s.slice(i + 2).trim();
+			return {
+				ok: true,
+				value: { worktree: true, semanticBranch, task: task || undefined },
+			};
+		}
+		if (s[i] === "-") {
+			const token = readToken(s, i);
+			return workCommandError(
+				token,
+				token === "--worktree" || token === "-w" ? "duplicate" : "unknown",
+			);
+		}
+		if (semanticBranch !== undefined) {
+			return {
+				ok: false,
+				error: `分支名后最多一个 token；任务描述请用独立 -- 分隔：${readToken(s, i)}。${WORK_COMMAND_USAGE}`,
+			};
+		}
+		semanticBranch = readToken(s, i);
+		i += semanticBranch.length;
+	}
+	return { ok: true, value: { worktree: true, semanticBranch } };
+}
+
+// ── Created-worktree cleanup (Direct Work --worktree rollback) ──────────
+
+export interface WorktreeCleanupOutcome {
+	/** True when the worktree directory AND the branch were both cleaned up. */
+	ok: boolean;
+	/** Human-readable residue diagnostics naming what is left and where. */
+	diagnostics: string[];
+}
+
+/**
+ * Clean up a worktree that THIS call created successfully (Direct Work
+ * --worktree rollback). Non-forced `git worktree remove` runs first; only a
+ * confirmed directory removal is followed by the safe workflow-owned branch
+ * delete (`deleteWorktreeBranch` refuses non-workflow names and never forces).
+ * Never force-removes, cleans, stashes, or touches resources created
+ * elsewhere — a failed removal keeps the whole residue in place and reports
+ * it for explicit recovery (/workflow:status, /workflow:reset, `git worktree
+ * list`). Callers must only pass a worktree confirmed to be created by the
+ * same command invocation.
+ */
+export function removeCreatedWorktree(
+	cwd: string,
+	worktreePath: string,
+	branch: string,
+	deps: WorktreeDeps = {},
+): WorktreeCleanupOutcome {
+	try {
+		execGit(cwd, ["worktree", "remove", worktreePath], deps);
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		return {
+			ok: false,
+			diagnostics: [
+				`worktree 删除失败（已保留现场，未使用 force）：${message}`,
+				`残留目录：${worktreePath}`,
+			],
+		};
+	}
+	try {
+		deleteWorktreeBranch(cwd, branch, deps);
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		return {
+			ok: false,
+			diagnostics: [
+				`worktree 已删除，但分支删除失败（仅删除 workflow 分支，未强制）：${message}`,
+				`残留分支：${branch}`,
+			],
+		};
+	}
+	return { ok: true, diagnostics: [] };
+}

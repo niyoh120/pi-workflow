@@ -11,7 +11,7 @@
  * Run: node scripts/validate-rpc-mode.mjs
  */
 
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -228,7 +228,86 @@ function runRpcInteractive(args, prompt, cwd, env, responses, { timeoutMs = 2000
 	});
 }
 
-// ── Setup throwaway project ────────────────────────────────────────────────
+/**
+ * Spawn Pi in RPC mode and send a sequence of prompts (slash commands),
+ * collecting per-prompt events. Each prompt runs to its response event, then
+ * a short settle window captures late events (kickoff user messages, late
+ * notifies) before the next prompt starts. `onSettled(index, bucket)` runs
+ * between prompts so tests can read on-disk state mid-session. Interactive
+ * extension dialogs are cancelled — the tested work entries must never ask.
+ */
+function runRpcSequence(args, prompts, cwd, env, { timeoutMs = 25000, settleAfterMs = 800, onSettled } = {}) {
+	return new Promise((resolve, reject) => {
+		const proc = spawn(PI_BIN, args, { stdio: ["pipe", "pipe", "pipe"], cwd, env });
+		const perPrompt = prompts.map(() => ({ events: [], response: null }));
+		const uiRequests = [];
+		const stderrChunks = [];
+		let idx = -1;
+		let buffer = "";
+		let settled = false;
+		let timer = null;
+		let settleTimer = null;
+
+		const finish = (fn) => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			if (settleTimer) clearTimeout(settleTimer);
+			fn();
+		};
+		const fail = (msg) => finish(() => {
+			try { proc.kill("SIGKILL"); } catch { /* already dead */ }
+			reject(new Error(msg));
+		});
+
+		const sendPrompt = (i) => {
+			idx = i;
+			timer = setTimeout(() => fail(`RPC sequence timed out at prompt ${i}: ${prompts[i]}`), timeoutMs);
+			proc.stdin.write(JSON.stringify({ id: `p${i}`, type: "prompt", message: prompts[i] }) + "\n");
+		};
+
+		const handleLine = (line) => {
+			let event;
+			try { event = JSON.parse(line); } catch { return; }
+			if (idx >= 0) perPrompt[idx].events.push(event);
+			if (event.type === "extension_ui_request") {
+				uiRequests.push(event);
+				if (["select", "confirm", "input"].includes(event.method)) {
+					const reply = JSON.stringify({ type: "extension_ui_response", id: event.id, cancelled: true }) + "\n";
+					try { proc.stdin.write(reply); } catch { /* stdin closed */ }
+				}
+				return;
+			}
+			if (event.type === "response" && event.id === `p${idx}`) {
+				perPrompt[idx].response = event;
+				settleTimer = setTimeout(async () => {
+					if (onSettled) {
+						try { await onSettled(idx, perPrompt[idx]); } catch { /* assertion-side concern */ }
+					}
+					if (idx + 1 < prompts.length) sendPrompt(idx + 1);
+					else { try { proc.stdin.end(); } catch { /* already closed */ } }
+				}, settleAfterMs);
+			}
+		};
+
+		proc.stdout.on("data", (chunk) => {
+			buffer += chunk.toString("utf8");
+			let nl;
+			while ((nl = buffer.indexOf("\n")) !== -1) {
+				let line = buffer.slice(0, nl);
+				buffer = buffer.slice(nl + 1);
+				if (line.endsWith("\r")) line = line.slice(0, -1);
+				if (line) handleLine(line);
+			}
+		});
+		proc.stderr.on("data", (c) => stderrChunks.push(c));
+		proc.once("error", (error) => fail(error.message));
+		proc.on("exit", () => finish(() => resolve({ perPrompt, uiRequests, stderr: Buffer.concat(stderrChunks).toString("utf8") })));
+		proc.once("spawn", () => sendPrompt(0));
+	});
+}
+
+// ── Setup throwaway project ──────────────────────────────────────────────────
 
 const tmpCwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wf-rpc-"));
 const tmpAgent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wf-rpc-agent-"));
@@ -611,6 +690,336 @@ console.log("\n=== Test 7: RPC contextWindow session-scope editing ===");
 	} finally {
 		fs.rmSync(tmpCwd7, { recursive: true, force: true });
 	}
+}
+
+// ── Direct Work --worktree: real command fixtures ─────────────────────
+
+/** Environment variant with a dummy key so role-model application succeeds
+ *  offline (commands never issue model requests). */
+const RPC_ENV_KEYED = { ...RPC_ENV, ANTHROPIC_API_KEY: "dummy-key-for-rpc-work-fixture" };
+
+/** Create a throwaway git repo; cleanup removes the repo AND its sibling
+ *  workflow-worktree dirs (`<repo>-wf-*`). Returns { repo, cleanup }. */
+function makeWorkRepo(prefix) {
+	const repo = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	execFileSync("git", ["init", "-b", "master"], { cwd: repo, stdio: "pipe" });
+	fs.writeFileSync(path.join(repo, "README.md"), "base\n", "utf8");
+	execFileSync("git", ["add", "."], { cwd: repo, stdio: "pipe" });
+	execFileSync("git", ["commit", "-m", "base"], { cwd: repo, stdio: "pipe" });
+	const cleanup = () => {
+		const parent = path.dirname(repo);
+		const wfPrefix = `${path.basename(repo)}-wf-`;
+		for (const entry of fs.existsSync(parent) ? fs.readdirSync(parent) : []) {
+			if (entry.startsWith(wfPrefix)) {
+				fs.rmSync(path.join(parent, entry), { recursive: true, force: true });
+			}
+		}
+		fs.rmSync(repo, { recursive: true, force: true });
+	};
+	return { repo, cleanup };
+}
+
+/** Read the (single) session state.json under a repo, if any. */
+function readWorkState(repo) {
+	const sessions = path.join(repo, ".pi", "workflow", "sessions");
+	if (!fs.existsSync(sessions)) return undefined;
+	for (const dir of fs.readdirSync(sessions)) {
+		const sp = path.join(sessions, dir, "state.json");
+		if (fs.existsSync(sp)) return JSON.parse(fs.readFileSync(sp, "utf8"));
+	}
+	return undefined;
+}
+
+function worktreeDirs(repo) {
+	const parent = path.dirname(repo);
+	const wfPrefix = `${path.basename(repo)}-wf-`;
+	return (fs.existsSync(parent) ? fs.readdirSync(parent) : []).filter((e) => e.startsWith(wfPrefix));
+}
+
+const notifiesOf = (bucket) =>
+	bucket.events
+		.filter((e) => e.type === "extension_ui_request" && e.method === "notify")
+		.map((e) => String(e.message ?? ""));
+const branchExistsIn = (repo, branch) => {
+	try {
+		const out = execFileSync("git", ["for-each-ref", `refs/heads/${branch}`, "--format=%(refname)"], { cwd: repo, encoding: "utf8" });
+		return out.trim().length > 0;
+	} catch { return false; }
+};
+
+// ── Test 8: /workflow:work --worktree creates a managed worktree (no dialog) ─
+console.log("\n=== Test 8: RPC /workflow:work --worktree creation (no dialog) ===");
+{
+	const { repo, cleanup } = makeWorkRepo("pi-wf-rpc-work8-");
+	try {
+		const result = await runRpcSequence(
+			RPC_ARGS,
+			["/workflow:work --worktree"],
+			repo,
+			RPC_ENV_KEYED,
+			{ timeoutMs: 25000 },
+		);
+
+		const interactive = result.uiRequests.filter((e) => ["select", "confirm", "input"].includes(e.method));
+		assert(interactive.length === 0, "worktree entry never asks for a selection dialog");
+
+		const notifies = notifiesOf(result.perPrompt[0]);
+		const okNotify = notifies.find((m) => m.includes("已进入 Work Mode（独立 worktree）"));
+		assert(!!okNotify, "success notify names the standalone worktree entry");
+		if (okNotify) {
+			assert(okNotify.includes("提交基线"), "notify states the commit-baseline boundary");
+			assert(okNotify.includes("未提交修改保留在原目录"), "notify states uncommitted changes stay in the source checkout");
+		}
+
+		const state = readWorkState(repo);
+		assert(!!state && state.mode === "work", "state persisted mode=work");
+		assert(
+			!!state?.workRunId && !!state?.worktreePath && !!state?.worktreeBranch && !!state?.worktreeBaseBranch,
+			"state carries workRunId + all three worktree fields",
+		);
+		assert(
+			!!state && fs.existsSync(state.worktreePath) &&
+				path.basename(state.worktreePath) === path.basename(repo) + "-wf-" + state.workRunId.slice(0, 8) &&
+				state.worktreeBranch === `wf/${state.workRunId.slice(0, 8)}`,
+			"worktree dir exists with the default wf/<8hex> naming",
+		);
+		assert(state.worktreeBaseBranch === "master", "base branch recorded from the source checkout");
+		assert(branchExistsIn(repo, state.worktreeBranch), "workflow branch exists in the repo");
+
+		// Empty task: mode switch only — no kickoff user message.
+		const userMessages = result.perPrompt[0].events.filter(
+			(e) => e.type === "message_start" && e.message?.role === "user",
+		);
+		assert(userMessages.length === 0, "empty task sends no kickoff message");
+
+		const response = result.perPrompt[0].response;
+		assert(!!response && response.success === true, "RPC /workflow:work --worktree prompt accepted");
+	} finally {
+		cleanup();
+	}
+}
+
+// ── Test 9: reentry reuse / name mismatch / parse error / plain path ──
+console.log("\n=== Test 9: RPC /workflow:work reentry, mismatch, parse error, plain path ===");
+{
+	const { repo, cleanup } = makeWorkRepo("pi-wf-rpc-work9-");
+	try {
+		const snapshots = [];
+		const result = await runRpcSequence(
+			RPC_ARGS,
+			[
+				"/workflow:work --worktree",                       // 0: create
+				"/workflow:work --worktree othername",             // 1: mismatch rejected
+				"/workflow:work --worktree a b -- task",           // 2: parse error, zero side effects
+				"/workflow:work --worktree",                       // 3: bare flag reuses
+				"/workflow:work",                                  // 4: plain empty reuses too
+			],
+			repo,
+			RPC_ENV_KEYED,
+			{ timeoutMs: 25000, onSettled: () => { snapshots.push(readWorkState(repo)); } },
+		);
+
+		const [create, mismatch, parseErr, bareReuse, plainReuse] = result.perPrompt;
+		assert(create.response?.success === true && mismatch.response?.success === true &&
+			parseErr.response?.success === true && bareReuse.response?.success === true && plainReuse.response?.success === true,
+			"all five prompts accepted");
+		assert(snapshots.length === 5, "state snapshotted after every prompt");
+
+		const s0 = snapshots[0];
+		assert(!!s0?.worktreePath && !!s0?.worktreeBranch, "prompt 0 created the worktree fields");
+		const dirsAfterCreate = worktreeDirs(repo);
+		assert(dirsAfterCreate.length === 1, "exactly one worktree dir after creation");
+
+		const mismatchNotifies = notifiesOf(mismatch);
+		assert(
+			mismatchNotifies.some((m) => m.includes("不匹配") && m.includes("新开一个独立 Pi 会话")),
+			"name mismatch reports the conflict and points at a fresh Pi session",
+		);
+		const s1 = snapshots[1];
+		assert(s1?.worktreePath === s0.worktreePath && s1?.worktreeBranch === s0.worktreeBranch && s1?.workRunId === s0.workRunId,
+			"mismatched name leaves state untouched");
+		assert(worktreeDirs(repo).length === 1, "no extra dir after mismatch");
+
+		assert(
+			notifiesOf(parseErr).some((m) => m.includes("分支名后最多一个 token")),
+			"extra-token parse error surfaces the usage denial",
+		);
+		const s2 = snapshots[2];
+		assert(s2?.worktreePath === s0.worktreePath && s2?.workRunId === s0.workRunId && s2?.mode === "work",
+			"parse error keeps the previous state byte-identical");
+		assert(worktreeDirs(repo).length === 1, "no extra dir after parse error");
+
+		assert(
+			notifiesOf(bareReuse).some((m) => m.includes("复用 active worktree") && m.includes(s0.worktreePath)),
+			"bare --worktree reentry reuses the active worktree",
+		);
+		const s3 = snapshots[3];
+		assert(s3?.workRunId === s0.workRunId && s3?.worktreeBranch === s0.worktreeBranch, "reentry keeps workRunId and branch");
+
+		assert(
+			notifiesOf(plainReuse).some((m) => m.includes("复用 active worktree")),
+			"plain /workflow:work keeps reusing the active worktree",
+			);
+		const s4 = snapshots[4];
+		assert(s4?.workRunId === s0.workRunId, "plain path keeps the same workRunId");
+	} finally {
+		cleanup();
+	}
+}
+
+// ── Test 10: task body via `--` separator: branch naming + literal kickoff ──
+console.log("\n=== Test 10: RPC /workflow:work --worktree <name> -- <task> kickoff ===");
+{
+	const { repo, cleanup } = makeWorkRepo("pi-wf-rpc-work10-");
+	try {
+		const result = await runRpcSequence(
+			RPC_ARGS,
+			["/workflow:work --worktree fix/log-rotation -- 修复日志轮转任务"],
+			repo,
+			RPC_ENV_KEYED,
+			{ timeoutMs: 25000 },
+		);
+
+		const state = readWorkState(repo);
+		assert(
+			!!state?.worktreeBranch && state.worktreeBranch === `fix/log-rotation@wf-${(state.workRunId ?? "").slice(0, 8)}`,
+			`semantic branch <name>@wf-<8hex> created (got ${state?.worktreeBranch})`,
+		);
+		assert(fs.existsSync(state.worktreePath), "worktree dir exists");
+
+		const kickoffs = result.perPrompt[0].events.filter(
+			(e) => e.type === "message_end" && e.message?.role === "user",
+			);
+		assert(
+			kickoffs.some((e) => e.message?.content?.[0]?.text === "修复日志轮转任务"),
+			"kickoff message carries the parsed task body verbatim",
+			);
+		const nameEvent = result.perPrompt[0].events.find((e) => e.type === "session_info_changed");
+		assert(
+			!!nameEvent && nameEvent.name === "work: 修复日志轮转任务",
+			"session named from the parsed task body",
+		);
+	} finally {
+		cleanup();
+	}
+}
+
+// ── Test 11: runtime failure + failed restore → resources kept + diagnostics ──
+console.log("\n=== Test 11: RPC transition+restore failure keeps resources (unkeyed env) ===");
+{
+	const { repo, cleanup } = makeWorkRepo("pi-wf-rpc-work11-");
+	try {
+		// Unkeyed RPC_ENV: model application fails for BOTH the work transition
+		// and the explore restore, exercising the keep-resources branch.
+		const result = await runRpcSequence(
+			RPC_ARGS,
+			["/workflow:work --worktree"],
+			repo,
+			RPC_ENV,
+			{ timeoutMs: 25000 },
+		);
+
+		const notifies = notifiesOf(result.perPrompt[0]);
+		const failNotify = notifies.find((m) => m.includes("进入 Work Mode 失败"));
+		assert(!!failNotify, "failure notify emitted");
+		if (failNotify) {
+			assert(failNotify.includes("恢复原状态失败"), "notify reports the failed restore");
+			assert(failNotify.includes("已保留本次创建的 worktree"), "notify names the retained worktree");
+			assert(failNotify.includes("/workflow:status") && failNotify.includes("/workflow:reset"), "notify lists recovery entries");
+		}
+
+		const state = readWorkState(repo);
+		assert(!!state && state.mode !== "work", "state restored away from work mode");
+		assert(!state?.worktreePath && !state?.worktreeBranch, "persisted state holds no dangling worktree fields");
+		assert(worktreeDirs(repo).length === 1, "worktree dir retained on failed restore");
+		const dirs = worktreeDirs(repo);
+		if (dirs.length === 1) {
+			const wtPath = path.join(path.dirname(repo), dirs[0]);
+			assert(fs.existsSync(wtPath), "retained worktree dir exists on disk");
+		}
+	} finally {
+		cleanup();
+	}
+}
+
+// ── Test 12: failed transition + successful restore → created worktree cleaned ──
+console.log("\n=== Test 12: RPC restore-success cleanup removes only this call's worktree ===");
+{
+	const { repo, cleanup } = makeWorkRepo("pi-wf-rpc-work12-");
+	try {
+		// Project config breaks ONLY the work role model: the work transition
+		// fails at model resolution while the explore restore succeeds. Project
+		// trust passes via --approve.
+		const wfDir = path.join(repo, ".pi", "workflow");
+		fs.mkdirSync(wfDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(wfDir, "config.json"),
+			JSON.stringify({ models: { work: { provider: "nonexistent", model: "ghost" } } }, null, 2),
+			"utf8",
+			);
+
+		const result = await runRpcSequence(
+			[...RPC_ARGS, "--approve"],
+			["/workflow:work --worktree"],
+			repo,
+			RPC_ENV_KEYED,
+			{ timeoutMs: 25000 },
+			);
+
+		const notifies = notifiesOf(result.perPrompt[0]);
+		assert(
+			notifies.some((m) => m.includes("找不到模型：nonexistent/ghost")),
+			"work transition fails at model resolution (injected)",
+		);
+		const failNotify = notifies.find((m) => m.includes("进入 Work Mode 失败"));
+		assert(!!failNotify, "failure notify emitted");
+		assert(
+			!!failNotify && failNotify.includes("已恢复原 workflow 状态") && !failNotify.includes("已保留本次创建的"),
+			"notify reports a verified restore (no retained-residue wording)",
+		);
+
+		const state = readWorkState(repo);
+		assert(!!state && state.mode === "explore", "state restored to the prior mode");
+		assert(!state?.worktreePath && !state?.worktreeBranch, "restored state has no worktree fields");
+		assert(worktreeDirs(repo).length === 0, "this call's worktree dir removed after verified restore");
+	} finally {
+		cleanup();
+	}
+}
+
+// ── Test 13: source-level wiring of the work command (supplementary) ──
+console.log("\n=== Test 13: /workflow:work source wiring ===");
+{
+	const commandsSrc = fs.readFileSync(path.join(REPO, "extensions/workflow/commands.ts"), "utf8");
+	const worktreeSrc = fs.readFileSync(path.join(REPO, "extensions/workflow/worktree.ts"), "utf8");
+	assert(
+		worktreeSrc.includes("export function parseWorkCommandArgs") &&
+			worktreeSrc.includes("export function removeCreatedWorktree") &&
+			worktreeSrc.includes("WorktreeCleanupOutcome"),
+		"worktree.ts exports the parse + diagnosable-cleanup facilities",
+	);
+	assert(
+		commandsSrc.includes("parseWorkCommandArgs(args ?? \"\")") &&
+			commandsSrc.includes("const created = createWorktree(ctx.cwd, workRunId, semanticBranch)"),
+		"work command parses args and creates via the shared git helper",
+	);
+	assert(
+		/removeCreatedWorktree\([\s\S]*?createdWorktree\.path/.test(commandsSrc),
+		"rollback cleans only the worktree created by this invocation",
+	);
+	assert(
+		commandsSrc.includes('wantWorktree && current.mode === "init"'),
+		"worktree creation is refused in Init Mode",
+	);
+	const workBlock = commandsSrc.slice(
+		commandsSrc.indexOf("registerCommand(\"workflow:work\""),
+		commandsSrc.indexOf("// registerWorkflowReviewCommand"),
+	);
+	assert(!workBlock.includes("ctx.ui.select"), "work entry has no interactive execution-mode dialog");
+	assert(
+		workBlock.includes("workStartEntryId") && workBlock.includes("approvedTodos: undefined"),
+		"Direct Work requirement boundary preserved",
+	);
 }
 
 console.log(`\n${runs - failures}/${runs} checks passed.`);

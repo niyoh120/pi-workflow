@@ -345,7 +345,7 @@ This prevents wasting tokens when the user still wants to refine the design.
 | `/workflow:explore` | Enter Explore Mode (non-destructive — preserves plan/todos) |
 | `/workflow:plan` | Enter Plan Mode |
 | `/go [--force]` | Approve current plan and hand off to Work Mode |
-| `/workflow:work [task]` | Skip Plan Mode, go straight to implementation |
+| `/workflow:work [--worktree\|-w [分支名] [--] 任务]` | Skip Plan Mode, go straight to implementation; `--worktree` runs this session in a fresh managed Git worktree for parallel small changes (see below) |
 | `/workflow:review` | On-demand unified review of the current workspace (incl. active worktree); injects a delegated code review spec (zero LLM) when `codeReview.enabled` is true |
 | `/workflow:qa` | Review → QA delivery loop: unified review to PASS, then an independent runtime QA agent that executes the affected functionality (per-flow PASS/FAIL/BLOCKED/SKIPPED evidence; BLOCKED stops the loop for the user) |
 | `/workflow:merge [--target <branch>] [指令]` | Enter Merge Mode: integrate the source branch (active workflow worktree branch, or the current ordinary local branch) into a target local branch |
@@ -403,6 +403,25 @@ The unified Review runs an **on-demand, user-triggered** independent reviewer ov
 - **Source & hygiene boundaries** — project source/config/deps/Git refs stay unchanged (fixes belong to Work); temporary scripts and artifacts go to a fresh random subdirectory of the scratch root; resources the round started are shut down; a final `git status` check reports drift vs the recorded baseline without auto reset/clean. Cancel/timeout/crash can skip cleanup — external processes may need manual handling (prompt-governed; no process supervisor by design).
 - **Budget** — 60-minute total timeout (`models.qa`, default mirrors `models.review`); reviewers keep 30 minutes. `qa.enabled: false` hides `/workflow:qa` + the tool. `review.enabled: false` runs standalone QA with the Review stage explicitly absent: after a QA-driven fix the combined flow pauses for the user; Review + QA both passing is what completes the chain.
 - **Soft gate** — the verdict is transient (tool result + sidecar history): it never enters WorkflowState, never gates `/workflow:commit`, and `/workflow:commit` / `/workflow:merge` stay under explicit user control. Expected chain: implement → Review PASS → QA PASS → user commits → user merges.
+
+## Direct Work in a Managed Worktree (`/workflow:work --worktree`)
+
+For small parallel changes that skip Plan approval, run `/workflow:work --worktree` in separate Pi sessions — each session gets its own isolated working directory and workflow branch while keeping the existing Work / Review / QA / Commit / Merge / reset chains:
+
+```text
+/workflow:work 修复提示文案                       # plain Direct Work (unchanged)
+/workflow:work --worktree                         # managed worktree, default branch name
+/workflow:work -w fix/log-rotation -- 修复日志轮转  # worktree + semantic branch + task
+/workflow:work --worktree -- 修复提示文案          # worktree + task, default branch name
+/workflow:work -- --worktree 是这里的任务正文       # literal task text via leading --
+```
+
+- **Parsing** — only the three leading control tokens are reserved (`--worktree`, `-w`, a standalone `--`). A task body after the option must be separated by a standalone `--`; at most one branch-name token may precede it. Repeated flags, extra tokens, and unknown options fail with the usage line and zero side effects. The task body is end-trimmed only; internal spaces, quotes, newlines, and option-looking tokens stay verbatim. A task that itself starts with `-` (e.g. `/workflow:work -fix typo`) is rejected as an unknown option — escape it with a leading `--`: `/workflow:work -- -fix typo`.
+- **Creation** — happens only after parse and mode prechecks (active-merge denial, Init-Mode refusal, active-worktree validation). A new `workRunId` is generated and the worktree is created from the current checkout's commit baseline via the shared git helper (atomic `worktree add -b`; path/branch collisions fail explicitly). Uncommitted changes stay in the source checkout; the branch follows the existing naming (`wf/<8hex>` or `<semantic>@wf-<8hex>`).
+- **Reuse** — an already-active worktree in the same session is always reused with its `workRunId` (bare flag is idempotent); an explicit semantic name is accepted only when it maps to the current run's full branch name, otherwise the command reports the mismatch and points at a fresh Pi session for the second task.
+- **Session isolation** — one session owns one worktree. Forked/resumed sessions keep pointing at the same worktree; open a new Pi session per parallel task. Bash cwd, write guards, Review/QA scope, Merge source resolution, and `/workflow:reset` all key off the recorded worktree state, so the downstream chains work unchanged.
+- **Failure & rollback** — creation failures keep the old state and never delete predicted paths (they may belong to a concurrent creator). If the mode transition fails after creation, the original state snapshot is restored via the same transition helper and only a verified restore triggers cleanup of the worktree this invocation created (non-forced remove, safe branch delete, residue diagnostics on any failure); a failed restore keeps every resource and reports the recovery entries (`/workflow:status`, `/workflow:reset`).
+- **Out of scope** — no dependency/node_modules/.env copying, no port allocation, no multi-worktree management per session, no auto commit/merge/delete, and no changes to the Plan approval transaction.
 
 ## Merge Mode (`/workflow:merge`)
 
