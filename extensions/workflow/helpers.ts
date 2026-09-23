@@ -98,6 +98,83 @@ export function formatApprovedTodosForHandoff(todos: TodoItem[]): string {
 		.join("\n");
 }
 
+// ── Per-turn mode reminder ─────────────────────────────────────────────────
+
+/**
+ * Custom message type for the per-user-turn mode reminder. The
+ * before_agent_start handler returns one reminder right after each user
+ * message and Pi persists it in the session (one per user turn). While
+ * workflow stays active the context handler keeps every reminder verbatim —
+ * the message stream grows append-only, which preserves provider prefix
+ * caching. After workflow is disabled, the context handler filters them from
+ * the provider projection so stale mode constraints stop applying.
+ */
+export const WORKFLOW_MODE_REMINDER_CUSTOM_TYPE = "workflow-mode-reminder";
+
+/** Hard byte cap (UTF-8) for one reminder body. Keeps per-turn token cost minimal. */
+export const MODE_REMINDER_MAX_BYTES = 480;
+
+/**
+ * Build the short hidden mode reminder injected once per user turn. Pure and
+ * deterministic: only the mode shapes the text — no timestamps, todos, run
+ * IDs, or paths — so repeated turns in the same mode stay byte-identical for
+ * provider prefix caching. Returns undefined for idle (no reminder).
+ */
+export function buildModeReminderBody(mode: Mode): string | undefined {
+	switch (mode) {
+		case "idle":
+			return undefined;
+		case "explore":
+			return "<workflow-mode-reminder>当前模式：Explore（只读探索与问答）。项目文件只读：禁止 edit/write 项目文件、禁止 workflow_plan_save 等计划工具、禁止改动性 shell。历史消息里其他模式的工具调用属于已结束的阶段，本轮权限以本提醒与 system Mode Prompt 为准。</workflow-mode-reminder>";
+		case "plan":
+			return "<workflow-mode-reminder>当前模式：Plan（讨论与计划）。项目只读，禁止实现代码；计划只经 workflow_plan_save 落盘，决策用 workflow_grill_record。历史消息里其他模式的工具调用属于已结束的阶段，本轮权限以本提醒与 system Mode Prompt 为准。</workflow-mode-reminder>";
+		case "work":
+			return "<workflow-mode-reminder>当前模式：Work（实现任务）。按 workflow_todo 推进，禁止任何 git 写操作；出现 recovery warning 立即 blocked 并停止。历史消息里其他模式的工具调用属于已结束的阶段，本轮权限以本提醒与 system Mode Prompt 为准。</workflow-mode-reminder>";
+		case "init":
+			return "<workflow-mode-reminder>当前模式：Init（校准 AGENTS.md）。只允许写 initTargetPath 指定的 AGENTS.md；完成或中止调用 workflow_init_complete。历史消息里其他模式的工具调用属于已结束的阶段，本轮权限以本提醒与 system Mode Prompt 为准。</workflow-mode-reminder>";
+		case "merge":
+			return "<workflow-mode-reminder>当前模式：Merge（分支集成）。以每轮注入的 Active Merge Context 为唯一权威基线；完成或中止调用 workflow_merge_complete。历史消息里其他模式的工具调用属于已结束的阶段，本轮权限以本提醒与 system Mode Prompt 为准。</workflow-mode-reminder>";
+		case "commit":
+			return "<workflow-mode-reminder>当前模式：Commit（生成并执行 git commit）。禁止修改代码文件、禁止 push，write/edit 已被拦截。历史消息里其他模式的工具调用属于已结束的阶段，本轮权限以本提醒与 system Mode Prompt 为准。</workflow-mode-reminder>";
+		default:
+			return assertNever(mode);
+	}
+}
+
+/** True when a provider-visible message is one of our per-turn mode reminders. */
+export function isWorkflowModeReminderMessage(message: unknown): boolean {
+	if (!message || typeof message !== "object") return false;
+	const m = message as { role?: unknown; customType?: unknown };
+	return (
+		m.role === "custom" && m.customType === WORKFLOW_MODE_REMINDER_CUSTOM_TYPE
+	);
+}
+
+/**
+ * One-line allowed-scope hint appended to tool_call guard rejections so the
+ * model can re-anchor on the current mode after a stale-mode tool attempt.
+ */
+export function modeScopeHint(mode: Mode): string {
+	switch (mode) {
+		case "idle":
+			return "当前无活动工作流模式（可先运行 /workflow:enable）";
+		case "explore":
+			return "Explore 只做只读探索与问答";
+		case "plan":
+			return "Plan 只做讨论与计划（workflow_plan_save / workflow_grill_record）";
+		case "work":
+			return "Work 只做实现（workflow_todo 跟踪，禁止 git 写操作）";
+		case "init":
+			return "Init 只允许写目标 AGENTS.md";
+		case "merge":
+			return "Merge 只做分支集成（以 Active Merge Context 为准）";
+		case "commit":
+			return "Commit 只做 git commit";
+		default:
+			return assertNever(mode);
+	}
+}
+
 /**
  * Exhaustiveness check for closed unions (typically `Mode`).
  * Place at the `default` branch of a switch over a closed union so the

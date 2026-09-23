@@ -9,11 +9,24 @@
  * - No per-request tail injection of mode or handoff.
  * - Workflow tools have no promptSnippet/promptGuidelines.
  *
+ * Per-turn mode reminder architecture (added later):
+ * - before_agent_start returns one short hidden custom message
+ *   (WORKFLOW_MODE_REMINDER_CUSTOM_TYPE) per user turn; tool-loop
+ *   continuations reuse it, so the message stream stays append-only.
+ * - context hook never creates reminders; it only strips them from the
+ *   provider projection once workflow is disabled.
+ * - Guard rejections carry the effective mode + scope hint for re-anchoring.
+ * - Real-handler groups below exercise reminders, projections, and the real
+ *   Anthropic adapter payload (stubbed fetch, zero network) for the
+ *   append-only prefix + cache-breakpoint claim.
+ *
  * Run: node scripts/validate-mode-injection.mjs
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 const root = process.cwd();
@@ -46,6 +59,89 @@ const workContext = read("extensions/workflow/work-context.ts");
 const types = read("extensions/workflow/types.ts");
 
 console.log("Mode injection regression validation (stable system prompt architecture)");
+
+// ── Runtime loader + fixture helpers (real handlers, real modules) ────────
+
+const workflowTmpDirs = [];
+
+/** Copy extensions/workflow into a temp dir with every relative `.js`
+ *  import specifier rewritten to the real `.ts` file, then import `entry`.
+ *  Loads the REAL module closure under Node type stripping while bare
+ *  specifiers resolve against node_modules. */
+async function loadWorkflowModule(entry) {
+	const tmp = fs.mkdtempSync(path.join(root, ".mode-injection-mod-"));
+	workflowTmpDirs.push(tmp);
+	const dest = path.join(tmp, "workflow");
+	fs.cpSync(path.join(root, "extensions", "workflow"), dest, { recursive: true });
+	for (const file of fs.readdirSync(dest).filter((f) => f.endsWith(".ts"))) {
+		const p = path.join(dest, file);
+		const text = fs.readFileSync(p, "utf8");
+		fs.writeFileSync(p, text.replace(/"(\.\/[^"\n]+)\.js"/g, '"./$1.ts"'));
+	}
+	return import(pathToFileURL(path.join(dest, entry)).href + "?t=" + Date.now());
+}
+
+process.on("exit", () => {
+	for (const d of fs.readdirSync(root).filter((f) => f.startsWith(".mode-injection-"))) {
+		try {
+			fs.rmSync(path.join(root, d), { recursive: true, force: true });
+		} catch {
+			/* best effort */
+		}
+	}
+});
+
+/** Minimal ExtensionAPI capture: records handlers, satisfies the surface
+ *  touched by registerBeforeAgentStart / registerWorkflowContextInjection /
+ *  registerToolCallGuard with workflow-inactive defaults. */
+function makeFakePi() {
+	const handlers = new Map();
+	const pi = {
+		handlers,
+		on(name, handler) {
+			if (!handlers.has(name)) handlers.set(name, []);
+			handlers.get(name).push(handler);
+		},
+		getActiveTools: () => ["read", "bash", "edit", "write"],
+		setActiveTools: (names) => {
+			pi.activeTools = names;
+		},
+		getAllTools: () => [],
+		getThinkingLevel: () => "off",
+		setThinkingLevel: () => {},
+		setModel: async () => true,
+		activeTools: [],
+	};
+	return pi;
+}
+
+/** Minimal ExtensionContext: fresh temp cwd so session state and config
+ *  resolve against empty dirs (workflow defaults). */
+function makeFakeCtx(cwd) {
+	return {
+		cwd,
+		sessionManager: {
+			getSessionId: () => "validate-session",
+			getSessionFile: () => path.join(cwd, ".validate-session.jsonl"),
+		},
+		model: { provider: "test-provider", id: "test-model", contextWindow: 128000 },
+		modelRegistry: { find: () => undefined },
+		isProjectTrusted: () => false,
+		ui: { notify: () => {}, setStatus: () => {} },
+		isIdle: () => true,
+		hasPendingMessages: () => false,
+	};
+}
+
+function makeTmpProject(prefix) {
+	const tmp = fs.mkdtempSync(path.join(root, prefix));
+	workflowTmpDirs.push(tmp);
+	const cwd = path.join(tmp, "project");
+	const agentDir = path.join(tmp, "agent");
+	fs.mkdirSync(cwd, { recursive: true });
+	fs.mkdirSync(agentDir, { recursive: true });
+	return { tmp, cwd, agentDir };
+}
 
 // ── helpers.ts: stable mode body ───────────────────────────────────────────
 assert(
@@ -758,6 +854,570 @@ console.log("\n=== T5: merge mode prompt/context/guards ===");
 		/mc\.defaultStrategy && params\.finalize !== "ff-only"/.test(mcTool),
 		"workflow_merge_complete: defaultStrategy rejects finalize=already-integrated",
 	);
+}
+
+// ── R0: per-turn mode reminder source wiring ─────────────────────────────
+console.log("\n=== R0: mode reminder source wiring ===");
+{
+	assert(
+		helpers.includes("export const WORKFLOW_MODE_REMINDER_CUSTOM_TYPE"),
+		"helpers exports WORKFLOW_MODE_REMINDER_CUSTOM_TYPE",
+	);
+	assert(
+		helpers.includes("export const MODE_REMINDER_MAX_BYTES"),
+		"helpers exports MODE_REMINDER_MAX_BYTES byte cap",
+	);
+	assert(
+		helpers.includes("export function buildModeReminderBody"),
+		"helpers exports buildModeReminderBody pure builder",
+	);
+	assert(
+		helpers.includes("export function isWorkflowModeReminderMessage"),
+		"helpers exports isWorkflowModeReminderMessage predicate",
+	);
+	assert(
+		helpers.includes("export function modeScopeHint"),
+		"helpers exports modeScopeHint guard hint",
+	);
+	assert(
+		/workflow-mode-reminder/.test(prompts),
+		"COMMON_PROMPT documents the per-turn reminder semantics",
+	);
+	assert(
+		commands.includes("WORKFLOW_MODE_REMINDER_CUSTOM_TYPE"),
+		"commands.ts wires the reminder custom type",
+	);
+	const basR0Start = commands.indexOf("export function registerBeforeAgentStart");
+	const basR0End = commands.indexOf(
+		"export function registerWorkflowContextInjection",
+		basR0Start,
+	);
+	const basR0Block = commands.slice(basR0Start, basR0End > 0 ? basR0End : commands.length);
+	assert(
+		basR0Block.includes("buildModeReminderBody(state.mode)") &&
+			basR0Block.includes("customType: WORKFLOW_MODE_REMINDER_CUSTOM_TYPE") &&
+			basR0Block.includes("display: false"),
+		"before_agent_start returns the hidden per-turn reminder message",
+	);
+	const ctxR0Start = commands.indexOf("export function registerWorkflowContextInjection");
+	const ctxR0End = commands.indexOf("// ── Pending Work kickoff dispatcher", ctxR0Start);
+	const ctxR0Block = commands.slice(ctxR0Start, ctxR0End > 0 ? ctxR0End : commands.length);
+	assert(
+		!ctxR0Block.includes("buildModeReminderBody"),
+		"context handler does NOT create reminders (persisted per user turn by before_agent_start)",
+	);
+	assert(
+		/isWorkflowModeReminderMessage\(message\)/.test(ctxR0Block),
+		"context handler strips stale reminders when workflow is inactive",
+	);
+	assert(
+		commands.includes("modeScopeHint(effectiveMode)"),
+		"guard rejections carry the mode scope hint",
+	);
+}
+
+// ── R1: per-turn reminder lifecycle (real before_agent_start handler) ──────
+console.log("\n=== R1: reminder lifecycle (real handlers) ===");
+{
+	const cmdMod = await loadWorkflowModule("commands.ts");
+	const helpersMod = await loadWorkflowModule("helpers.ts");
+	const stateMod = await loadWorkflowModule("state.ts");
+	const defaultsMod = await loadWorkflowModule("defaults.ts");
+
+	const { tmp, cwd, agentDir } = makeTmpProject(".mode-injection-run1-");
+	const getAgentDir = () => agentDir;
+	const pi = makeFakePi();
+	cmdMod.registerBeforeAgentStart(pi, getAgentDir);
+	cmdMod.registerWorkflowContextInjection(pi, getAgentDir);
+	const basHandler = pi.handlers.get("before_agent_start")[0];
+	assert(typeof basHandler === "function", "before_agent_start handler registered");
+
+	const ctx = makeFakeCtx(cwd);
+	const sessionKey = stateMod.getSessionKey(ctx);
+	const setState = (patch) => {
+		stateMod.saveState(cwd, sessionKey, {
+			...defaultsMod.DEFAULT_STATE,
+			...patch,
+		});
+	};
+
+	setState({ workflowEnabled: true, mode: "explore" });
+	let res = await basHandler({ systemPrompt: "BASE" }, ctx);
+	assert(res && res.message, "explore turn returns a reminder message");
+	assert(
+		res.message.customType === helpersMod.WORKFLOW_MODE_REMINDER_CUSTOM_TYPE,
+		"reminder carries the dedicated custom type",
+	);
+	assert(res.message.display === false, "reminder is hidden");
+	assert(
+		res.message.content === helpersMod.buildModeReminderBody("explore"),
+		"explore reminder matches the pure builder",
+	);
+	assert(
+		typeof res.systemPrompt === "string" &&
+			res.systemPrompt.startsWith("BASE") &&
+			res.systemPrompt.includes("Explore Mode"),
+		"system prompt still carries the stable mode prompt",
+	);
+
+	const roundTrip = ["work", "explore", "plan", "explore"];
+	for (const mode of roundTrip) {
+		setState({ workflowEnabled: true, mode });
+		res = await basHandler({ systemPrompt: "BASE" }, ctx);
+		assert(
+			res.message.content === helpersMod.buildModeReminderBody(mode),
+			`round-trip reminder matches ${mode}`,
+		);
+	}
+	assert(
+		res.message.content === helpersMod.buildModeReminderBody("explore"),
+		"final round-trip reminder reflects the CURRENT mode",
+	);
+
+	setState({ workflowEnabled: true, mode: "explore" });
+	const r1a = await basHandler({ systemPrompt: "BASE" }, ctx);
+	const r1b = await basHandler({ systemPrompt: "BASE" }, ctx);
+	assert(
+		r1a.message.content === r1b.message.content,
+		"same-mode turns produce byte-identical reminders (deterministic)",
+	);
+
+	for (const mode of ["explore", "plan", "work", "init", "merge", "commit"]) {
+		const body = helpersMod.buildModeReminderBody(mode);
+		assert(
+			Buffer.byteLength(body, "utf8") <= helpersMod.MODE_REMINDER_MAX_BYTES,
+			`${mode} reminder within the byte cap`,
+		);
+	}
+
+	setState({ workflowEnabled: true, mode: "idle" });
+	res = await basHandler({ systemPrompt: "BASE" }, ctx);
+	assert(
+		res && res.message === undefined,
+		"idle turn returns no reminder",
+	);
+
+	setState({ workflowEnabled: false, mode: "explore" });
+	res = await basHandler({ systemPrompt: "BASE" }, ctx);
+	assert(res === undefined, "inactive workflow emits no reminder");
+
+	const sm = SessionManager.inMemory(path.join(tmp, "sm"));
+	sm.appendCustomMessageEntry(
+		helpersMod.WORKFLOW_MODE_REMINDER_CUSTOM_TYPE,
+		helpersMod.buildModeReminderBody("work"),
+		false,
+		undefined,
+	);
+	const stored = sm
+		.getBranch()
+		.find(
+			(e) =>
+				e.type === "custom_message" &&
+				e.customType === helpersMod.WORKFLOW_MODE_REMINDER_CUSTOM_TYPE,
+		);
+	assert(
+		stored &&
+			stored.content === helpersMod.buildModeReminderBody("work") &&
+			stored.display === false,
+		"reminder persists as a hidden custom_message entry",
+	);
+
+	const praMod = await loadWorkflowModule("plan-review-agent.ts");
+	const branchFixture = [
+		{
+			type: "message",
+			id: "e1",
+			message: { role: "user", content: [{ type: "text", text: "实现登录功能" }] },
+		},
+		{
+			type: "custom_message",
+			id: "e2",
+			customType: helpersMod.WORKFLOW_MODE_REMINDER_CUSTOM_TYPE,
+			content: helpersMod.buildModeReminderBody("work"),
+		},
+	];
+	const reqs = praMod.extractUserRequirements(branchFixture);
+	assert(
+		reqs.some((r) => r.includes("实现登录功能")),
+		"extractUserRequirements keeps real user requirements",
+	);
+	assert(
+		!reqs.some((r) => r.includes("workflow-mode-reminder")),
+		"extractUserRequirements excludes reminder custom messages",
+	);
+}
+
+// ── R2: context projections + provider payload (append-only prefix) ────────
+console.log("\n=== R2: context projections + provider payload ===");
+{
+	const cmdMod = await loadWorkflowModule("commands.ts");
+	const helpersMod = await loadWorkflowModule("helpers.ts");
+	const stateMod = await loadWorkflowModule("state.ts");
+	const defaultsMod = await loadWorkflowModule("defaults.ts");
+
+	const { cwd, agentDir } = makeTmpProject(".mode-injection-run2-");
+	const pi = makeFakePi();
+	cmdMod.registerWorkflowContextInjection(pi, () => agentDir);
+	const ctxHandler = pi.handlers.get("context")[0];
+	const ctx = makeFakeCtx(cwd);
+	const sessionKey = stateMod.getSessionKey(ctx);
+	const setState = (patch) => {
+		stateMod.saveState(cwd, sessionKey, {
+			...defaultsMod.DEFAULT_STATE,
+			...patch,
+		});
+	};
+
+	const reminderWork = helpersMod.buildModeReminderBody("work");
+	const reminderExplore = helpersMod.buildModeReminderBody("explore");
+
+	// Approved Work fast path: current-turn + prior reminders survive isolation.
+	setState({
+		workflowEnabled: true,
+		mode: "work",
+		workRunId: "run-r2",
+		planPath: path.join(cwd, "plan.md"),
+	});
+	const workMessages = [
+		{ role: "user", content: "原始需求", timestamp: 1 },
+		{
+			role: "custom",
+			customType: helpersMod.WORK_HANDOFF_CUSTOM_TYPE,
+			content: "# Approved-Plan Work Handoff",
+			display: false,
+			details: { workRunId: "run-r2", boundary: true },
+			timestamp: 2,
+		},
+		{
+			role: "assistant",
+			content: [{ type: "toolCall", id: "c1", name: "read", arguments: { path: "/x" } }],
+			timestamp: 3,
+		},
+		{
+			role: "toolResult",
+			toolCallId: "c1",
+			toolName: "read",
+			content: [{ type: "text", text: "ok" }],
+			isError: false,
+			timestamp: 4,
+		},
+		{
+			role: "custom",
+			customType: helpersMod.WORKFLOW_MODE_REMINDER_CUSTOM_TYPE,
+			content: reminderExplore,
+			display: false,
+			timestamp: 5,
+		},
+		{
+			role: "custom",
+			customType: helpersMod.WORKFLOW_MODE_REMINDER_CUSTOM_TYPE,
+			content: reminderWork,
+			display: false,
+			timestamp: 7,
+		},
+		{ role: "user", content: "继续", timestamp: 8 },
+	];
+	const out = await ctxHandler({ messages: workMessages }, ctx);
+	assert(Array.isArray(out.messages), "approved work projection returns messages");
+	const projected = JSON.stringify(out.messages);
+	assert(projected.includes("# Approved-Plan Work Handoff"), "handoff marker retained");
+	assert(
+		out.messages.some(
+			(m) => helpersMod.isWorkflowModeReminderMessage(m) && m.content === reminderWork,
+		),
+		"current-turn work reminder retained through isolation",
+	);
+	assert(
+		out.messages.some(
+			(m) => helpersMod.isWorkflowModeReminderMessage(m) && m.content === reminderExplore,
+		),
+		"prior-turn reminder retained verbatim (append-only history)",
+	);
+	assert(
+		!projected.includes("原始需求"),
+		"pre-marker content stays isolated",
+	);
+	const callIdx = out.messages.findIndex((m) => m.role === "assistant");
+	const resIdx = out.messages.findIndex((m) => m.role === "toolResult");
+	assert(
+		callIdx !== -1 && resIdx === callIdx + 1,
+		"tool pairing intact after isolation",
+	);
+
+	// Merge mode: canonical context at head, reminders untouched.
+	setState({
+		workflowEnabled: true,
+		mode: "merge",
+		workRunId: undefined,
+		planPath: undefined,
+		mergeContext: {
+			sourceBranch: "feat/x",
+			targetBranch: "main",
+			sourceKind: "ordinary-branch",
+			sourceHeadBefore: "a".repeat(40),
+			targetHeadBefore: "b".repeat(40),
+			sourceOnlyCommitCountBefore: 2,
+			defaultStrategy: true,
+			instructions: "",
+			returnMode: "explore",
+		},
+	});
+	const mergeOut = await ctxHandler(
+		{
+			messages: [
+				{ role: "user", content: "普通消息", timestamp: 1 },
+				{
+					role: "custom",
+					customType: helpersMod.WORKFLOW_MODE_REMINDER_CUSTOM_TYPE,
+					content: reminderExplore,
+					display: false,
+					timestamp: 2,
+				},
+			],
+		},
+		ctx,
+	);
+	assert(
+		mergeOut.messages[0].role === "user" &&
+			String(mergeOut.messages[0].content).startsWith(helpersMod.MERGE_CONTEXT_MARKER),
+		"merge canonical context injected at head",
+	);
+	assert(
+		mergeOut.messages.some((m) => helpersMod.isWorkflowModeReminderMessage(m)),
+		"merge projection keeps reminders",
+	);
+
+	// Inactive: reminders stripped from the projection, real user text kept.
+	setState({ workflowEnabled: false, mode: "explore" });
+	const inactiveMessages = [
+		{
+			role: "user",
+			content: "用户正文提到 workflow-mode-reminder 这个词",
+			timestamp: 1,
+		},
+		{
+			role: "custom",
+			customType: helpersMod.WORKFLOW_MODE_REMINDER_CUSTOM_TYPE,
+			content: reminderWork,
+			display: false,
+			timestamp: 2,
+		},
+	];
+	const inactiveOut = await ctxHandler({ messages: inactiveMessages }, ctx);
+	assert(
+		!inactiveOut.messages.some((m) => helpersMod.isWorkflowModeReminderMessage(m)),
+		"inactive projection strips workflow reminders",
+	);
+	assert(
+		inactiveOut.messages.some(
+			(m) =>
+				m.role === "user" && String(m.content).includes("workflow-mode-reminder"),
+		),
+		"real user text mentioning the type string survives",
+	);
+
+	setState({ workflowEnabled: true, mode: "explore" });
+	const activeOut = await ctxHandler({ messages: inactiveMessages }, ctx);
+	assert(
+		activeOut.messages.some((m) => helpersMod.isWorkflowModeReminderMessage(m)),
+		"active projection keeps reminders again after re-enable",
+	);
+
+	// Real Anthropic adapter payload capture (stubbed fetch, zero network):
+	// turn B extends turn A verbatim → append-only, cache-reusable prefix;
+	// the cache_control breakpoint sits on the newest block.
+	const { stream } = await import("@earendil-works/pi-ai/api/anthropic-messages");
+	const captured = [];
+	const sse = [
+		"event: message_start",
+		'data: {"type":"message_start","message":{"id":"msg_t","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}',
+		"",
+		"event: content_block_start",
+		'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+		"",
+		"event: content_block_delta",
+		'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}',
+		"",
+		"event: content_block_stop",
+		'data: {"type":"content_block_stop","index":0}',
+		"",
+		"event: message_delta",
+		'data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}',
+		"",
+		"event: message_stop",
+		'data: {"type":"message_stop"}',
+		"",
+	].join("\n");
+	const fakeFetch = async (url, init) => {
+		let raw = "{}";
+		if (typeof init?.body === "string") raw = init.body;
+		else if (typeof init?.body?.text === "function") raw = await init.body.text();
+		captured.push({ url: String(url), body: JSON.parse(raw) });
+		return new Response(sse, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+	};
+	const model = {
+		api: "anthropic-messages",
+		provider: "anthropic",
+		id: "claude-test",
+		name: "claude-test",
+		contextWindow: 200000,
+		maxTokens: 4096,
+		reasoning: false,
+		input: ["text"],
+	};
+	const userMsg = { role: "user", content: [{ type: "text", text: "用户问题" }], timestamp: 1 };
+	const reminderMsg = { role: "user", content: [{ type: "text", text: reminderWork }], timestamp: 2 };
+	const ctxA = { systemPrompt: "BASE", messages: [userMsg, reminderMsg], tools: [] };
+	const ctxB = {
+		systemPrompt: "BASE",
+		messages: [
+			...ctxA.messages,
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "t1", name: "bash", arguments: { command: "ls" } }],
+				timestamp: 3,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "t1",
+				toolName: "bash",
+				content: [{ type: "text", text: "out" }],
+				isError: false,
+				timestamp: 4,
+			},
+		],
+		tools: [],
+	};
+	for (const c of [ctxA, ctxB]) {
+		try {
+			const events = stream(model, c, { apiKey: "test-key", fetch: fakeFetch, maxTokens: 64 });
+			for await (const ev of events) {
+				if (ev.type === "done" || ev.type === "error") break;
+			}
+		} catch {
+			// payload already captured; stream errors must not fail the group
+		}
+	}
+	assert(captured.length === 2, "two provider requests captured (zero network)");
+	if (captured.length === 2) {
+		const aMsgs = captured[0].body.messages;
+		const bMsgs = captured[1].body.messages;
+		// Compare with SDK-managed breakpoint metadata normalized away — the
+		// cache_control position is asserted separately below.
+		const stripBreakpoints = (msgs) =>
+			JSON.stringify(msgs).replace(/,"cache_control":\{[^}]*\}/g, "");
+		assert(
+			stripBreakpoints(bMsgs.slice(0, aMsgs.length)) === stripBreakpoints(aMsgs),
+			"turn B payload extends turn A verbatim (append-only, cache-reusable prefix)",
+		);
+		assert(
+			JSON.stringify(bMsgs).includes(reminderWork),
+			"reminder body reaches the provider payload as prefix text",
+			);
+		const lastTurnB = bMsgs[bMsgs.length - 1];
+		const lastBlockB = Array.isArray(lastTurnB.content)
+			? lastTurnB.content[lastTurnB.content.length - 1]
+			: undefined;
+		assert(
+			lastBlockB && lastBlockB.cache_control,
+			"cache_control breakpoint sits on the newest block",
+		);
+		const reminderBlockA = aMsgs[aMsgs.length - 1]?.content?.[0];
+		const reminderBlockB = bMsgs[1]?.content?.[0];
+		assert(
+			reminderBlockA?.cache_control &&
+				reminderBlockB &&
+				!reminderBlockB.cache_control,
+			"breakpoint moves forward off the reminder as the conversation grows",
+		);
+	}
+}
+
+// ── R3: guard rejections (mode re-anchor feedback) ───────────────────────
+console.log("\n=== R3: guard rejections ===");
+{
+	const cmdMod = await loadWorkflowModule("commands.ts");
+	const stateMod = await loadWorkflowModule("state.ts");
+	const defaultsMod = await loadWorkflowModule("defaults.ts");
+
+	const { cwd, agentDir } = makeTmpProject(".mode-injection-run3-");
+	const pi = makeFakePi();
+	cmdMod.registerToolCallGuard(pi, () => agentDir);
+	const guard = pi.handlers.get("tool_call")[0];
+	const ctx = makeFakeCtx(cwd);
+	const sessionKey = stateMod.getSessionKey(ctx);
+	const setState = (patch) => {
+		stateMod.saveState(cwd, sessionKey, {
+			...defaultsMod.DEFAULT_STATE,
+			...patch,
+		});
+	};
+
+	setState({ workflowEnabled: true, mode: "explore" });
+	let r = await guard({ toolName: "workflow_plan_save", input: {} }, ctx);
+	assert(r && r.block === true, "explore blocks workflow_plan_save");
+	assert(
+		r.reason.includes("当前模式(explore)") && r.reason.includes("workflow_plan_save"),
+		"rejection names the effective mode and tool",
+	);
+	assert(
+		r.reason.includes("Explore 只做只读探索与问答"),
+		"rejection carries the scope hint",
+	);
+	assert(
+		r.reason.includes("/workflow:plan"),
+		"rejection points to the switch commands",
+	);
+
+	setState({ workflowEnabled: true, mode: "plan" });
+	r = await guard({ toolName: "workflow_review", input: {} }, ctx);
+	assert(r && r.block === true, "plan blocks workflow_review (not in the plan tool surface)");
+	assert(
+		r.reason.includes("当前模式(plan)不可使用 workflow_review") &&
+			r.reason.includes("历史轮次的调用记录不代表当前可用"),
+		"mode-surface rejection explains stale history",
+	);
+
+	setState({ workflowEnabled: true, mode: "explore" });
+	r = await guard(
+		{ toolName: "write", input: { path: path.join(cwd, "src.ts"), content: "x" } },
+		ctx,
+	);
+	assert(
+		r &&
+			r.block === true &&
+			r.reason.includes("explore Mode") &&
+			r.reason.includes("Explore 只做只读探索与问答"),
+		"readonly write rejection names mode + scope",
+	);
+
+	r = await guard(
+		{
+			toolName: "write",
+			input: {
+				path: path.join(os.tmpdir(), "pi-workflow-plan-scratch", "probe.js"),
+				content: "x",
+			},
+		},
+		ctx,
+	);
+	assert(r === undefined, "scratch write still allowed in explore");
+
+	r = await guard({ toolName: "read", input: { path: path.join(cwd, "src.ts") } }, ctx);
+	assert(r === undefined, "project read allowed in explore");
+
+	r = await guard(
+		{ toolName: "read", input: { path: path.join(cwd, ".pi", "workflow", "state.json") } },
+		ctx,
+	);
+	assert(r && r.block === true, "workflow data read stays blocked in explore");
+
+	setState({ workflowEnabled: true, mode: "work" });
+	r = await guard({ toolName: "workflow_todo", input: { action: "list" } }, ctx);
+	assert(r === undefined, "work keeps workflow_todo available");
 }
 
 console.log(`\n${runs - failures}/${runs} checks passed.`);

@@ -24,6 +24,7 @@ export const COMMON_PROMPT = `
 - 遵守当前模式的职责、权限和工具边界。
 - 当前已启用的内置工具、其他扩展工具、MCP 工具和远程工具可以正常使用，并遵守本模式的职责与文件权限；工具自身的使用建议不能扩大当前模式权限。
 - 当前 system prompt 中的 Mode Prompt 定义当前模式，其职责和权限适用于所有已启用工具。
+- 每轮用户消息后会有一条隐藏的 workflow-mode-reminder 重申当前模式与边界；历史消息中其他模式的工具调用、kickoff 与恢复提示都属于已结束的阶段，以最新提醒和 system Mode Prompt 为准。
 - 工作流状态只能通过当前可用的 workflow_* 工具访问；禁止直接读写 .pi/workflow/。
 `;
 

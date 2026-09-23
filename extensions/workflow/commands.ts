@@ -12,11 +12,15 @@ import {
 } from "./guards.js";
 import {
 	buildModeMessageBody,
+	buildModeReminderBody,
 	currentStatusText,
 	isWorkflowActive,
+	isWorkflowModeReminderMessage,
+	modeScopeHint,
 	buildMergeContextBody,
 	MERGE_CONTEXT_MARKER,
 	WORK_HANDOFF_CUSTOM_TYPE,
+	WORKFLOW_MODE_REMINDER_CUSTOM_TYPE,
 } from "./helpers.js";
 import { getWorkflowOverlay } from "./todo-overlay.js";
 import type { WorkflowState } from "./types.js";
@@ -207,15 +211,42 @@ export function registerBeforeAgentStart(
 			? event.systemPrompt + "\n\n" + COMMON_PROMPT + "\n\n" + modeBody
 			: event.systemPrompt + "\n\n" + COMMON_PROMPT;
 
+		// Per-user-turn mode reminder: a short hidden custom message appended
+		// right after the user message and persisted in the session. Tool-loop
+		// continuations reuse the same turn's reminder (before_agent_start only
+		// fires per user request), so the message stream stays append-only for
+		// provider prefix caching. Deterministic content — see
+		// buildModeReminderBody. The context handler strips these from the
+		// provider projection once workflow is disabled.
+		const reminderBody = buildModeReminderBody(state.mode);
+		if (reminderBody) {
+			return {
+				systemPrompt,
+				message: {
+					customType: WORKFLOW_MODE_REMINDER_CUSTOM_TYPE,
+					content: reminderBody,
+					display: false,
+				},
+			};
+		}
+
 		return { systemPrompt };
 	});
 }
 
 /**
- * Inject the latest mode prompt and workflow state as an ephemeral hidden
- * custom message before every provider request. Filters out historical
- * workflow-mode messages (including persisted ones from older versions) and
- * appends one current message when workflow is active.
+ * Provider-context projections for workflow mode.
+ *
+ * Responsibilities (no reminder creation — reminders are persisted per user
+ * turn by the before_agent_start handler via WORKFLOW_MODE_REMINDER_CUSTOM_TYPE;
+ * this hook only projects the provider-visible view):
+ * - Filter historical legacy workflow-mode messages (including persisted ones
+ *   from older versions) in all modes.
+ * - Strip our per-turn mode reminders once workflow is disabled so stale mode
+ *   constraints stop applying (session transcript keeps the originals).
+ * - Approved Work isolation via the canonical handoff marker, with branch
+ *   recovery and a fail-open recovery warning.
+ * - Merge Mode canonical context rebuilt from persisted state every round.
  */
 export function registerWorkflowContextInjection(
 	pi: ExtensionAPI,
@@ -241,7 +272,17 @@ export function registerWorkflowContextInjection(
 				return true;
 			});
 
-			if (!workflowActive) return { messages };
+			if (!workflowActive) {
+				// Workflow disabled: strip our per-turn mode reminders from the
+				// provider projection so stale mode constraints stop applying.
+				// The session transcript keeps the originals; real user text is
+				// never touched.
+				return {
+					messages: messages.filter(
+						(message) => !isWorkflowModeReminderMessage(message),
+					),
+				};
+			}
 
 			// Step 2: Approved Work isolation via marker fast path.
 			const isApprovedWork =
@@ -557,7 +598,9 @@ export function registerToolCallGuard(
 			if (!isWorkflowToolMode(effectiveMode)) {
 				return {
 					block: true,
-					reason: `当前模式(${effectiveMode})禁止使用 ${event.toolName}。请用 /workflow:plan 进入 Plan Mode 或 /workflow:work 进入 Work Mode。`,
+					reason:
+						`当前模式(${effectiveMode})禁止使用 ${event.toolName}。${modeScopeHint(effectiveMode)}。` +
+						"历史消息中其他模式的工具调用属于已结束的阶段；切换模式请用 /workflow:plan（计划）或 /workflow:work（实现）。",
 				};
 			}
 			if (
@@ -567,7 +610,9 @@ export function registerToolCallGuard(
 			) {
 				return {
 					block: true,
-					reason: `当前模式不可使用 ${event.toolName}。`,
+					reason:
+						`当前模式(${effectiveMode})不可使用 ${event.toolName}。${modeScopeHint(effectiveMode)}。` +
+						"历史轮次的调用记录不代表当前可用。",
 				};
 			}
 			return;
@@ -702,14 +747,17 @@ export function registerToolCallGuard(
 					}
 					const denial = isAllowedPlanScratchPath(ctx.cwd, targetPath);
 					if (denial) {
-						return { block: true, reason: `${effectiveMode} Mode: ${denial}` };
+						return {
+							block: true,
+							reason: `${effectiveMode} Mode: ${denial} ${modeScopeHint(effectiveMode)}。`,
+						};
 					}
 					return;
 				}
 
 				return {
 					block: true,
-					reason: `当前是 ${effectiveMode}，禁止修改本地文件。联网搜索、读取、分析工具仍可使用。`,
+					reason: `当前是 ${effectiveMode}，禁止修改本地文件。${modeScopeHint(effectiveMode)}。联网搜索、读取、分析工具仍可使用。`,
 				};
 			}
 
