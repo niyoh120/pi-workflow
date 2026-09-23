@@ -258,7 +258,7 @@ const COMPACTION = {
 	assert(prep.ok === true && prep.model.contextWindow === 150_000, "prepareModelWithContextWindow applies a valid window");
 	assert(prep.originalWindow === 200_000 && prep.appliedWindow === 150_000, "prepare records original + applied windows");
 	const prepBad = pureMod.prepareModelWithContextWindow(registryModel, 250_000, COMPACTION);
-	assert(prepBad.ok === false && /严格小于/.test(prepBad.error), "prepareModelWithContextWindow rejects an above-baseline window with a clear reason");
+	assert(prepBad.ok === false && /strictly below the Pi default window/.test(prepBad.error), "prepareModelWithContextWindow rejects an above-baseline window with a clear reason");
 
 	// Apply-error diagnostics carry role/model/input/range/fix.
 	const msg = pureMod.buildContextWindowApplyError({
@@ -275,7 +275,7 @@ const COMPACTION = {
 			msg.includes("anthropic/claude-opus-4-5") &&
 			msg.includes("250000") &&
 			msg.includes("36385 ~ 199999") &&
-			msg.includes("清除"),
+			msg.includes("Clear the field"),
 		"apply error names the field, model, input value, range, and the clear-to-inherit fix",
 	);
 
@@ -586,7 +586,7 @@ try {
 		const okUntrusted = await modeMod.setRole(hUntrusted.pi, hUntrusted.ctx, "plan", getAgentDir);
 		assert(okUntrusted === false && hUntrusted.setModelCalls.length === 0, "untrusted project ignores project compaction (10000 rejected under global bound)");
 		assert(
-			hUntrusted.notifications.some((n) => /models\.plan\.contextWindow 无效/.test(n.msg) && n.msg.includes("16384")),
+			hUntrusted.notifications.some((n) => /models\.plan\.contextWindow is invalid/.test(n.msg) && n.msg.includes("16384")),
 			"rejection error cites the global reserve values",
 		);
 	}
@@ -879,7 +879,7 @@ try {
 		} catch (e) {
 			threw = e instanceof Error ? e.message : String(e);
 		}
-		assert(threw.includes("严格小于"), "window equal to the baseline throws an explicit preparation error");
+		assert(threw.includes("strictly below the Pi default window"), "window equal to the baseline throws an explicit preparation error");
 	}
 
 	// 3d-2. corrupt Pi settings + configured window → explicit error (M1:
@@ -907,7 +907,7 @@ try {
 				threwWith = e instanceof Error ? e.message : String(e);
 			}
 			assert(
-				threwWith.includes("Pi settings 加载失败"),
+				threwWith.includes("failed to load Pi settings"),
 				"corrupt Pi settings reject a configured-window review preparation explicitly",
 			);
 

@@ -369,9 +369,9 @@ export function registerWorkflowContextInjection(
 				);
 				const recoveryWarning =
 					"# Approved-Plan Work Recovery Warning\n\n" +
-					"计划恢复失败：handoff marker 与 approval journal 均不可用或配对失效。\n" +
-					"立即停止执行：将当前 workflow_todo 标记为 blocked，不要继续修改文件，\n" +
-					"并向用户报告冲突，请用户执行 /workflow:plan 修订计划。不要自行切换模式或调用 workflow_plan_save。";
+					"Plan restore failed: both the handoff marker and the approval journal are unavailable or no longer paired.\n" +
+					"Stop executing now: mark the current workflow_todo as blocked, do not modify any further files,\n" +
+					"report the conflict to the user and ask them to run /workflow:plan to revise the plan. Do not switch modes yourself or call workflow_plan_save.";
 				return {
 					messages: [
 						{
@@ -518,7 +518,7 @@ export async function runPendingWorkDispatcher(
 				sendKickoff: (workRunId: string) => {
 					pi.sendUserMessage(
 						`<!-- workflow-work-kickoff:${workRunId} -->\n\n` +
-							`Plan已批准，开始执行 Approved-Plan Work。按 workflow_todo 和 Final Plan 推进。`,
+							`Plan approved — starting Approved-Plan Work. Drive execution via workflow_todo and the Final Plan.`,
 					);
 				},
 				clearPending: () => {
@@ -599,8 +599,8 @@ export function registerToolCallGuard(
 				return {
 					block: true,
 					reason:
-						`当前模式(${effectiveMode})禁止使用 ${event.toolName}。${modeScopeHint(effectiveMode)}。` +
-						"历史消息中其他模式的工具调用属于已结束的阶段；切换模式请用 /workflow:plan（计划）或 /workflow:work（实现）。",
+						`Current mode (${effectiveMode}) forbids ${event.toolName}. ${modeScopeHint(effectiveMode)}.` +
+						" Tool calls from other modes in history belong to finished phases; switch modes via /workflow:plan (planning) or /workflow:work (implementation).",
 				};
 			}
 			if (
@@ -611,8 +611,8 @@ export function registerToolCallGuard(
 				return {
 					block: true,
 					reason:
-						`当前模式(${effectiveMode})不可使用 ${event.toolName}。${modeScopeHint(effectiveMode)}。` +
-						"历史轮次的调用记录不代表当前可用。",
+						`Current mode (${effectiveMode}) does not allow ${event.toolName}. ${modeScopeHint(effectiveMode)}.` +
+						" Call records from earlier turns do not carry over.",
 				};
 			}
 			return;
@@ -660,7 +660,7 @@ export function registerToolCallGuard(
 					return {
 						block: true,
 						reason:
-							"Plan files (.pi/workflow/plan/) must be updated via workflow_plan_save(markdown='完整计划内容'), " +
+							"Plan files (.pi/workflow/plan/) must be updated via workflow_plan_save(markdown='complete plan content'), " +
 							"not with write/edit.",
 					};
 				}
@@ -749,7 +749,7 @@ export function registerToolCallGuard(
 					if (denial) {
 						return {
 							block: true,
-							reason: `${effectiveMode} Mode: ${denial} ${modeScopeHint(effectiveMode)}。`,
+							reason: `${effectiveMode} Mode: ${denial} ${modeScopeHint(effectiveMode)}.`,
 						};
 					}
 					return;
@@ -757,7 +757,7 @@ export function registerToolCallGuard(
 
 				return {
 					block: true,
-					reason: `当前是 ${effectiveMode}，禁止修改本地文件。${modeScopeHint(effectiveMode)}。联网搜索、读取、分析工具仍可使用。`,
+					reason: `Current mode is ${effectiveMode}: modifying local files is not allowed. ${modeScopeHint(effectiveMode)}. Web search, read, and analysis tools remain available.`,
 				};
 			}
 
@@ -769,7 +769,7 @@ export function registerToolCallGuard(
 			if (event.toolName === "write" || event.toolName === "edit") {
 				return {
 					block: true,
-					reason: "Commit Mode 禁止修改代码文件。",
+					reason: "Commit Mode forbids code changes.",
 				};
 			}
 
@@ -1359,19 +1359,19 @@ async function startReviewLoop(
 		return;
 	}
 
-	const promptText = `请执行统一 review 循环。
+	const promptText = `Please run the unified review loop.
 
-Review scope: 当前 workspace（含 active worktree）。
+Review scope: the current workspace (including the active worktree).
 
-要求：
-1. 第一轮调用 \`workflow_review()\`（无参数），启动独立 reviewer 对当前 workspace 审查。
-2. 收到 review 结果后，逐条验证 reviewer 的每个 Critical/Important 问题是否真实存在。
-3. 对确认存在的问题进行修复，并运行最相关测试验证。
-4. 修复后再次调用 \`workflow_review\` 重新审查；持续 review → fix → re-review，直到没有新的 Critical/Important 问题。
-5. 判断某 Critical/Important 问题是误判、超出范围、无需修改或与项目约束冲突时，在下一轮调用 \`workflow_review({ feedback: "..." })\` 提交技术理由。feedback 须逐条对应争议 finding，给出技术理由与 \`file:line\` / 命令输出等可复核证据，保持详细且聚焦，禁止编造事实；reviewer 会独立复核。
-6. 第一轮已经没有 Critical/Important 问题时，可以结束循环。2-3 轮后仍存在分歧时，停止并交给用户裁决。
-7. Minor 问题按价值选择处理，不能阻塞 review 通过。
-8. \`/workflow:commit\` 始终直接可用，不要求 Review；review 完成后可随时提交。`;
+Requirements:
+1. Round one: call \`workflow_review()\` with no arguments to launch the independent reviewer over the current workspace.
+2. After each review result, verify each Critical/Important finding yourself — does it actually hold?
+3. Fix confirmed issues and run the most relevant tests.
+4. After fixing, call \`workflow_review\` again; keep the review → fix → re-review loop going until no new Critical/Important findings appear.
+5. When you judge a Critical/Important finding to be a misjudgment, out of scope, unnecessary, or conflicting with project constraints, call \`workflow_review({ feedback: "..." })\` next round with per-item technical rationale and verifiable evidence (\`file:line\` / command output). Stay detailed, focused, and factual; fabricated evidence is useless — the reviewer verifies independently.
+6. If round one already has no Critical/Important findings, end the loop. After 2-3 rounds of unresolved disagreement, stop and hand it to the user.
+7. Handle Minor findings at your discretion; they do not block review passing.
+8. \`/workflow:commit\` is always directly available and does not require review; you may commit anytime once review is done.`;
 	ctx.ui.notify("Starting unified review loop: workspace.", "info");
 	pi.setSessionName("review: workspace");
 	pi.sendUserMessage(promptText);
@@ -1472,21 +1472,21 @@ async function startQaLoop(
 
 	const reviewStage = reviewEnabled
 		? [
-				"1. 先执行统一 Review 循环至有效 PASS：调用 `workflow_review()`，确认存在的问题逐条修复并运行最相关测试，或对误判在下一轮提交 `workflow_review({ feedback: \"...\" })`（附 file:line / 命令输出等可复核证据），直到 PASS；相同输入短路会直接复用上一轮结论。第一轮就没有 Critical/Important 问题时直接结束 Review 阶段。2-3 轮仍有分歧时停止交用户裁决。",
+				"1. First run the unified Review loop to a valid PASS: call `workflow_review()`, fix confirmed issues one by one and run the most relevant tests, or dispute misjudgments next round via `workflow_review({ feedback: \"...\" })` (with file:line / command-output evidence) until PASS; identical inputs short-circuit and reuse the previous verdict. If round one already has no Critical/Important findings, end the Review phase directly. Stop and hand unresolved 2-3-round disagreements to the user.",
 			].join("\n")
 		: [
-				"1. Review 阶段缺席（review.enabled=false）：明确向用户说明后将直接进入 QA 阶段。QA 发现缺陷并修复后，暂停组合流程并交用户决定恢复 Review 或下一步；Review 与 QA 都实际通过才算组合链路完成。",
+				"1. Review phase is absent (review.enabled=false): state that clearly to the user, then go straight to QA. After QA-reported defects are fixed, pause the combined loop and let the user decide whether to restore Review or move on; the combined chain only completes when both Review and QA actually pass.",
 			].join("\n");
-	const promptText = `请执行 Review → QA 交付验证流程。
+	const promptText = `Please run the Review → QA delivery-verification flow.
 
-Scope: 当前 workspace（含 active worktree）。
+Scope: the current workspace (including the active worktree).
 
-要求：
+Requirements:
 ${reviewStage}
-2. Review 有效 PASS 后调用 \`workflow_qa()\`（无参数）启动独立运行时 QA；QA agent 会实际运行受影响功能并逐流报告 PASS/FAIL/BLOCKED/SKIPPED 证据。
-3. QA 报告产品缺陷时：逐条对照证据确认 → 修复 → 运行针对性检查 → 重新 Review 至 PASS → 再次 \`workflow_qa()\`。每次实现变化后重新核对这两个阶段。对争议 finding 使用各自 feedback 通道（\`workflow_review({ feedback })\` / \`workflow_qa({ feedback })\`，feedback 须逐条附可复核证据）；约 3 次修复/复核仍无进展时停止并交用户裁决；Minor 项按价值处理。
-4. QA 报告 "QA status: BLOCKED" 时立即结束本次流程：向用户展示缺失工具/能力、受阻测试流和需要用户处理的条件。禁止自行安装/升级/自动下载 QA 依赖，禁止把环境阻塞当产品缺陷修复，禁止自动重试 QA；用户处理阻塞并明确重新触发后才继续。工具错误和用户取消同样停止自动循环。
-5. QA PASS 后向用户报告结果。\`/workflow:commit\` 与 \`/workflow:merge\` 始终由用户显式触发，你不得自动执行。`;
+2. Once Review validly PASSes, call \`workflow_qa()\` (no arguments) to launch the independent runtime QA; the QA agent actually runs the affected functionality and reports per-flow PASS/FAIL/BLOCKED/SKIPPED evidence.
+3. When QA reports product defects: confirm each against evidence → fix → run targeted checks → re-Review to PASS → run \`workflow_qa()\` again; recheck both phases after every implementation change. For disputed findings use each phase's feedback channel (\`workflow_review({ feedback })\` / \`workflow_qa({ feedback })\`; feedback must carry per-item verifiable evidence); after ~3 fix/re-review rounds without progress, stop and hand it to the user; handle Minor items at your discretion.
+4. On "QA status: BLOCKED" end this run immediately: show the user the missing tools/capabilities, the blocked test flows, and what they must handle. Never install/upgrade/auto-download QA dependencies, never treat environment blockers as product defects, never auto-retry QA; continue only after the user resolves the blocker and explicitly re-triggers. Tool errors and user cancellation likewise stop the auto loop.
+5. After QA passes, report the result to the user. \`/workflow:commit\` and \`/workflow:merge\` are always triggered explicitly by the user — never run them automatically.`;
 	ctx.ui.notify("Starting Review → QA delivery loop: workspace.", "info");
 	pi.setSessionName("qa: workspace");
 	pi.sendUserMessage(promptText);
@@ -1542,11 +1542,11 @@ export function registerWorkflowCommitCommand(
 			}
 
 			const extra = args.trim()
-				? `\n\n用户对 commit 的额外要求：${args.trim()}`
+				? `\n\nAdditional user requirements for the commit: ${args.trim()}`
 				: "";
 
 			pi.sendUserMessage(
-				`请查看当前 diff，生成合适的 commit message，并直接执行 git add 和 git commit。${extra}`,
+				`Inspect the current diff, compose an appropriate commit message, and directly run git add and git commit.${extra}`,
 			);
 		},
 	});
@@ -1605,7 +1605,7 @@ export function registerWorkflowMergeCommand(
 				} else {
 					ctx.ui.notify("Merge 已在进行中；已重发当前上下文。", "info");
 					pi.sendUserMessage(
-						`${MERGE_CONTEXT_MARKER}\n\n${buildMergeContextBody(current)}\n\n请继续按 Active Merge Context 执行本次集成。`,
+						`${MERGE_CONTEXT_MARKER}\n\n${buildMergeContextBody(current)}\n\nContinue this integration per the Active Merge Context.`,
 					);
 				}
 				return;
@@ -1687,16 +1687,16 @@ export function registerWorkflowMergeCommand(
 			const kindLabel =
 				facts.sourceKind === "workflow-worktree"
 					? "workflow worktree"
-					: "普通本地分支（当前 checkout）";
+					: "regular local branch (current checkout)";
 			const strategyLine = parsed.value.instructions
-				? "存在用户授权指令（见本轮注入的 Active Merge Context）；只有指令逐字点名的动作被授权，其余高风险动作保持默认禁令。"
-				: `默认策略：rebase \`${facts.sourceBranch}\` 到 \`${facts.targetBranch}\`，解决冲突并验证后调用 workflow_merge_complete(status="completed", finalize="ff-only")。`;
+				? "User-authorized instructions are present (see the Active Merge Context injected this turn); only actions named verbatim by the instructions are authorized, and all other high-risk actions stay under the default bans."
+				: `Default strategy: rebase \`${facts.sourceBranch}\` onto \`${facts.targetBranch}\`, resolve conflicts and verify, then call workflow_merge_complete(status="completed", finalize="ff-only").`;
 			pi.sendUserMessage(
 				[
-					"# Merge Mode 任务",
-					`来源分支 \`${facts.sourceBranch}\` → 目标分支 \`${facts.targetBranch}\`（${kindLabel}）。`,
+					"# Merge Mode Task",
+					`Source branch \`${facts.sourceBranch}\` → target branch \`${facts.targetBranch}\` (${kindLabel}).`,
 					strategyLine,
-					`中止调用 workflow_merge_complete(status="cancelled")。目标分支 ref 的最终前移由 workflow_merge_complete 完成。`,
+					`To abort call workflow_merge_complete(status="cancelled"). The final movement of the target branch ref is performed by workflow_merge_complete.`,
 				].join("\n\n"),
 			);
 		},
@@ -2084,26 +2084,26 @@ function sendInitTaskMessage(
 	repoStatus: "empty" | "existing",
 	existingFile: string | null,
 ): void {
-	const rootRel = root === cwd ? "仓库根目录" : `仓库根目录 (${root})`;
+	const rootRel = root === cwd ? "repo root" : `repo root (${root})`;
 	const targetRel = path.basename(targetPath);
 
 	const existingClause = existingFile
-		? `当前仓库已存在 ${existingFile}。请将它作为待验证的信息来源：审计过时/遗漏/冲突/冗余，按当前最佳效果重建，无需保守合并。`
-		: "当前仓库没有 AGENTS.md，将新建。";
+		? `The repo already has ${existingFile}. Treat it as an unverified information source: audit it for staleness, omissions, conflicts, and redundancy, then rebuild it to the current best state — no conservative merging.`
+		: "The repo has no AGENTS.md; a new one will be created.";
 
 	const statusClause =
 		repoStatus === "empty"
-			? `仓库状态：empty（只有 git/.pi/AGENTS.md）。按空仓库流程逐项确认：项目目标与交付形态、语言/运行时/框架/包管理器、构建/测试/lint/格式化命令、目录与命名约定、提交规范；按项目形态补充部署/发布与关键兼容、安全、性能约束。`
-			: `仓库状态：existing。先扫描 README、docs、构建/CI 配置、源码、部署文件、git 历史；能由明确证据确认的事实直接采用，缺失、冲突、多方案或团队偏好逐项 grilling。`;
+			? `Repo status: empty (only git/.pi/AGENTS.md). Follow the empty-repo flow item by item: project goals & deliverable shape, language/runtime/framework/package manager, build/test/lint/format commands, directory & naming conventions, commit conventions; add deploy/release and key compatibility/security/performance constraints as the project shape demands.`
+			: `Repo status: existing. First scan README, docs, build/CI config, source, deploy files, and git history; adopt clearly evidenced facts directly; grill item-by-item on gaps, conflicts, competing options, and team preferences.`;
 
 	pi.sendUserMessage(
 		[
-			`# Init Mode 任务：${rootRel} 的 ${targetRel}`,
+			`# Init Mode task: ${targetRel} at ${rootRel}`,
 			existingClause,
 			statusClause,
-			`目标文件：${targetPath}`,
-			`按 Init Mode 流程执行：收集证据→逐项确认/裁决→展示最终发现、用户确认的决策和计划删除的旧规则→重建紧凑版 AGENTS.md。`,
-			`完成后调用 workflow_init_complete(status="completed")；用户决定不更新/不生成时 skipped；用户取消时 cancelled。`,
+			`Target file: ${targetPath}`,
+			`Follow the Init Mode flow: gather evidence → confirm/decide item by item → show final findings, user-confirmed decisions, and the old rules slated for removal → rebuild a compact AGENTS.md.`,
+			`When done call workflow_init_complete(status="completed"); use skipped when the user opts out of updating/generating; cancelled on user abort.`,
 		].join("\n\n"),
 	);
 }

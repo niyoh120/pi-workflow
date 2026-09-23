@@ -424,30 +424,30 @@ Do NOT trust the Work agent's completion claims or summaries. Verify against evi
 ## Output
 Produce exactly ONE final review in your FINAL assistant message using this structure, then end that same message with the review_submit tool call (report text and tool call share the final message):
 
-## 覆盖矩阵 (Coverage Matrix)
+## Coverage Matrix
 | Plan requirement | Todo id | Status | Evidence (file:lines / command) |
 | ... | ... | ... | ... |
 
 ## Implementation Correctness
-- C1: [问题描述] → [文件:行号证据] → [建议修复]
+- C1: [issue description] → [file:line evidence] → [suggested fix]
 
 ## Verification
-- V1: [验收检查] → [命令与输出] → [通过/失败]
+- V1: [acceptance check] → [command and output] → [pass/fail]
 
 ## Code Rule Findings (when the Code Review Delegation section lists reviewable files)
-- F1: [defect + violated rule] → [文件:行号证据] → [建议修复]
+- F1: [defect + violated rule] → [file:line evidence] → [suggested fix]
 
 ## Critical
-- [严重问题，或 "(none)"]
+- [critical issue, or "(none)"]
 
 ## Important
-- [重要问题，或 "(none)"]
+- [important issue, or "(none)"]
 
 ## Minor
-- [次要问题，或 "(none)"]
+- [minor issue, or "(none)"]
 
 ## Summary
-[一段话总结实现是否真正满足计划与 todos]
+[one-paragraph assessment of whether the implementation truly satisfies the plan and todos]
 
 (review_submit: verdict PASS or FAIL — call it exactly once, as the final action of this same message)
 

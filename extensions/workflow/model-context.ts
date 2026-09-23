@@ -108,12 +108,12 @@ export function parseContextWindowInput(raw: string): ContextWindowParseResult {
 	if (!/^\d+$/.test(trimmed)) {
 		return {
 			ok: false,
-			error: "请输入十进制整数 token 数（例如 120000）；拒绝小数、负数、指数与尾随字符。",
+			error: "Enter a plain decimal integer token count (e.g. 120000); decimals, signs, exponents, and trailing characters are rejected.",
 		};
 	}
 	const value = Number(trimmed);
 	if (!Number.isSafeInteger(value)) {
-		return { ok: false, error: "数值超出安全整数范围。" };
+		return { ok: false, error: "Value exceeds the safe-integer range." };
 	}
 	return { ok: true, value };
 }
@@ -148,7 +148,7 @@ export function validateContextWindowValue(
 	) {
 		return {
 			ok: false,
-			error: "contextWindow 必须是正整数 token 数（JSON 中为 number 类型）。",
+			error: "contextWindow must be a positive integer token count (a number in JSON).",
 		};
 	}
 	if (
@@ -158,13 +158,13 @@ export function validateContextWindowValue(
 	) {
 		return {
 			ok: false,
-			error: `无法取得 Pi 基准窗口（registry 返回 ${String(baselineWindow)}），拒绝应用覆盖。`,
+			error: `Cannot obtain the Pi baseline window (registry returned ${String(baselineWindow)}); override application refused.`,
 		};
 	}
 	if (!isCompactionSnapshotSane(compaction)) {
 		return {
 			ok: false,
-			error: "无法取得合法的 Pi 压缩设置（reserveTokens / keepRecentTokens），拒绝应用覆盖。",
+			error: "Cannot obtain a sane Pi compaction snapshot (reserveTokens / keepRecentTokens); override application refused.",
 		};
 	}
 	const bounds: ContextWindowBounds = {
@@ -174,14 +174,14 @@ export function validateContextWindowValue(
 	if (value >= baselineWindow) {
 		return {
 			ok: false,
-			error: `contextWindow 必须严格小于 Pi 默认窗口 ${baselineWindow}（当前 ${value}）。`,
+			error: `contextWindow must be strictly below the Pi default window ${baselineWindow} (got ${value}).`,
 			bounds,
 		};
 	}
 	if (value <= bounds.minExclusive) {
 		return {
 			ok: false,
-			error: `contextWindow 必须大于压缩预留 ${compaction.reserveTokens} + 保留近期 ${compaction.keepRecentTokens} = ${bounds.minExclusive}（当前 ${value}）。`,
+			error: `contextWindow must be greater than reserve ${compaction.reserveTokens} + keepRecent ${compaction.keepRecentTokens} = ${bounds.minExclusive} (got ${value}).`,
 			bounds,
 		};
 	}
@@ -288,15 +288,16 @@ export function buildContextWindowApplyError(opts: {
 }): string {
 	const range =
 		opts.baselineWindow !== undefined && opts.compaction
-			? `可接受区间：${formatContextWindowRange(opts.baselineWindow, opts.compaction)}。`
+			? `Acceptable range: ${formatContextWindowRange(opts.baselineWindow, opts.compaction)}.`
 			: "";
 	const raw =
 		typeof opts.rawValue === "number"
 			? String(opts.rawValue)
 			: JSON.stringify(opts.rawValue);
 	return (
-		`models.${opts.role}.contextWindow 无效（${opts.provider}/${opts.model}，输入 ${raw}）：` +
+		`models.${opts.role}.contextWindow is invalid (${opts.provider}/${opts.model}, input ${raw}): ` +
 		`${opts.reason} ${range}` +
-		`请清除该字段（继承 Pi 默认窗口）或改为区间内的整数。主会话校验基于磁盘设置快照，可能与本会话未落盘的内存设置短暂不一致。`
+		(range ? " " : "") +
+		`Clear the field (inherit the Pi default window) or set an integer within the range. Main-session validation uses the disk settings snapshot, which may briefly differ from this session's unsaved in-memory settings.`
 	);
 }

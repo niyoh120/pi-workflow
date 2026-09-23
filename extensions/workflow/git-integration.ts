@@ -122,7 +122,7 @@ export function parseMergeCommandArgs(raw: string): ParseMergeCommandResult {
 			let k = j;
 			while (k < s.length && !isSpace(s[k])) k++;
 			if (k === j) {
-				return { ok: false, error: "--target= 需要一个分支名，例如 --target=main。" };
+				return { ok: false, error: '--target= requires a branch name, e.g. --target=main.' };
 			}
 			targetBranch = s.slice(j, k);
 			i = k;
@@ -134,7 +134,7 @@ export function parseMergeCommandArgs(raw: string): ParseMergeCommandResult {
 				while (end < s.length && !isSpace(s[end])) end++;
 				return {
 					ok: false,
-					error: `未识别的选项：${s.slice(i, end)}。使用 --target <branch> 指定目标分支，或用 -- 结束选项。`,
+					error: `Unrecognized option: ${s.slice(i, end)}. Use --target <branch> to specify the target branch, or -- to end options.`,
 				};
 			}
 			let j = k;
@@ -142,7 +142,7 @@ export function parseMergeCommandArgs(raw: string): ParseMergeCommandResult {
 			let m = j;
 			while (m < s.length && !isSpace(s[m])) m++;
 			if (m === j) {
-				return { ok: false, error: "--target 需要一个分支名，例如 --target main。" };
+				return { ok: false, error: "--target requires a branch name, e.g. --target main." };
 			}
 			targetBranch = s.slice(j, m);
 			i = m;
@@ -156,7 +156,7 @@ export function parseMergeCommandArgs(raw: string): ParseMergeCommandResult {
 			while (end < s.length && !isSpace(s[end])) end++;
 			return {
 				ok: false,
-				error: `未识别的选项：${s.slice(i, end)}。使用 --target <branch> 指定目标分支，或用 -- 结束选项。`,
+				error: `Unrecognized option: ${s.slice(i, end)}. Use --target <branch> to specify the target branch, or -- to end options.`,
 			};
 		} else {
 			// First natural-language token starts the verbatim instruction tail.
@@ -182,7 +182,7 @@ export function resolveRepoRoot(
 ): { ok: true; root: string } | { ok: false; error: string } {
 	const root = gitStdout(cwd, ["rev-parse", "--show-toplevel"], deps);
 	if (!root) {
-		return { ok: false, error: `当前目录不是 git 仓库：${cwd}` };
+		return { ok: false, error: `Not a git repository: ${cwd}` };
 	}
 	return { ok: true, root };
 }
@@ -269,7 +269,7 @@ export function isCheckoutClean(
 ): { clean: boolean; status: string } {
 	const status = gitStdout(checkoutPath, ["status", "--porcelain"], deps);
 	if (status === null) {
-		return { clean: false, status: "(git status 失败)" };
+		return { clean: false, status: "(git status failed)" };
 	}
 	return { clean: status === "", status: status || "(clean)" };
 }
@@ -406,7 +406,7 @@ export function runMergePreflight(
 		if (!input.worktreeBranch) {
 			return {
 				ok: false,
-				error: "存在 active worktree 但缺少 worktreeBranch；请先 /workflow:status 检查状态或 /workflow:reset 清理。",
+				error: "Active worktree exists but worktreeBranch is missing; run /workflow:status to inspect or /workflow:reset to clean up.",
 			};
 		}
 		sourceBranch = input.worktreeBranch;
@@ -415,13 +415,13 @@ export function runMergePreflight(
 		if (!entry) {
 			return {
 				ok: false,
-				error: `来源 worktree 不在同仓 worktree 列表中：${sourceCheckoutPath}。请先 /workflow:status 检查或 /workflow:reset 清理。`,
+				error: `Source worktree is not in the repo worktree list: ${sourceCheckoutPath}. Run /workflow:status to inspect or /workflow:reset to clean up.`,
 			};
 		}
 		if (entry.branch !== sourceBranch) {
 			return {
 				ok: false,
-				error: `来源 worktree 当前 checkout 为 ${entry.branch ?? "(detached HEAD)"}，与状态分支 ${sourceBranch} 不一致；请先恢复 worktree 或 /workflow:reset。`,
+				error: `Source worktree currently has ${entry.branch ?? "(detached HEAD)"} checked out, which does not match the state branch ${sourceBranch}; restore the worktree first or run /workflow:reset.`,
 			};
 		}
 	} else {
@@ -430,7 +430,7 @@ export function runMergePreflight(
 		if (!current) {
 			return {
 				ok: false,
-				error: "当前 checkout 处于 detached HEAD；请先 checkout 到要集成的本地分支后再运行 /workflow:merge。",
+				error: "Current checkout is in detached HEAD; check out the local branch to integrate before running /workflow:merge.",
 			};
 		}
 		sourceBranch = current;
@@ -442,10 +442,10 @@ export function runMergePreflight(
 	if (input.targetBranch !== undefined && input.targetBranch.trim()) {
 		const explicit = input.targetBranch.trim();
 		if (!isValidBranchName(root, explicit, deps)) {
-			return { ok: false, error: `非法目标分支名：${explicit}` };
+			return { ok: false, error: `Invalid target branch name: ${explicit}` };
 		}
 		if (!localBranchExists(root, explicit, deps)) {
-			return { ok: false, error: `目标分支不存在（必须是本地分支）：${explicit}` };
+			return { ok: false, error: `Target branch does not exist (must be a local branch): ${explicit}` };
 		}
 		targetBranch = explicit;
 	} else if (sourceKind === "workflow-worktree") {
@@ -453,13 +453,13 @@ export function runMergePreflight(
 		if (!base) {
 			return {
 				ok: false,
-				error: "无法从 worktree 状态推断目标分支（缺少 worktreeBaseBranch）；请用 --target <branch> 指定。",
+				error: "Cannot infer the target branch from worktree state (worktreeBaseBranch missing); specify it with --target <branch>.",
 			};
 		}
 		if (!localBranchExists(root, base, deps)) {
 			return {
 				ok: false,
-				error: `worktree 基线分支 ${base} 不再是本地分支；请用 --target <branch> 指定目标。`,
+				error: `Worktree base branch ${base} is no longer a local branch; specify the target with --target <branch>.`,
 			};
 		}
 		targetBranch = base;
@@ -468,14 +468,14 @@ export function runMergePreflight(
 		if (!inferred) {
 			return {
 				ok: false,
-				error: "无法推断目标分支（origin/HEAD 映射分支 / master / main 均不可用）；请用 --target <branch> 指定。",
+				error: "Cannot infer the target branch (origin/HEAD-mapped branch / master / main all unavailable); specify it with --target <branch>.",
 			};
 		}
 		targetBranch = inferred;
 	}
 
 	if (targetBranch === sourceBranch) {
-		return { ok: false, error: `来源分支与目标分支相同：${sourceBranch}` };
+		return { ok: false, error: `Source and target branches are the same: ${sourceBranch}` };
 	}
 
 	// ── cleanliness + sequencer checks ──
@@ -483,14 +483,14 @@ export function runMergePreflight(
 	if (!srcClean.clean) {
 		return {
 			ok: false,
-			error: `来源工作区存在未提交修改（不自动 stash）；请先提交或清理后重试：\n${boundedStatus(srcClean.status)}`,
+			error: `Source workspace has uncommitted changes (no auto-stash); commit or clean up first, then retry:\n${boundedStatus(srcClean.status)}`,
 		};
 	}
 	const srcSequencer = detectSequencer(sourceCheckoutPath, deps);
 	if (srcSequencer.length) {
 		return {
 			ok: false,
-			error: `来源 checkout 存在未结束的 git 操作（${srcSequencer.join(", ")}）；请先完成或 abort 后重试。`,
+			error: `Source checkout has an unfinished git operation (${srcSequencer.join(", ")}); finish or abort it first, then retry.`,
 		};
 	}
 
@@ -504,14 +504,14 @@ export function runMergePreflight(
 		if (!tgtClean.clean) {
 			return {
 				ok: false,
-				error: `目标分支已在 ${targetEntry.path} checkout 且工作区不干净（不自动 stash）；请先提交或清理后重试：\n${boundedStatus(tgtClean.status)}`,
+				error: `Target branch is checked out at ${targetEntry.path} with a dirty workspace (no auto-stash); commit or clean up first, then retry:\n${boundedStatus(tgtClean.status)}`,
 			};
 		}
 		const tgtSequencer = detectSequencer(targetEntry.path, deps);
 		if (tgtSequencer.length) {
 			return {
 				ok: false,
-				error: `目标 checkout ${targetEntry.path} 存在未结束的 git 操作（${tgtSequencer.join(", ")}）；请先完成或 abort 后重试。`,
+				error: `Target checkout ${targetEntry.path} has an unfinished git operation (${tgtSequencer.join(", ")}); finish or abort it first, then retry.`,
 			};
 		}
 	}
@@ -523,7 +523,7 @@ export function runMergePreflight(
 		deps,
 	);
 	if (!sourceHeadBefore) {
-		return { ok: false, error: `来源分支不存在：${sourceBranch}` };
+		return { ok: false, error: `Source branch does not exist: ${sourceBranch}` };
 	}
 	const targetHeadBefore = gitStdout(
 		root,
@@ -531,7 +531,7 @@ export function runMergePreflight(
 		deps,
 	);
 	if (!targetHeadBefore) {
-		return { ok: false, error: `目标分支不存在：${targetBranch}` };
+		return { ok: false, error: `Target branch does not exist: ${targetBranch}` };
 	}
 	const countOut = gitStdout(
 		root,
@@ -544,7 +544,7 @@ export function runMergePreflight(
 		!Number.isFinite(sourceOnlyCommitCountBefore) ||
 		sourceOnlyCommitCountBefore < 0
 	) {
-		return { ok: false, error: "无法计算来源分支领先提交数（git rev-list 失败）。" };
+		return { ok: false, error: "Cannot count source-only commits (git rev-list failed)." };
 	}
 
 	return {
@@ -605,7 +605,7 @@ export function finalizeDefaultFf(
 	if (!sourceHead) {
 		return {
 			ok: false,
-			error: `来源分支已不存在：${opts.sourceBranch}`,
+			error: `Source branch no longer exists: ${opts.sourceBranch}`,
 			diagnostics,
 			alreadyIntegrated: false,
 			appliedVia: "none",
@@ -619,7 +619,7 @@ export function finalizeDefaultFf(
 	if (!targetHead) {
 		return {
 			ok: false,
-			error: `目标分支已不存在：${opts.targetBranch}`,
+			error: `Target branch no longer exists: ${opts.targetBranch}`,
 			diagnostics,
 			alreadyIntegrated: false,
 			appliedVia: "none",
@@ -629,7 +629,7 @@ export function finalizeDefaultFf(
 	diagnostics.push(`target ${opts.targetBranch}: ${targetHead}`);
 
 	if (sourceHead === targetHead) {
-		diagnostics.push("target 已等于 source head，无需前移。");
+		diagnostics.push("target already equals source head; no move needed.");
 		return {
 			ok: true,
 			diagnostics,
@@ -642,8 +642,8 @@ export function finalizeDefaultFf(
 		return {
 			ok: false,
 			error:
-				`目标分支 ${opts.targetBranch} 在基线后发生了移动，已不是 ${opts.sourceBranch} 的 ancestor；` +
-				"fail closed（未修改任何 ref）。请先在来源 checkout 重新 rebase 后再次调用 workflow_merge_complete。",
+				`Target branch ${opts.targetBranch} moved after the baseline and is no longer an ancestor of ${opts.sourceBranch};` +
+				"fail-closed (no ref was modified). Rebase the source checkout again, then call workflow_merge_complete once more.",
 			diagnostics,
 			alreadyIntegrated: false,
 			appliedVia: "none",
@@ -657,7 +657,7 @@ export function finalizeDefaultFf(
 		if (!clean.clean) {
 			return {
 				ok: false,
-				error: `目标 worktree ${targetEntry.path} 不干净，拒绝 fast-forward：\n${boundedStatus(clean.status)}`,
+				error: `Target worktree ${targetEntry.path} is dirty; fast-forward refused:\n${boundedStatus(clean.status)}`,
 				diagnostics,
 				alreadyIntegrated: false,
 				appliedVia: "none",
@@ -667,7 +667,7 @@ export function finalizeDefaultFf(
 		if (head !== opts.targetBranch) {
 			return {
 				ok: false,
-				error: `目标 worktree ${targetEntry.path} 的 HEAD 为 ${head ?? "(unknown)"}，与 ${opts.targetBranch} 不一致，拒绝 fast-forward。`,
+				error: `Target worktree ${targetEntry.path} HEAD is ${head ?? "(unknown)"}, which does not match ${opts.targetBranch}; fast-forward refused.`,
 				diagnostics,
 				alreadyIntegrated: false,
 				appliedVia: "none",
@@ -678,13 +678,13 @@ export function finalizeDefaultFf(
 		} catch (err) {
 			return {
 				ok: false,
-				error: `目标 worktree fast-forward 失败：${gitErrorMessage(err)}`,
+				error: `Target worktree fast-forward failed: ${gitErrorMessage(err)}`,
 				diagnostics,
 				alreadyIntegrated: false,
 				appliedVia: "worktree-merge",
 			};
 		}
-		diagnostics.push(`已在目标 worktree ${targetEntry.path} 执行 merge --ff-only。`);
+		diagnostics.push(`Executed merge --ff-only in target worktree ${targetEntry.path}.`);
 	} else {
 		try {
 			execGit(
@@ -703,14 +703,14 @@ export function finalizeDefaultFf(
 			return {
 				ok: false,
 				error:
-					`目标分支原子前移失败（目标可能被并发移动）：${gitErrorMessage(err)}。` +
-					"fail closed（未覆盖任何 ref）；请先在来源 checkout 重新 rebase 后重试。",
+					`Atomic target-branch move failed (target may have moved concurrently): ${gitErrorMessage(err)}.` +
+					"fail-closed (no ref was overwritten); rebase the source checkout again, then retry.",
 				diagnostics,
 				alreadyIntegrated: false,
 				appliedVia: "update-ref",
 			};
 		}
-		diagnostics.push("已通过 update-ref（expected-old CAS）原子前移目标分支。");
+		diagnostics.push("Atomically moved the target branch via update-ref (expected-old CAS).");
 	}
 
 	const newTargetHead = gitStdout(
@@ -721,13 +721,13 @@ export function finalizeDefaultFf(
 	if (newTargetHead !== sourceHead) {
 		return {
 			ok: false,
-			error: `fast-forward 后校验失败：target=${newTargetHead ?? "(missing)"} source=${sourceHead}`,
+			error: `Post-fast-forward verification failed: target=${newTargetHead ?? "(missing)"} source=${sourceHead}`,
 			diagnostics,
 			alreadyIntegrated: false,
 			appliedVia: targetEntry ? "worktree-merge" : "update-ref",
 		};
 	}
-	diagnostics.push(`target ${opts.targetBranch} 现为 ${newTargetHead}`);
+	diagnostics.push(`target ${opts.targetBranch} is now ${newTargetHead}`);
 	return {
 		ok: true,
 		diagnostics,
@@ -768,36 +768,36 @@ export function verifyDefaultCompletion(
 	const diagnostics: string[] = [];
 
 	const sourceHead = gitStdout(cwd, ["rev-parse", "--verify", `refs/heads/${opts.sourceBranch}`], deps);
-	if (!sourceHead) failures.push(`来源分支不存在：${opts.sourceBranch}`);
+	if (!sourceHead) failures.push(`Source branch does not exist: ${opts.sourceBranch}`);
 	const targetHead = gitStdout(cwd, ["rev-parse", "--verify", `refs/heads/${opts.targetBranch}`], deps);
-	if (!targetHead) failures.push(`目标分支不存在：${opts.targetBranch}`);
+	if (!targetHead) failures.push(`Target branch does not exist: ${opts.targetBranch}`);
 	if (sourceHead && targetHead) {
 		diagnostics.push(`source ${opts.sourceBranch}: ${sourceHead}`);
 		diagnostics.push(`target ${opts.targetBranch}: ${targetHead}`);
 		if (sourceHead !== targetHead) {
-			failures.push(`目标 head 与来源 head 不一致：${targetHead} != ${sourceHead}`);
+			failures.push(`Target head does not match source head: ${targetHead} != ${sourceHead}`);
 		}
 	}
 
 	const branch = gitStdout(opts.sourceCheckoutPath, ["rev-parse", "--abbrev-ref", "HEAD"], deps);
 	if (branch !== opts.sourceBranch) {
-		failures.push(`来源 checkout 当前为 ${branch ?? "(unknown)"}，应停留在来源分支 ${opts.sourceBranch}`);
+		failures.push(`Source checkout is currently on ${branch ?? "(unknown)"}, expected to stay on source branch ${opts.sourceBranch}`);
 	} else {
-		diagnostics.push(`来源 checkout 停留在 ${branch}`);
+		diagnostics.push(`Source checkout stayed on ${branch}`);
 	}
 
 	const clean = isCheckoutClean(opts.sourceCheckoutPath, deps);
 	if (!clean.clean) {
-		failures.push(`来源工作区不干净（rebase 结果未全部提交？）：\n${boundedStatus(clean.status)}`);
+		failures.push(`Source workspace is dirty (rebase result not fully committed?):\n${boundedStatus(clean.status)}`);
 	} else {
-		diagnostics.push("来源工作区干净。");
+		diagnostics.push("Source workspace is clean.");
 	}
 
 	const sequencer = detectSequencer(opts.sourceCheckoutPath, deps);
 	if (sequencer.length) {
-		failures.push(`来源 checkout 存在未结束的 git 操作：${sequencer.join(", ")}`);
+		failures.push(`Source checkout has an unfinished git operation: ${sequencer.join(", ")}`);
 	} else {
-		diagnostics.push("来源 checkout 无未结束 git 操作。");
+		diagnostics.push("Source checkout has no unfinished git operation.");
 	}
 
 	// Target checkout (when the target branch is checked out) must be clean too.
@@ -806,24 +806,24 @@ export function verifyDefaultCompletion(
 	if (targetEntry) {
 		const tgtClean = isCheckoutClean(targetEntry.path, deps);
 		if (!tgtClean.clean) {
-			failures.push(`目标 worktree ${targetEntry.path} 不干净：\n${boundedStatus(tgtClean.status)}`);
+			failures.push(`Target worktree ${targetEntry.path} is dirty:\n${boundedStatus(tgtClean.status)}`);
 		} else {
-			diagnostics.push(`目标 worktree ${targetEntry.path} 干净。`);
+			diagnostics.push(`Target worktree ${targetEntry.path} is clean.`);
 		}
 	} else {
-		diagnostics.push(`目标分支 ${opts.targetBranch} 未被任何 worktree checkout。`);
+		diagnostics.push(`Target branch ${opts.targetBranch} is not checked out by any worktree.`);
 	}
 
 	if (opts.sourceKind === "workflow-worktree") {
 		const exists = depsExists(deps);
 		if (!opts.worktreePath || !exists(opts.worktreePath)) {
-			failures.push(`workflow worktree 不存在或未记录：${opts.worktreePath ?? "(missing)"}`);
+			failures.push(`workflow worktree does not exist or is not recorded: ${opts.worktreePath ?? "(missing)"}`);
 		} else {
 			const entry = map.find((e) => samePath(e.path, opts.worktreePath!, deps));
 			if (!entry) {
-				failures.push(`workflow worktree ${opts.worktreePath} 不在同仓 worktree 列表中`);
+				failures.push(`workflow worktree ${opts.worktreePath} is not in the repo worktree list`);
 			} else {
-				diagnostics.push(`workflow worktree ${opts.worktreePath} 保留，checkout ${entry.branch ?? "(detached)"}。`);
+				diagnostics.push(`workflow worktree ${opts.worktreePath} preserved, checkout ${entry.branch ?? "(detached)"}.`);
 			}
 		}
 	}
@@ -865,26 +865,26 @@ export function diagnoseCustomCompletion(
 
 	const sequencer = detectSequencer(opts.sourceCheckoutPath, deps);
 	if (sequencer.length) {
-		failures.push(`来源 checkout 存在未结束的 git 操作：${sequencer.join(", ")}；请先完成或 abort。`);
+		failures.push(`Source checkout has an unfinished git operation: ${sequencer.join(", ")}; finish or abort it first.`);
 	} else {
-		diagnostics.push("来源 checkout 无未结束 git 操作。");
+		diagnostics.push("Source checkout has no unfinished git operation.");
 	}
 
 	const sourceHead = gitStdout(cwd, ["rev-parse", "--verify", `refs/heads/${opts.sourceBranch}`], deps);
 	if (sourceHead) {
 		diagnostics.push(`source ref ${opts.sourceBranch}: ${sourceHead}`);
 	} else {
-		diagnostics.push(`source ref ${opts.sourceBranch}: (不存在——若用户指令已删除来源分支属预期)`);
+		diagnostics.push(`source ref ${opts.sourceBranch}: (missing — expected when a user instruction deleted the source branch)`);
 	}
 	const targetHead = gitStdout(cwd, ["rev-parse", "--verify", `refs/heads/${opts.targetBranch}`], deps);
 	if (targetHead) {
 		diagnostics.push(`target ref ${opts.targetBranch}: ${targetHead}`);
 	} else {
-		failures.push(`目标分支不存在：${opts.targetBranch}`);
+		failures.push(`Target branch does not exist: ${opts.targetBranch}`);
 	}
 
 	const branch = gitStdout(opts.sourceCheckoutPath, ["rev-parse", "--abbrev-ref", "HEAD"], deps);
-	diagnostics.push(`来源 checkout 当前：${branch ?? "(detached HEAD 或不可解析)"}`);
+	diagnostics.push(`Source checkout currently on: ${branch ?? "(detached HEAD or unresolvable)"}`);
 
 	const map = resolveWorktreeMap(cwd, deps);
 	// Every registered checkout of this repo should be in a sane state; a dirty
@@ -896,9 +896,9 @@ export function diagnoseCustomCompletion(
 		const clean = isCheckoutClean(entry.path, deps);
 		if (isSource || isTarget) {
 			if (!clean.clean) {
-				failures.push(`${isSource ? "来源" : "目标"} checkout ${entry.path} 不干净：\n${boundedStatus(clean.status)}`);
+				failures.push(`${isSource ? "Source" : "Target"} checkout ${entry.path} is dirty:\n${boundedStatus(clean.status)}`);
 			} else {
-				diagnostics.push(`${isSource ? "来源" : "目标"} checkout ${entry.path} 干净。`);
+				diagnostics.push(`${isSource ? "Source" : "Target"} checkout ${entry.path} is clean.`);
 			}
 		}
 	}
@@ -910,10 +910,10 @@ export function diagnoseCustomCompletion(
 		if (!pathExists || !registered) {
 			worktreeGone = true;
 			diagnostics.push(
-				`workflow worktree ${opts.worktreePath} 已不存在或未注册（用户指令删除时属预期，将清理 state 字段）。`,
+				`workflow worktree ${opts.worktreePath} no longer exists or is not registered (expected when a user instruction deleted it; the state fields will be cleared).`,
 			);
 		} else {
-			diagnostics.push(`workflow worktree ${opts.worktreePath} 仍保留。`);
+			diagnostics.push(`workflow worktree ${opts.worktreePath} is still preserved.`);
 		}
 	}
 
@@ -980,7 +980,7 @@ export function cancelActiveMergeGit(
 		} catch (err) {
 			return {
 				ok: false,
-				error: `中止 ${kind} 失败：${gitErrorMessage(err)}。可手动执行 git -C ${opts.sourceCheckoutPath} ${op.join(" ")} 后重试取消。`,
+				error: `Failed to abort ${kind}: ${gitErrorMessage(err)}. You can manually run git -C ${opts.sourceCheckoutPath} ${op.join(" ")} and retry the cancellation.`,
 				aborted,
 				reattached: false,
 				diagnostics,
@@ -988,7 +988,7 @@ export function cancelActiveMergeGit(
 		}
 	}
 	if (aborted.length) {
-		diagnostics.push(`已中止未结束操作：${aborted.join(", ")}。`);
+		diagnostics.push(`Aborted unfinished operation(s): ${aborted.join(", ")}.`);
 	}
 
 	let reattached = false;
@@ -999,7 +999,7 @@ export function cancelActiveMergeGit(
 		if (!localBranchExists(cwd, opts.sourceBranch, deps)) {
 			return {
 				ok: false,
-				error: `来源分支 ${opts.sourceBranch} 已不存在，无法恢复 checkout；请手动处理 git -C ${opts.sourceCheckoutPath} 的 detached HEAD 状态。`,
+				error: `Source branch ${opts.sourceBranch} no longer exists, cannot restore the checkout; manually resolve the detached HEAD state of git -C ${opts.sourceCheckoutPath}.`,
 				aborted,
 				reattached: false,
 				diagnostics,
@@ -1012,7 +1012,7 @@ export function cancelActiveMergeGit(
 			if (!entry) {
 				return {
 					ok: false,
-					error: `来源 worktree ${opts.sourceCheckoutPath} 不在同仓 worktree 列表中，拒绝强制 checkout；请手动处理。`,
+					error: `Source worktree ${opts.sourceCheckoutPath} is not in the repo worktree list; forced checkout refused. Handle it manually.`,
 					aborted,
 					reattached: false,
 					diagnostics,
@@ -1021,7 +1021,7 @@ export function cancelActiveMergeGit(
 			if (main && samePath(main.path, opts.sourceCheckoutPath, deps)) {
 				return {
 					ok: false,
-					error: "来源路径指向主 checkout，与 workflow-worktree 状态不一致，拒绝强制 checkout；请手动处理。",
+					error: "Source path points at the main checkout, inconsistent with the workflow-worktree state; forced checkout refused. Handle it manually.",
 					aborted,
 					reattached: false,
 					diagnostics,
@@ -1032,12 +1032,12 @@ export function cancelActiveMergeGit(
 			execGit(opts.sourceCheckoutPath, ["checkout", "-f", opts.sourceBranch], deps);
 			reattached = true;
 			diagnostics.push(
-				`已执行 checkout -f ${opts.sourceBranch}：在途冲突解决与 index/worktree 改动已按取消语义丢弃。`,
+				`Executed checkout -f ${opts.sourceBranch}: in-flight conflict resolutions and index/worktree changes were discarded per the cancellation semantics.`,
 			);
 		} catch (err) {
 			return {
 				ok: false,
-				error: `恢复来源分支 checkout 失败：${gitErrorMessage(err)}。手动恢复：git -C ${opts.sourceCheckoutPath} checkout -f ${opts.sourceBranch}`,
+				error: `Failed to restore the source branch checkout: ${gitErrorMessage(err)}. Manual recovery: git -C ${opts.sourceCheckoutPath} checkout -f ${opts.sourceBranch}`,
 				aborted,
 				reattached: false,
 				diagnostics,
@@ -1049,31 +1049,31 @@ export function cancelActiveMergeGit(
 	if (finalBranch !== opts.sourceBranch) {
 		return {
 			ok: false,
-			error: `恢复后来源 checkout 为 ${finalBranch ?? "(unknown)"}，应为 ${opts.sourceBranch}；未清除 merge 状态，请手动处理。`,
+			error: `After restore the source checkout is on ${finalBranch ?? "(unknown)"}, expected ${opts.sourceBranch}; merge state was not cleared, handle it manually.`,
 			aborted,
 			reattached,
 			diagnostics,
 		};
 	}
-	diagnostics.push(`来源 checkout 已恢复为 ${finalBranch}。`);
+	diagnostics.push(`Source checkout restored to ${finalBranch}.`);
 
 	const clean = isCheckoutClean(opts.sourceCheckoutPath, deps);
 	if (!clean.clean) {
 		// After a forced checkout, residue is untracked-only in practice; keep the
 		// cancel recoverable and surface the residue instead of stranding the user.
-		diagnostics.push(`来源工作区仍有残留（多为 untracked 文件）：\n${boundedStatus(clean.status)}`);
+		diagnostics.push(`Source workspace still has residue (mostly untracked files):\n${boundedStatus(clean.status)}`);
 	} else {
-		diagnostics.push("来源工作区干净。");
+		diagnostics.push("Source workspace is clean.");
 	}
 
 	// Report the actual ref state — already-moved refs are not rolled back.
 	const sourceHead = gitStdout(cwd, ["rev-parse", "--verify", `refs/heads/${opts.sourceBranch}`], deps);
-	diagnostics.push(`source ref ${opts.sourceBranch}: ${sourceHead ?? "(不存在)"}`);
+	diagnostics.push(`source ref ${opts.sourceBranch}: ${sourceHead ?? "(missing)"}`);
 	const targetHead = gitStdout(cwd, ["rev-parse", "--verify", `refs/heads/${opts.targetBranch}`], deps);
 	diagnostics.push(
 		targetHead && sourceHead && targetHead !== sourceHead
-			? `target ref ${opts.targetBranch}: ${targetHead}（与 source 不同——已完成的 ref 移动不隐式回滚）`
-			: `target ref ${opts.targetBranch}: ${targetHead ?? "(不存在)"}`,
+			? `target ref ${opts.targetBranch}: ${targetHead} (differs from source — already-moved refs are never implicitly rolled back)`
+			: `target ref ${opts.targetBranch}: ${targetHead ?? "(missing)"}`,
 	);
 
 	return { ok: true, aborted, reattached, diagnostics };

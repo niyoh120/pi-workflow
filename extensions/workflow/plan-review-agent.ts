@@ -440,19 +440,19 @@ Independently validate that the plan is correct, complete, and feasible by inspe
 ## Output
 Produce exactly ONE final review in your FINAL assistant message using this structure, then end that same message with the review_submit tool call (report text and tool call share the final message):
 
-## 审查结果
+## Review Results
 
 ### Critical
-- C1: [问题描述] → [建议修订]
+- C1: [issue description] → [suggested revision]
 
 ### Important
-- I1: [问题描述] → [建议修订]
+- I1: [issue description] → [suggested revision]
 
 ### Minor
-- M1: [问题描述] → [建议修订]
+- M1: [issue description] → [suggested revision]
 
 ### Summary
-整体评估：[一段话总结]
+Overall assessment: [one-paragraph summary]
 
 ${PLAN_REVIEW_SUBMIT_INSTRUCTION}
 
@@ -813,8 +813,8 @@ export async function prepareReviewerModelPlan(opts: {
 				.map((e) => `${e.scope}${e.path ? ` (${e.path})` : ""}: ${e.error?.message ?? String(e.error)}`)
 				.join("; ");
 			throw new Error(
-				`${progressLabel} contextWindow 校验被跳过：Pi settings 加载失败（${detail}）。` +
-					`请修复 settings.json 或清除该角色的 contextWindow（继承 Pi 默认窗口）。`,
+				`${progressLabel} contextWindow validation was skipped: failed to load Pi settings (${detail}).` +
+					`Fix settings.json or clear this role's contextWindow (inherit the Pi default window).`,
 			);
 		}
 		const prepared = prepareModelWithContextWindow(
@@ -824,8 +824,8 @@ export async function prepareReviewerModelPlan(opts: {
 		);
 		if (!prepared.ok) {
 			throw new Error(
-				`${progressLabel} contextWindow 无效（${reviewerLabel}，输入 ${modelSpec.contextWindow}）：` +
-					`${prepared.error} 请清除该角色的 contextWindow 或改为区间内的整数。`,
+				`${progressLabel} contextWindow invalid (${reviewerLabel}, input ${modelSpec.contextWindow}):` +
+					`${prepared.error} Clear this role's contextWindow or set an integer within the allowed range.`,
 			);
 		}
 		model = prepared.model;

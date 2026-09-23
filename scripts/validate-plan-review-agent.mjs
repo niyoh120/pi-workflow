@@ -487,7 +487,7 @@ console.log("\n=== Part 6: reviewer wiring & tool contract ===");
 	assert(prtBlock.includes("prepareArguments: preparePlanReviewArguments"), "prepareArguments wired for legacy fields + feedback passthrough");
 	assert(/prepareArguments:\s*preparePlanReviewArguments/.test(toolsTs), "prepareArguments wired for legacy fields");
 	assert(toolsTs.includes("runPlanReviewAgent("), "tool invokes the independent reviewer");
-	assert(promptsTs.includes("独立 reviewer"), "plan prompt describes an independent reviewer re-validating the plan");
+	assert(promptsTs.includes("independent reviewer"), "plan prompt describes an independent reviewer re-validating the plan");
 	assert(!promptsTs.includes("workflow_plan_review(task="), "plan prompt no longer shows legacy sidecall arguments");
 	assert(!fs.existsSync(path.join(root, "extensions/workflow/sidecall.ts")), "sidecall.ts removed");
 }
@@ -1705,7 +1705,7 @@ console.log("\n=== Part 12: protocol single source + verdicts + evidence ===");
 	const toolsTsNow = read("extensions/workflow/tools.ts");
 	assert(toolsTsNow.includes("reviewer produced PASS without successful repository inspection"), "tools.ts downgrades a submitted PASS without successful repo inspection to FAIL");
 	assert(/effectiveVerdict = "FAIL"/.test(toolsTsNow), "downgrade writes an explicit effective FAIL");
-	assert(toolsTsNow.includes("当前 Plan 尚无上一轮 finding；移除 feedback 后重新调用 workflow_plan_review()。"), "first-round feedback is rejected with an explicit recovery hint");
+	assert(toolsTsNow.includes("This plan run has no previous review round; call workflow_plan_review() again without feedback."), "first-round feedback is rejected with an explicit recovery hint");
 	assert(toolsTsNow.includes("normalizePlanReviewFeedback(params.feedback)"), "tool layer normalizes feedback via the shared alias");
 	assert(toolsTsNow.includes("buildPlanReviewProtocolText()"), "tool layer snapshots the actual reviewer protocol text once");
 	assert(/computePlanReviewBasisHash\(\{[\s\S]*?protocolText,/.test(toolsTsNow), "the actual protocol text feeds the review basis hash");
@@ -1758,8 +1758,8 @@ console.log("\n=== Part 13: plan-review tool wiring ===");
 	// strict evidence, round-strategy difference, approval semantics.
 	assert(promptsSrc.includes("review_submit"), "plan prompt mentions the review_submit verdict signal");
 	assert(promptsSrc.includes("feedback"), "plan prompt documents the optional feedback argument");
-	assert(/用户明确确认后 workflow_plan_approve 始终可调用|workflow_plan_approve 始终可调用/.test(promptsSrc), "plan prompt states approval stays user-confirmed");
-	assert(/successful repo inspection: NO|证据不足/.test(promptsSrc), "plan prompt explains the inspection-evidence gap signal");
+	assert(/Approval always stays user-driven via workflow_plan_approve/.test(promptsSrc), "plan prompt states approval stays user-confirmed");
+	assert(/successful repo inspection: NO|a PASS without a successful repo inspection/.test(promptsSrc), "plan prompt explains the inspection-evidence gap signal");
 	assert(/review_submit/.test(readme), "README documents the review_submit verdict transport");
 	assert(!/PLAN_REVIEW_VERDICT|REVIEW_VERDICT: PASS\|FAIL/.test(readme), "README has no old verdict-prefix contract");
 	assert(readme.includes("plan-review-history.json"), "README documents the plan-review round history");

@@ -265,8 +265,8 @@ let QA_SYSTEM_PROMPT_src = "";
 	assert(/PASS ONLY when/i.test(sp) && /at least one applicable runtime test flow actually PASSED/i.test(sp), "PASS requires an actually executed passing runtime test flow");
 	assert(/overall BLOCKED, or overall SKIPPED, or zero test flows actually executed/i.test(sp), "Overall BLOCKED/SKIPPED/zero-executed rounds are FAIL");
 	assert(sp.includes("PASS/FAIL/BLOCKED/SKIPPED"), "Per-flow statuses use PASS/FAIL/BLOCKED/SKIPPED");
-	assert(sp.includes("遗漏实现") || /missing implementations/i.test(sp), "Coverage scope includes missing implementations");
-	assert(sp.includes("共享模块") || /shared modules/i.test(sp), "Coverage scope includes indirect shared-module/permission/config/data-contract impact");
+	assert(/missing implementations/i.test(sp), "Coverage scope includes missing implementations");
+	assert(/shared modules/i.test(sp), "Coverage scope includes indirect shared-module/permission/config/data-contract impact");
 	assert(sp.includes("removed/migrated behavior"), "Coverage scope includes removed/migrated behavior");
 	assert(sp.includes("error paths"), "Coverage scope includes key error paths");
 	assert(sp.includes("minimal-sufficient"), "Test set stays minimal-sufficient with per-flow task relation");
@@ -562,15 +562,15 @@ console.log("\n=== Part 4: workflow_qa tool + flow wiring ===");
 	const qaCmdBlock = commandsTs.slice(commandsTs.indexOf("async function startQaLoop"));
 	const qaHandlerBlock = commandsTs.slice(commandsTs.indexOf('registerCommand("workflow:qa"'), commandsTs.indexOf("async function startQaLoop"));
 	assert(qaHandlerBlock.includes("config.review.enabled"), "QA driver adapts when Review is disabled");
-	assert(qaCmdBlock.includes("Review 阶段缺席") || qaCmdBlock.includes("review.enabled=false"), "QA driver states the missing Review stage explicitly");
+	assert(qaCmdBlock.includes("review.enabled=false"), "QA driver states the missing Review stage explicitly");
 	assert(qaCmdBlock.includes("workflow_review()"), "QA driver runs the unified review loop first");
 	assert(qaCmdBlock.includes("workflow_qa()"), "QA driver invokes workflow_qa after Review PASS");
-	assert(qaCmdBlock.includes("重新 Review 至 PASS") && qaCmdBlock.includes("再次"), "QA defects loop back through Review → QA re-verification");
-	assert(qaCmdBlock.includes("QA status: BLOCKED") && qaCmdBlock.includes("立即结束本次流程"), "QA driver stops immediately on a BLOCKED report");
-	assert(qaCmdBlock.includes("禁止自行安装/升级/自动下载 QA 依赖") && qaCmdBlock.includes("禁止自动重试 QA"), "QA driver forbids self-install and auto-retry");
+	assert(qaCmdBlock.includes("re-Review to PASS") && qaCmdBlock.includes("again"), "QA defects loop back through Review → QA re-verification");
+	assert(qaCmdBlock.includes("QA status: BLOCKED") && qaCmdBlock.includes("end this run immediately"), "QA driver stops immediately on a BLOCKED report");
+	assert(qaCmdBlock.includes("Never install/upgrade/auto-download QA dependencies") && qaCmdBlock.includes("never auto-retry QA"), "QA driver forbids self-install and auto-retry");
 	assert(qaCmdBlock.includes("workflow_qa({ feedback })"), "QA driver names the feedback channel for disputed findings");
-	assert(qaCmdBlock.includes("3 次") || qaCmdBlock.includes("约 3 次"), "QA driver stops after ~3 stalled fix/re-check rounds");
-	assert(qaCmdBlock.includes("由用户显式触发") && qaCmdBlock.includes("workflow:merge"), "commit/merge stay under explicit user control");
+	assert(qaCmdBlock.includes("~3 fix/re-review rounds"), "QA driver stops after ~3 stalled fix/re-check rounds");
+	assert(qaCmdBlock.includes("always triggered explicitly by the user") && qaCmdBlock.includes("workflow:merge"), "commit/merge stay under explicit user control");
 	assert(qaCmdBlock.includes("workRunId: current.workRunId ?? crypto.randomUUID()"), "QA driver reuses the active work run or starts one via the transition helper");
 	assert(qaCmdBlock.includes("validateWorktreeState(ctx.cwd, current)"), "QA driver validates the active worktree before entering");
 
@@ -583,9 +583,9 @@ console.log("\n=== Part 4: workflow_qa tool + flow wiring ===");
 	const workPrompt = promptsTs.slice(promptsTs.indexOf("export const WORK_PROMPT"), promptsTs.indexOf("export const MERGE_PROMPT"));
 	assert(workPrompt.includes("/workflow:review") && workPrompt.includes("/workflow:qa"), "Work prompt documents the Review → QA recommended order");
 	assert(workPrompt.includes("workflow_qa({ feedback })"), "Work prompt documents the QA feedback channel");
-	assert(workPrompt.includes("QA status: BLOCKED") && workPrompt.includes("立即停止"), "Work prompt mandates an immediate stop on BLOCKED");
-	assert(workPrompt.includes("禁止自行安装、升级或自动下载 QA 依赖"), "Work prompt repeats the no-install rule");
-	assert(workPrompt.includes("由用户控制") || workPrompt.includes("用户控制"), "Work prompt keeps commit/merge user-controlled");
+	assert(workPrompt.includes("QA status: BLOCKED") && workPrompt.includes("stop immediately"), "Work prompt mandates an immediate stop on BLOCKED");
+	assert(workPrompt.includes("never install/upgrade/download QA dependencies"), "Work prompt repeats the no-install rule");
+	assert(workPrompt.includes("user-controlled"), "Work prompt keeps commit/merge user-controlled");
 }
 
 // ═══ Part 5: docs & config example ═════════════════════════════════════════

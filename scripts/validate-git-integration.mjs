@@ -158,7 +158,7 @@ console.log("\n=== 0. /workflow:merge argument parsing ===");
 	);
 
 	r = parseMergeCommandArgs("--verbose do it");
-	assert(!r.ok && /未识别的选项/.test(r.error), "parse: unknown option rejected");
+	assert(!r.ok && /Unrecognized option/.test(r.error), "parse: unknown option rejected");
 
 	r = parseMergeCommandArgs("");
 	assert(r.ok && !r.value.targetBranch && !r.value.instructions, "parse: empty input → default strategy");
@@ -244,22 +244,22 @@ console.log("\n=== 1. ordinary feature branch ===");
 			"preflight: baseline counts source-only commits; target not checked out");
 
 		pre = runMergePreflight(repo, { targetBranch: "feature" });
-		assert(!pre.ok && /来源分支与目标分支相同/.test(pre.error), "preflight: source == target rejected");
+		assert(!pre.ok && /Source and target branches are the same/.test(pre.error), "preflight: source == target rejected");
 
 		pre = runMergePreflight(repo, { targetBranch: "no-such-branch" });
-		assert(!pre.ok && /目标分支不存在/.test(pre.error), "preflight: missing local target rejected");
+		assert(!pre.ok && /Target branch does not exist/.test(pre.error), "preflight: missing local target rejected");
 
 		// Dirty source rejection (no auto-stash).
 		fs.writeFileSync(path.join(repo, "dirty.txt"), "dirty\n", "utf8");
 		pre = runMergePreflight(repo, {});
-		assert(!pre.ok && /未提交修改/.test(pre.error), "preflight: dirty source rejected without stash");
+		assert(!pre.ok && /uncommitted changes/.test(pre.error), "preflight: dirty source rejected without stash");
 		fs.rmSync(path.join(repo, "dirty.txt"));
 
 		// sourceLevel assertion: defaultStrategy only accepts ff-only finalize.
 		const toolsSrc = fs.readFileSync(path.join(CWD, "extensions/workflow/tools.ts"), "utf8");
 		assert(
 			/mc\.defaultStrategy && params\.finalize !== "ff-only"/.test(toolsSrc) &&
-				/只接受 finalize="ff-only"/.test(toolsSrc),
+				/only accepts finalize="ff-only"/.test(toolsSrc),
 			"tools.ts: defaultStrategy mis-passing already-integrated is rejected explicitly",
 		);
 
@@ -333,7 +333,7 @@ console.log("\n=== 2. worktree conflict rebase ===");
 			worktreeBranch: wtBranch,
 			worktreeBaseBranch: "master",
 		});
-		assert(!dirtyPre.ok && /未提交修改/.test(dirtyPre.error), "preflight: dirty worktree source rejected");
+		assert(!dirtyPre.ok && /uncommitted changes/.test(dirtyPre.error), "preflight: dirty worktree source rejected");
 		fs.rmSync(path.join(wtPath, "extra.txt"));
 
 		// Detached HEAD without a merge context stays fail-closed even with a
@@ -574,7 +574,7 @@ console.log("\n=== 3. failure & recovery ===");
 				sourceCheckoutPath: wtPath,
 			});
 			assert(
-				!guard.ok && /来源分支/.test(guard.error),
+				!guard.ok && /Source branch/.test(guard.error),
 				"3c: reattach guard refuses when the source branch ref is gone",
 			);
 		} finally {

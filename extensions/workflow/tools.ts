@@ -745,7 +745,7 @@ export function registerPlanApproveTool(
 						text:
 							`Plan approved. Work Mode runtime activated. ` +
 							`Work run: ${result.state.workRunId!.slice(-8)}.\n\n` +
-							`Approval journal已持久化。Plan run结束后将自动启动新 Work run。` +
+							`Approval journal persisted. A new Work run starts automatically after the Plan run ends.` +
 							"\n\nDo not call any more tools in this turn.",
 					},
 				],
@@ -1058,7 +1058,7 @@ export function registerPlanReviewTool(
 					content: [
 						{
 							type: "text",
-							text: "当前 Plan 尚无上一轮 finding；移除 feedback 后重新调用 workflow_plan_review()。",
+							text: "This plan run has no previous review round; call workflow_plan_review() again without feedback.",
 						},
 					],
 					details: { feedbackRejected: true, reason: "no previous round" },
@@ -2120,7 +2120,7 @@ export function registerMergeCompleteTool(
 					content: [
 						{
 							type: "text",
-							text: "merge 记录的来源 worktree 已不在状态中（worktreePath 缺失）。请用 /workflow:reset 硬恢复后再试。",
+							text: "The source worktree recorded by the merge is no longer in state (worktreePath missing). Hard-recover with /workflow:reset and try again.",
 						},
 					],
 					details: { failClosed: true },
@@ -2160,8 +2160,8 @@ export function registerMergeCompleteTool(
 							{
 								type: "text",
 								text:
-									`Merge 已取消：来源 worktree 已不存在（可能被用户指令删除），无需 abort。` +
-										`已清理 state 中的 worktree 字段并恢复模式：${mc.returnMode}。`,
+									`Merge cancelled: the source worktree no longer exists (possibly deleted by user instruction), so there is nothing to abort. ` +
+										`Cleared the worktree fields from state and restored mode: ${mc.returnMode}.`,
 							},
 						],
 						details: { status: "cancelled", worktreeGone: true, returnMode: mc.returnMode },
@@ -2177,7 +2177,7 @@ export function registerMergeCompleteTool(
 							content: [
 								{
 									type: "text",
-									text: `状态不一致：worktreeBranch(${state.worktreeBranch ?? "none"}) 与 merge 记录的来源分支(${mc.sourceBranch})不一致，拒绝取消。请用 /workflow:reset 硬恢复。`,
+									text: `State inconsistency: worktreeBranch(${state.worktreeBranch ?? "none"}) does not match the merge's recorded source branch(${mc.sourceBranch}); cancellation refused. Hard-recover with /workflow:reset.`,
 								},
 							],
 							details: { failClosed: true },
@@ -2197,7 +2197,7 @@ export function registerMergeCompleteTool(
 								{
 									type: "text",
 									text:
-										`取消 merge 失败（已保留 Merge Mode 与 mergeContext）：${cancel.error ?? "(unknown)"}\n${cancel.diagnostics.join("\n")}`,
+										`Cancel failed (Merge Mode and mergeContext preserved): ${cancel.error ?? "(unknown)"}\n${cancel.diagnostics.join("\n")}`,
 								},
 							],
 							details: { cancelled: false, failClosed: true, aborted: cancel.aborted },
@@ -2227,9 +2227,9 @@ export function registerMergeCompleteTool(
 						{
 							type: "text",
 							text:
-								`Merge 已取消（${mc.sourceBranch} → ${mc.targetBranch}）。` +
-								`已中止：${[...cancel.aborted, ...(cancel.reattached ? ["forced-reattach"] : [])].join(", ") || "无需恢复"}。` +
-								`已恢复模式：${mc.returnMode}。已完成的 ref 移动不会隐式回滚，实际状态见诊断。\n---\n${cancel.diagnostics.join("\n")}`,
+								`Merge cancelled (${mc.sourceBranch} → ${mc.targetBranch}).` +
+								`Aborted: ${[...cancel.aborted, ...(cancel.reattached ? ["forced-reattach"] : [])].join(", ") || "nothing to abort"}.` +
+								`Restored mode: ${mc.returnMode}. Already-moved refs are never implicitly rolled back; see diagnostics for actual state.\n---\n${cancel.diagnostics.join("\n")}`,
 						},
 					],
 					details: {
@@ -2250,7 +2250,7 @@ export function registerMergeCompleteTool(
 					content: [
 						{
 							type: "text",
-							text: 'status="completed" 需要 finalize：默认策略用 "ff-only"；自定义策略已完成目标集成时用 "already-integrated"（仍可选择 "ff-only" 复用确定性 finalizer）。',
+							text: 'status="completed" requires finalize: use "ff-only" for the default strategy; use "already-integrated" when a custom strategy has already integrated the target (you may still choose "ff-only" to reuse the deterministic finalizer).',
 						},
 					],
 					details: { failClosed: true },
@@ -2265,8 +2265,8 @@ export function registerMergeCompleteTool(
 						{
 							type: "text",
 							text:
-									'本次 merge 为默认策略（无用户自定义指令），只接受 finalize="ff-only"。' +
-									"请先在来源 checkout 完成 rebase 与验证，再重新调用。",
+									'This merge uses the default strategy (no user instructions) and only accepts finalize="ff-only".' +
+									"Complete the rebase and verification in the source checkout first, then call again.",
 							},
 					],
 					details: { failClosed: true, defaultStrategy: true },
@@ -2289,7 +2289,7 @@ export function registerMergeCompleteTool(
 						content: [
 							{
 								type: "text",
-								text: `默认 fast-forward 未执行成功（fail closed，未降级、未清状态）：${ff.error}\n${ff.diagnostics.join("\n")}`,
+								text: `Default fast-forward did not succeed (fail-closed: no downgrade, state preserved): ${ff.error}\n${ff.diagnostics.join("\n")}`,
 							},
 						],
 						details: { failClosed: true, appliedVia: ff.appliedVia },
@@ -2313,7 +2313,7 @@ export function registerMergeCompleteTool(
 							{
 								type: "text",
 								text:
-									`目标分支已前移，但完成校验未通过（Merge Mode 与 mergeContext 已保留）：\n- ${verify.failures.join("\n- ")}`,
+									`Target branch moved forward, but completion verification failed (Merge Mode and mergeContext preserved):\n- ${verify.failures.join("\n- ")}`,
 							},
 						],
 						details: { failClosed: true, failures: verify.failures },
@@ -2336,7 +2336,7 @@ export function registerMergeCompleteTool(
 								{
 									type: "text",
 									text:
-										`自定义策略完成检查未通过（Merge Mode 与 mergeContext 已保留）：\n- ${health.failures.join("\n- ")}`,
+										`Custom-strategy completion check failed (Merge Mode and mergeContext preserved):\n- ${health.failures.join("\n- ")}`,
 								},
 							],
 							details: { failClosed: true, failures: health.failures },
@@ -2351,7 +2351,7 @@ export function registerMergeCompleteTool(
 					state.worktreePath = undefined;
 					state.worktreeBranch = undefined;
 					state.worktreeBaseBranch = undefined;
-					diagnostics.push("已清理 state 中的 workflow worktree 字段（用户指令删除了 worktree）。");
+					diagnostics.push("Cleared the workflow worktree fields from state (user instruction deleted the worktree).");
 				}
 			}
 
@@ -2374,14 +2374,14 @@ export function registerMergeCompleteTool(
 			}
 
 			const summary = alreadyIntegrated
-				? `目标分支已等于来源 head（无需前移）。`
-				: `目标分支 \`${mc.targetBranch}\` 已${params.finalize === "ff-only" ? " fast-forward 到来源 head" : "按自定义策略完成集成"}（via ${appliedVia}）。`;
+				? `Target branch already equals the source head (no move needed).`
+				: `Target branch \`${mc.targetBranch}\` ${params.finalize === "ff-only" ? "has been fast-forwarded to the source head" : "completed integration via the custom strategy"} (via ${appliedVia}).`;
 			return {
 				content: [
 					{
 						type: "text",
 							text:
-								`✅ Merge 完成：${summary}\n来源分支与 checkout 已保留；已恢复模式：${mc.returnMode}。\n---\n${diagnostics.join("\n")}`,
+								`✅ Merge completed: ${summary}\nSource branch and checkout preserved; restored mode: ${mc.returnMode}.\n---\n${diagnostics.join("\n")}`,
 						},
 				],
 				details: {

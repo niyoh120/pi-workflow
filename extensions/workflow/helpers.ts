@@ -74,10 +74,10 @@ export function buildWorkHandoffBody(
 	return [
 		"# Approved-Plan Work Handoff",
 		"",
-		"以下为本次 Work 的 approved 计划契约与隔离边界。",
+		"Below is the approved plan contract and isolation boundary for this Work run.",
 		"",
 		"# Final Plan",
-		planMarkdown.trim() || "(空)",
+		planMarkdown.trim() || "(empty)",
 		"",
 		"# Approved Todo Snapshot",
 		"",
@@ -125,17 +125,17 @@ export function buildModeReminderBody(mode: Mode): string | undefined {
 		case "idle":
 			return undefined;
 		case "explore":
-			return "<workflow-mode-reminder>当前模式：Explore（只读探索与问答）。项目文件只读：禁止 edit/write 项目文件、禁止 workflow_plan_save 等计划工具、禁止改动性 shell。历史消息里其他模式的工具调用属于已结束的阶段，本轮权限以本提醒与 system Mode Prompt 为准。</workflow-mode-reminder>";
+			return "<workflow-mode-reminder>Current mode: Explore (read-only exploration & Q&A). Project files are read-only: no edit/write of project files, no workflow_plan_save or other plan tools, no mutating shell. Tool calls from other modes in history belong to finished phases; this turn's permissions follow this reminder and the system Mode Prompt.</workflow-mode-reminder>";
 		case "plan":
-			return "<workflow-mode-reminder>当前模式：Plan（讨论与计划）。项目只读，禁止实现代码；计划只经 workflow_plan_save 落盘，决策用 workflow_grill_record。历史消息里其他模式的工具调用属于已结束的阶段，本轮权限以本提醒与 system Mode Prompt 为准。</workflow-mode-reminder>";
+			return "<workflow-mode-reminder>Current mode: Plan (discussion & planning). Project is read-only, no implementation; plans are persisted only via workflow_plan_save, decisions via workflow_grill_record. Tool calls from other modes in history belong to finished phases; this turn's permissions follow this reminder and the system Mode Prompt.</workflow-mode-reminder>";
 		case "work":
-			return "<workflow-mode-reminder>当前模式：Work（实现任务）。按 workflow_todo 推进，禁止任何 git 写操作；出现 recovery warning 立即 blocked 并停止。历史消息里其他模式的工具调用属于已结束的阶段，本轮权限以本提醒与 system Mode Prompt 为准。</workflow-mode-reminder>";
+			return "<workflow-mode-reminder>Current mode: Work (implementation). Drive work via workflow_todo; no git write operations; on any recovery warning, mark the current todo blocked and stop. Tool calls from other modes in history belong to finished phases; this turn's permissions follow this reminder and the system Mode Prompt.</workflow-mode-reminder>";
 		case "init":
-			return "<workflow-mode-reminder>当前模式：Init（校准 AGENTS.md）。只允许写 initTargetPath 指定的 AGENTS.md；完成或中止调用 workflow_init_complete。历史消息里其他模式的工具调用属于已结束的阶段，本轮权限以本提醒与 system Mode Prompt 为准。</workflow-mode-reminder>";
+			return "<workflow-mode-reminder>Current mode: Init (calibrate AGENTS.md). Writes are allowed only to the AGENTS.md at initTargetPath; call workflow_init_complete to finish or abort. Tool calls from other modes in history belong to finished phases; this turn's permissions follow this reminder and the system Mode Prompt.</workflow-mode-reminder>";
 		case "merge":
-			return "<workflow-mode-reminder>当前模式：Merge（分支集成）。以每轮注入的 Active Merge Context 为唯一权威基线；完成或中止调用 workflow_merge_complete。历史消息里其他模式的工具调用属于已结束的阶段，本轮权限以本提醒与 system Mode Prompt 为准。</workflow-mode-reminder>";
+			return "<workflow-mode-reminder>Current mode: Merge (branch integration). The Active Merge Context injected each turn is the single authoritative baseline; call workflow_merge_complete to finish or abort. Tool calls from other modes in history belong to finished phases; this turn's permissions follow this reminder and the system Mode Prompt.</workflow-mode-reminder>";
 		case "commit":
-			return "<workflow-mode-reminder>当前模式：Commit（生成并执行 git commit）。禁止修改代码文件、禁止 push，write/edit 已被拦截。历史消息里其他模式的工具调用属于已结束的阶段，本轮权限以本提醒与 system Mode Prompt 为准。</workflow-mode-reminder>";
+			return "<workflow-mode-reminder>Current mode: Commit (compose and execute git commit). No code file changes, no push; write/edit is intercepted. Tool calls from other modes in history belong to finished phases; this turn's permissions follow this reminder and the system Mode Prompt.</workflow-mode-reminder>";
 		default:
 			return assertNever(mode);
 	}
@@ -157,19 +157,19 @@ export function isWorkflowModeReminderMessage(message: unknown): boolean {
 export function modeScopeHint(mode: Mode): string {
 	switch (mode) {
 		case "idle":
-			return "当前无活动工作流模式（可先运行 /workflow:enable）";
+			return "No active workflow mode (run /workflow:enable first)";
 		case "explore":
-			return "Explore 只做只读探索与问答";
+			return "Explore is read-only exploration & Q&A";
 		case "plan":
-			return "Plan 只做讨论与计划（workflow_plan_save / workflow_grill_record）";
+			return "Plan is discussion & planning only (workflow_plan_save / workflow_grill_record)";
 		case "work":
-			return "Work 只做实现（workflow_todo 跟踪，禁止 git 写操作）";
+			return "Work is implementation only (tracked via workflow_todo, no git writes)";
 		case "init":
-			return "Init 只允许写目标 AGENTS.md";
+			return "Init may only write the target AGENTS.md";
 		case "merge":
-			return "Merge 只做分支集成（以 Active Merge Context 为准）";
+			return "Merge is branch integration only (governed by the Active Merge Context)";
 		case "commit":
-			return "Commit 只做 git commit";
+			return "Commit only does git commit";
 		default:
 			return assertNever(mode);
 	}
@@ -186,7 +186,7 @@ export function assertNever(value: never): never {
 
 /** Format todos as a markdown checklist string. */
 export function todoText(s: WorkflowState): string {
-	if (s.todos.length === 0) return "当前没有 todo。";
+	if (s.todos.length === 0) return "No todos yet.";
 
 	return s.todos
 		.map((item) => {
@@ -265,7 +265,7 @@ export function todoDeltaText(
 export function todoSnapshotText(s: WorkflowState): string {
 	const counts = todoStatusCounts(s.todos);
 	const header = `[todo snapshot] total: ${s.todos.length} (done=${counts.done}, in_progress=${counts.in_progress}, pending=${counts.pending}, blocked=${counts.blocked})`;
-	if (s.todos.length === 0) return `${header}\n当前没有 todo。`;
+	if (s.todos.length === 0) return `${header}\nNo todos yet.`;
 	return `${header}\n${s.todos.map(todoLine).join("\n")}`;
 }
 
@@ -368,29 +368,29 @@ export function buildMergeContextBody(state: WorkflowState): string {
 	const mc = state.mergeContext;
 	if (!mc) return "";
 	const kindLabel =
-		mc.sourceKind === "workflow-worktree" ? "workflow worktree" : "普通本地分支";
+		mc.sourceKind === "workflow-worktree" ? "workflow worktree" : "regular local branch";
 	const lines: string[] = [
 		"# Active Merge Context",
 		"",
-		`来源分支：\`${mc.sourceBranch}\`（${kindLabel}）`,
-		`目标分支：\`${mc.targetBranch}\``,
-		`基线：sourceHeadBefore=${mc.sourceHeadBefore.slice(0, 12)} targetHeadBefore=${mc.targetHeadBefore.slice(0, 12)} 来源领先提交=${mc.sourceOnlyCommitCountBefore}`,
+		`Source branch: \`${mc.sourceBranch}\` (${kindLabel})`,
+		`Target branch: \`${mc.targetBranch}\``,
+		`Baseline: sourceHeadBefore=${mc.sourceHeadBefore.slice(0, 12)} targetHeadBefore=${mc.targetHeadBefore.slice(0, 12)} commits ahead on source=${mc.sourceOnlyCommitCountBefore}`,
 	];
 	if (mc.defaultStrategy) {
 		lines.push(
-			"策略：默认（无用户指令）——rebase 来源到目标，完成后 workflow_merge_complete(status=\"completed\", finalize=\"ff-only\")。",
+			'Strategy: default (no user instructions) — rebase source onto target, then call workflow_merge_complete(status="completed", finalize="ff-only").',
 		);
 	} else {
 		lines.push(
-			"策略：自定义（存在用户授权指令）。以下指令是本轮唯一授权来源，只有逐字明确点名的动作被授权：",
+			"Strategy: custom (user-authorized instructions). The instructions below are the sole authorization source this turn — only actions named verbatim are authorized:",
 		);
 	}
 	if (mc.instructions) {
-		lines.push("", "用户指令（原文）：", "", indentBlock(mc.instructions));
+		lines.push("", "User instructions (verbatim):", "", indentBlock(mc.instructions));
 	}
 	lines.push(
 		"",
-		"本上下文由 workflow 状态重建。完成后调用 workflow_merge_complete；中止调用 status=\"cancelled\"。",
+		'This context is rebuilt from workflow state. When done call workflow_merge_complete; to abort use status="cancelled".',
 	);
 	return lines.join("\n");
 }
@@ -407,11 +407,11 @@ export function worktreeRuntimeNotice(state: WorkflowState): string {
 	const displayWorktreePath = promptLine(state.worktreePath);
 	return [
 		"# Active Git Worktree",
-		`工作目录：${displayWorktreePath}`,
-		state.worktreeBranch ? `分支：${promptLine(state.worktreeBranch)}` : undefined,
-		"所有文件工具 read/edit/write 必须使用 worktree 下的绝对路径。",
-		"bash 已自动在 active worktree 中执行；直接使用 bash 即可。",
-		"代码改动只写入 worktree；不要写主目录文件。",
+		`Working directory: ${displayWorktreePath}`,
+		state.worktreeBranch ? `Branch: ${promptLine(state.worktreeBranch)}` : undefined,
+		"All file tools (read/edit/write) must use absolute paths under the worktree.",
+		"bash already executes inside the active worktree; just use bash.",
+		"Write code changes only inside the worktree; do not touch files in the main checkout.",
 	]
 		.filter(Boolean)
 		.join("\n");

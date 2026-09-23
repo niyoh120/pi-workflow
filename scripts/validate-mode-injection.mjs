@@ -175,7 +175,7 @@ assert(
 
 // ── prompts.ts: system Mode Prompt authority ───────────────────────────────
 assert(
-	prompts.includes("当前 system prompt 中的 Mode Prompt 定义当前模式"),
+	prompts.includes("The Mode Prompt in the current system prompt is the authority for the current mode"),
 	"COMMON_PROMPT declares system Mode Prompt as authority",
 );
 assert(
@@ -183,15 +183,15 @@ assert(
 	"COMMON_PROMPT no longer references workflow-mode custom context",
 );
 assert(
-	/WORK_PROMPT[\s\S]*?handoff 已包含 Final Plan/.test(prompts),
+	/WORK_PROMPT[\s\S]*?handoff already contains the Final Plan/.test(prompts),
 	"WORK_PROMPT states handoff already contains Final Plan",
 );
 assert(
-	/WORK_PROMPT[\s\S]*?recovery warning[\s\S]*?标记为 blocked/.test(prompts),
+	/WORK_PROMPT[\s\S]*?recovery warning[\s\S]*?mark the current todo blocked/.test(prompts),
 	"WORK_PROMPT relies on recovery warning → block todo → /workflow:plan (no plan_read call path)",
 );
 assert(
-	/WORK_PROMPT[\s\S]*?workflow_todo\(action="list"\) 读取状态/.test(prompts),
+	/WORK_PROMPT[\s\S]*?workflow_todo\(action="list"\) first/.test(prompts),
 	"WORK_PROMPT requires todo read when context lacks recent result",
 );
 
@@ -576,7 +576,7 @@ console.log("\n=== T3: worktree notice dedup + recovery warning ===");
 	// scoped to the literal so the loose cross-section match can't false-pass.
 	const warnMatch = commands.match(/const recoveryWarning =\s*([\s\S]*?);\s*\n/);
 	assert(
-		!!warnMatch && /标记为 blocked/.test(warnMatch[1]) && /\/workflow:plan/.test(warnMatch[1]),
+		!!warnMatch && /mark the current workflow_todo as blocked/.test(warnMatch[1]) && /\/workflow:plan/.test(warnMatch[1]),
 		"recovery warning tells the model to block the todo and run /workflow:plan",
 	);
 
@@ -787,7 +787,7 @@ console.log("\n=== T5: merge mode prompt/context/guards ===");
 		"prompts.ts: dispatch maps merge → MERGE_PROMPT",
 	);
 	assert(
-		/finally|workflow_merge_complete\(status=\"cancelled\"\)|默认流程禁止/.test(prompts) &&
+		/finally|workflow_merge_complete\(status=\"cancelled\"\)|The default flow forbids/.test(prompts) &&
 			/MERGE_PROMPT[\s\S]*?workflow_merge_complete/.test(prompts),
 		"prompts.ts: MERGE_PROMPT routes completion/cancel through workflow_merge_complete",
 	);
@@ -1360,11 +1360,11 @@ console.log("\n=== R3: guard rejections ===");
 	let r = await guard({ toolName: "workflow_plan_save", input: {} }, ctx);
 	assert(r && r.block === true, "explore blocks workflow_plan_save");
 	assert(
-		r.reason.includes("当前模式(explore)") && r.reason.includes("workflow_plan_save"),
+		r.reason.includes("Current mode (explore)") && r.reason.includes("workflow_plan_save"),
 		"rejection names the effective mode and tool",
 	);
 	assert(
-		r.reason.includes("Explore 只做只读探索与问答"),
+		r.reason.includes("Explore is read-only exploration"),
 		"rejection carries the scope hint",
 	);
 	assert(
@@ -1376,8 +1376,8 @@ console.log("\n=== R3: guard rejections ===");
 	r = await guard({ toolName: "workflow_review", input: {} }, ctx);
 	assert(r && r.block === true, "plan blocks workflow_review (not in the plan tool surface)");
 	assert(
-		r.reason.includes("当前模式(plan)不可使用 workflow_review") &&
-			r.reason.includes("历史轮次的调用记录不代表当前可用"),
+		r.reason.includes("Current mode (plan) does not allow workflow_review") &&
+			r.reason.includes("Call records from earlier turns do not carry over"),
 		"mode-surface rejection explains stale history",
 	);
 
@@ -1390,7 +1390,7 @@ console.log("\n=== R3: guard rejections ===");
 		r &&
 			r.block === true &&
 			r.reason.includes("explore Mode") &&
-			r.reason.includes("Explore 只做只读探索与问答"),
+			r.reason.includes("Explore is read-only exploration"),
 		"readonly write rejection names mode + scope",
 	);
 

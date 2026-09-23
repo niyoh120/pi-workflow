@@ -1031,18 +1031,18 @@ assert(!reviewToolBlock.includes("cachedOcr"), "tools.ts: workflow_review no lon
 	);
 	const workPromptBlock = promptsTs.slice(workPromptStart, workPromptEnd);
 	assert(
-		workPromptBlock.includes("git 仓库写操作"),
+		workPromptBlock.includes("git repository write operations"),
 		"prompts.ts: work prompt forbids git repository writes",
 	);
 	assert(
 		/\/workflow:review/.test(workPromptBlock) &&
-			/始终直接可用/.test(workPromptBlock),
+			/always directly available/.test(workPromptBlock),
 		"prompts.ts: work prompt points to /workflow:review and states /workflow:commit is always available",
 	);
 	// The review → fix → re-review loop detail lives in the /workflow:review kickoff prompt,
 	// not in WORK_PROMPT (no duplication). Assert it on the command block instead.
 	assert(
-		/对确认存在的问题进行修复/.test(reviewCmdBlock) &&
+		/Fix confirmed issues/.test(reviewCmdBlock) &&
 			/review → fix → re-review/.test(reviewCmdBlock),
 		"/workflow:review kickoff prompt describes review → fix → re-review with workflow_review()",
 	);
@@ -1052,7 +1052,7 @@ assert(!reviewToolBlock.includes("cachedOcr"), "tools.ts: workflow_review no lon
 		"/workflow:review kickoff instructs workflow_review({ feedback }) for disputed findings",
 	);
 	assert(
-		/逐条|对应/.test(reviewCmdBlock) && /file:line|命令输出|命令证据/.test(reviewCmdBlock),
+		/per-item technical rationale/.test(reviewCmdBlock) && /file:line|command output/.test(reviewCmdBlock),
 		"/workflow:review kickoff requires feedback to map to disputed findings with verifiable evidence",
 	);
 	// WORK_PROMPT teaches the optional feedback channel.
@@ -1644,7 +1644,7 @@ console.log("\n=== Check 14: Explore mode ===");
 	// commands.ts: workflow tools are blocked outside plan/work.
 	assert(
 		commandsTs14.includes("isWorkflowToolMode") &&
-			commandsTs14.includes("当前模式(${effectiveMode})禁止使用"),
+			commandsTs14.includes("Current mode (${effectiveMode}) forbids"),
 		"commands.ts: workflow tools blocked outside workflow tool modes",
 	);
 	assert(
@@ -1840,7 +1840,7 @@ function validateWorktreeIntegrationStatic() {
 	);
 	assert(
 		helpers.includes("worktreeRuntimeNotice") &&
-			helpers.includes("bash 已自动在 active worktree 中执行") &&
+			helpers.includes("bash already executes inside the active worktree") &&
 			helpers.includes("promptLine"),
 		"worktreeRuntimeNotice describes file paths and bash cwd override",
 	);
@@ -2114,7 +2114,7 @@ console.log("\n=== Check 17: todo delta/snapshot + grilling batch ===");
 	// Plan prompt: grilling protocol uses batch decisions.
 	assert(/workflow_grill_record/.test(promptsTs), "plan prompt instructs persisting grilling decisions via workflow_grill_record");
 	// Work prompt: snapshot read uses action="list".
-	assert(/workflow_todo\(action="list"\) 读取状态/.test(promptsTs), "work prompt reads todo snapshot via action=list");
+	assert(/workflow_todo\(action="list"\) first/.test(promptsTs), "work prompt reads todo snapshot via action=list");
 }
 
 // ═══ Check 16: Paseo update_plan compatibility contract ═══

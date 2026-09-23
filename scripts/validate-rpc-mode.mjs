@@ -652,11 +652,11 @@ console.log("\n=== Test 7: RPC contextWindow session-scope editing ===");
 			(e) => e.method === "notify" && typeof e.message === "string",
 		);
 		assert(
-			notifies.some((e) => e.message.includes("请输入十进制整数")),
+			notifies.some((e) => e.message.includes("Enter a plain decimal integer")),
 			"non-integer input surfaces the strict parse error",
 		);
 		assert(
-			notifies.some((e) => e.message.includes("严格小于") && e.message.includes("未保存")),
+			notifies.some((e) => e.message.includes("strictly below the Pi default window") && e.message.includes("未保存")),
 			"a value at/above the Pi baseline is rejected with the bound error and NOT saved",
 		);
 

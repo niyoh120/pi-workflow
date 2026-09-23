@@ -289,22 +289,22 @@ Produce exactly ONE final QA report in your FINAL assistant message using this s
 ## QA status: PASS | FAIL
 (when blocked, write "${QA_BLOCKED_MARKER}" on its own line at the very top of the report instead)
 
-## 覆盖矩阵 (Coverage Matrix)
-| 需求/计划条目 | 受影响功能/依赖 | 测试流 | 预期结果 | 实际证据 | 状态 |
+## Coverage Matrix
+| Requirement / plan item | Affected function / dependency | Test flow | Expected | Actual evidence | Status |
 | ... | ... | ... | ... | ... | PASS/FAIL/BLOCKED/SKIPPED |
 
-## 测试流明细 (per flow)
-- T1: [操作步骤] → [预期] → [实际] → [证据路径/摘录] → [结论与状态]
+## Per-flow Details
+- T1: [steps] → [expected] → [actual] → [evidence path / excerpt] → [conclusion and status]
 
 ## Findings
-- C1: [产品缺陷 + 影响] → [证据] → [建议修复方向]
-- I1 / M1: 同上按严重度
+- C1: [product defect + impact] → [evidence] → [suggested fix direction]
+- I1 / M1: same pattern, by severity
 
-## 资源清理报告
-[本轮启动的资源与关闭方式；未能清理项]
+## Resource Cleanup Report
+[resources started this round and how each was shut down; anything left uncleaned]
 
 ## Summary
-[一段话总结：验证了什么、如何验证、总体结论与阻塞项]
+[one paragraph: what was verified, how, the overall conclusion, and blockers]
 
 (review_submit: verdict PASS or FAIL — call it exactly once, as the final action of this same message)
 
