@@ -858,9 +858,9 @@ export async function prepareReviewerModelPlan(opts: {
 
 /**
  * Create a child ModelRuntime reading the same auth.json / models.json as the
- * parent, then best-effort copy runtime-only provider registrations and API
- * keys that live in memory (set via pi.registerProvider / setRuntimeApiKey)
- * and would otherwise be absent from the file-based runtime.
+ * parent, then copy runtime-only provider registrations and API keys that the
+ * child cannot resolve from its own file-based sources (keys that live only in
+ * the parent's memory, set via pi.registerProvider / setRuntimeApiKey).
  */
 async function createChildModelRuntime(
 	ctx: ExtensionContext,
@@ -910,10 +910,26 @@ async function createChildModelRuntime(
 			}
 			const key = await parentRegistry.getApiKeyForProvider(id);
 			if (key) {
+				// A file-based child runtime shares the parent's auth.json, provider
+				// configs, and process env. When it already resolves the SAME key from
+				// its own sources, a runtime override is pure redundancy — and actively
+				// harmful for providers whose refreshModels derives state from
+				// credential.env (e.g. pi-magpie's gateway root): the override carries
+				// no env, so synchronizeCredentialState's refresh({ allowNetwork:
+				// false }) restores against a fallback root and install([]) empties
+				// the child's model directory. Copy only genuinely in-memory keys.
+				let childKey: string | undefined;
 				try {
-					await childRuntime.setRuntimeApiKey(id, key);
+					childKey = (await childRuntime.getAuth(id))?.auth.apiKey;
 				} catch {
-					// best-effort; provider may not accept runtime keys.
+					childKey = undefined;
+				}
+				if (childKey !== key) {
+					try {
+						await childRuntime.setRuntimeApiKey(id, key);
+					} catch {
+						// best-effort; provider may not accept runtime keys.
+					}
 				}
 			}
 		} catch {

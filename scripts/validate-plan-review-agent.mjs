@@ -463,6 +463,8 @@ console.log("\n=== Part 6: reviewer wiring & tool contract ===");
 	assert(agentTs.includes("getRegisteredNativeProvider"), "createChildModelRuntime copies Provider-object registrations (native store)");
 	assert(agentTs.includes("registerNativeProvider"), "createChildModelRuntime re-registers native Providers via registerNativeProvider");
 	assert(agentTs.includes("getRegisteredProviderConfig"), "createChildModelRuntime also handles config-style registrations");
+	assert(agentTs.includes("childRuntime.getAuth(id)"), "createChildModelRuntime checks the child's own resolved auth before copying keys");
+	assert(/childKey !== key/.test(agentTs), "runtime key copy is skipped when the child resolves the same key (preserves env-bearing credentials, pi-magpie gateway root)");
 	assert(agentTs.includes("requestedTools") && agentTs.includes("unavailableTools"), "result carries tool diagnostics");
 	assert(agentTs.includes("appendSystemPrompt: [systemPrompt]"), "shared runner injects the caller-provided system prompt into child system prompt");
 	assert(agentTs.includes("REVIEWER_SYSTEM_PROMPT"), "plan-review system prompt constant still defined");
