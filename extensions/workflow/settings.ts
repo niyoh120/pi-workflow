@@ -50,6 +50,9 @@ import {
 	writeGlobalConfigRaw,
 	deepMerge,
 	normalizeConfig,
+	resolveQaTimeoutMs,
+	resolveReviewerTimeoutMs,
+	MAX_TIMEOUT_MS,
 } from "./config.js";
 import { DEFAULT_CONFIG } from "./defaults.js";
 import { getSessionKey, loadState, saveState } from "./state.js";
@@ -108,7 +111,13 @@ const SCOPE_LABELS: Record<Scope, string> = {
 
 // ── Setting descriptors ─────────────────────────────────────────────────────
 
-type SettingKind = "boolean" | "thinking" | "string" | "model" | "contextWindow";
+type SettingKind =
+	| "boolean"
+	| "thinking"
+	| "string"
+	| "model"
+	| "contextWindow"
+	| "timeoutSeconds";
 
 interface SettingDescriptor {
 	id: string;
@@ -227,6 +236,25 @@ function buildDescriptors(): SettingDescriptor[] {
 			role,
 		});
 	}
+
+	list.push({
+		id: "review.timeoutSeconds",
+		label: "review · timeoutSeconds",
+		description:
+			`Total budget for the unified Review (and Plan Review), in SECONDS. ` +
+			`Positive decimal integer, at most ${Math.floor(MAX_TIMEOUT_MS / 1000)}; blank = inherit (default ${DEFAULT_CONFIG.review.timeoutSeconds}).`,
+		kind: "timeoutSeconds",
+		path: ["review", "timeoutSeconds"],
+	});
+	list.push({
+		id: "qa.timeoutSeconds",
+		label: "qa · timeoutSeconds",
+		description:
+			`Total budget for a runtime QA round, in SECONDS. ` +
+			`Positive decimal integer, at most ${Math.floor(MAX_TIMEOUT_MS / 1000)}; blank = inherit (default ${DEFAULT_CONFIG.qa.timeoutSeconds}).`,
+		kind: "timeoutSeconds",
+		path: ["qa", "timeoutSeconds"],
+	});
 
 	return list;
 }
@@ -428,6 +456,71 @@ function contextWindowRangeHint(
 	return `Pi 默认 ${model.contextWindow} tokens · 可接受 ${formatContextWindowRange(model.contextWindow, compactionRes.compaction)}`;
 }
 
+// ── timeoutSeconds parsing & candidate validation ──────────────────────
+
+export type TimeoutSecondsParseResult =
+	| { ok: true; value: number }
+	| { ok: false; error: string };
+
+/** Parse a timeoutSeconds input string: plain decimal integer seconds.
+ *  Blank is handled by the caller (clear). Shared by the TUI onChange path
+ *  and the RPC wizard. Pure. */
+export function parseTimeoutSecondsInput(raw: string): TimeoutSecondsParseResult {
+	const trimmed = raw.trim();
+	if (!/^\d+$/.test(trimmed)) {
+		return {
+			ok: false,
+			error:
+				"Enter a plain decimal integer number of seconds (e.g. 1800); decimals, signs, exponents, and trailing characters are rejected.",
+		};
+	}
+	const value = Number(trimmed);
+	if (!Number.isSafeInteger(value)) {
+		return { ok: false, error: "Value exceeds the safe-integer range." };
+	}
+	return { ok: true, value };
+}
+
+export type TimeoutSecondsCandidateCheck =
+	| { ok: true }
+	| { ok: false; error: string };
+
+/** Validate the timeoutSeconds leaf for one section on a candidate config.
+ *  Reuses the consumption-boundary resolvers (review.timeoutSeconds →
+ *  resolveReviewerTimeoutMs, qa.timeoutSeconds → resolveQaTimeoutMs) so the
+ *  settings editor and the runtime enforce exactly the same rules — positive
+ *  integer seconds within Node's setTimeout 32-bit limit. Shared by the TUI
+ *  onChange path and the RPC wizard. Pure. */
+export function validateTimeoutSecondsCandidate(
+	candidate: WorkflowConfig,
+	path: ["review", "timeoutSeconds"] | ["qa", "timeoutSeconds"],
+): TimeoutSecondsCandidateCheck {
+	try {
+		if (path[0] === "review") resolveReviewerTimeoutMs(candidate.review);
+		else resolveQaTimeoutMs(candidate.qa);
+	} catch (e) {
+		return {
+			ok: false,
+			error: e instanceof Error ? e.message : String(e),
+		};
+	}
+	return { ok: true };
+}
+
+/** Compute the range hint for a timeoutSeconds row: the inherited effective
+ *  value when the current layer does not set one. */
+function timeoutSecondsRangeHint(
+	desc: SettingDescriptor,
+	effective: any,
+): string {
+	const eff = getPath(effective, desc.path);
+	const fallbackDefault =
+		desc.path[0] === "review"
+			? DEFAULT_CONFIG.review.timeoutSeconds
+			: DEFAULT_CONFIG.qa.timeoutSeconds;
+	return `当前生效 ${typeof eff === "number" ? `${eff} 秒` : `${fallbackDefault} 秒（默认）`} · 上限 ${Math.floor(MAX_TIMEOUT_MS / 1000)} 秒`;
+}
+
 // ── Display helpers ─────────────────────────────────────────────────────────
 
 function formatVal(v: any): string {
@@ -531,6 +624,13 @@ function currentDisplay(
 				? `${formatVal(effWindow)} tokens`
 				: "unset — Pi model window"
 		})`;
+	}
+
+	if (desc.kind === "timeoutSeconds") {
+		const raw = getPath(layer, desc.path);
+		if (raw !== undefined) return `${formatVal(raw)} s`;
+		const eff = getPath(effective, desc.path);
+		return `${inheritLabel(scope)} (${typeof eff === "number" ? `${eff} s` : "unset — built-in default"})`;
 	}
 
 	const raw = getPath(layer, desc.path);
@@ -1082,15 +1182,24 @@ export function registerWorkflowSettingsCommand(
 							agentDir,
 							typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
 						);
-						const describe = (desc: SettingDescriptor, effective: WorkflowConfig, compactionRes: CompactionSnapshotResult) =>
-							desc.kind === "contextWindow" && desc.role
-								? `${desc.description} ${contextWindowRangeHint(
-										effective.models[desc.role],
-										ctx.modelRegistry,
-										compactionRes,
-									)}
-								`
-								: descriptionFor(desc, effective);
+						const describe = (
+							desc: SettingDescriptor,
+							effective: WorkflowConfig,
+							compactionRes: CompactionSnapshotResult,
+						) => {
+							if (desc.kind === "contextWindow" && desc.role) {
+								return `${desc.description} ${contextWindowRangeHint(
+									effective.models[desc.role],
+									ctx.modelRegistry,
+									compactionRes,
+								)}
+								`;
+							}
+							if (desc.kind === "timeoutSeconds") {
+								return `${desc.description} ${timeoutSecondsRangeHint(desc, effective)}`;
+							}
+							return descriptionFor(desc, effective);
+						};
 
 						const items: SettingItem[] = scopeDescriptors.map((desc) => {
 							const item: SettingItem = {
@@ -1277,6 +1386,42 @@ export function registerWorkflowSettingsCommand(
 									if (!check.ok) {
 										ctx.ui.notify(
 											`Workflow settings: contextWindow 未保存 — ${check.error}`,
+											"error",
+										);
+										return; // no write; config keeps the original value
+									}
+									setPath(layer, desc.path, parsed.value);
+								}
+							} else if (desc.kind === "timeoutSeconds") {
+								const trimmed = newValue.trim();
+								if (trimmed === "") {
+									// Blank clears this layer's override — always allowed.
+									unsetPath(layer, desc.path);
+								} else {
+									const parsed = parseTimeoutSecondsInput(trimmed);
+									if (!parsed.ok) {
+										ctx.ui.notify(`Workflow settings: ${parsed.error}`, "error");
+										return; // no write; config keeps the original value
+									}
+									// Candidate = pending change merged up to the editing scope,
+									// so a higher-priority override cannot mask an invalid
+									// combination; validation reuses the runtime resolvers.
+									const candidateLayer = JSON.parse(JSON.stringify(layer));
+									setPath(candidateLayer, desc.path, parsed.value);
+									const candidate = buildCandidateConfigUpToScope(
+										scope,
+										candidateLayer,
+										cwd,
+										agentDir,
+										ctx,
+									);
+									const check = validateTimeoutSecondsCandidate(
+										candidate,
+										desc.path as ["review", "timeoutSeconds"] | ["qa", "timeoutSeconds"],
+									);
+									if (!check.ok) {
+										ctx.ui.notify(
+											`Workflow settings: ${desc.id} 未保存 — ${check.error}`,
 											"error",
 										);
 										return; // no write; config keeps the original value
@@ -1718,6 +1863,57 @@ async function editRpcSettingValue(
 			);
 			return;
 		}
+		await commitRpcWrite(ctx, scope, layer, cwd, agentDir, sessionKey, changedScopes);
+		return;
+	}
+
+	if (desc.kind === "timeoutSeconds") {
+		// Timeout seconds: single-line input. Blank clears this scope's override
+		// (always allowed); a value is strictly parsed and validated on the
+		// candidate merge before any write; cancel keeps the original.
+		const raw = getPath(readLayer(scope, cwd, agentDir, sessionKey), desc.path);
+		const initial = raw === undefined || raw === null ? "" : String(raw);
+		// Surface the effective value and the cap BEFORE input (parity with the
+		// TUI description line).
+		const rangeHint = timeoutSecondsRangeHint(desc, effective);
+		const value = await ctx.ui.input(
+			`${desc.label} (seconds) — blank = ${label} · ${rangeHint}`,
+			initial,
+		);
+		if (value === undefined) return;
+		const trimmed = value.trim();
+		const layer = readLayer(scope, cwd, agentDir, sessionKey);
+		if (trimmed === "") {
+			unsetPath(layer, desc.path);
+			await commitRpcWrite(ctx, scope, layer, cwd, agentDir, sessionKey, changedScopes);
+			return;
+		}
+		const parsed = parseTimeoutSecondsInput(trimmed);
+		if (!parsed.ok) {
+			ctx.ui.notify(`Workflow settings: ${parsed.error}`, "error");
+			return;
+		}
+		const candidateLayer = JSON.parse(JSON.stringify(layer));
+		setPath(candidateLayer, desc.path, parsed.value);
+		const candidate = buildCandidateConfigUpToScope(
+			scope,
+			candidateLayer,
+			cwd,
+			agentDir,
+			ctx,
+		);
+		const check = validateTimeoutSecondsCandidate(
+			candidate,
+			desc.path as ["review", "timeoutSeconds"] | ["qa", "timeoutSeconds"],
+		);
+		if (!check.ok) {
+			ctx.ui.notify(
+				`Workflow settings: ${desc.id} 未保存 — ${check.error}`,
+				"error",
+			);
+			return;
+		}
+		setPath(layer, desc.path, parsed.value);
 		await commitRpcWrite(ctx, scope, layer, cwd, agentDir, sessionKey, changedScopes);
 		return;
 	}

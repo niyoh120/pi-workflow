@@ -130,6 +130,8 @@ export interface WorkflowConfig {
 	 */
 	review: {
 		enabled: boolean;
+		/** Total reviewer budget in seconds (default 1800 = 30 minutes). */
+		timeoutSeconds: number;
 	};
 	/**
 	 * Runtime QA via an independent QA agent — gated by this enabled flag.
@@ -142,6 +144,8 @@ export interface WorkflowConfig {
 	 */
 	qa: {
 		enabled: boolean;
+		/** Total QA budget in seconds (default 3600 = 60 minutes). */
+		timeoutSeconds: number;
 	};
 	/** Delegated code review toggle for the unified Review. When true,
 	 *  `workflow_review` runs the local `ocr delegate` commands (zero LLM) to

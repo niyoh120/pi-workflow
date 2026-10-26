@@ -994,6 +994,10 @@ export interface RunPlanReviewAgentOptions {
 	/** Optional non-authoritative planner feedback on disputed findings
 	 *  (already normalized by the tool layer). */
 	feedback?: string;
+	/** Total budget in ms resolved from review.timeoutSeconds (Plan Review
+	 *  shares the unified Review budget). Undefined uses the shared 30-minute
+	 *  reviewer default. */
+	totalTimeoutMs?: number;
 	/** Parent tool AbortSignal (user cancellation / turn abort). */
 	parentSignal?: AbortSignal;
 	/** Streaming progress callback. */
@@ -1035,9 +1039,10 @@ export interface RunIndependentReviewerOptions {
 	/** Label for timeout/abort messages, e.g. "Plan review" / "Implementation review". */
 	progressLabel: string;
 	/** Optional total-timeout override in ms. Omitted → the shared 30-minute
-	 *  REVIEWER_TOTAL_TIMEOUT_MS default (both existing reviewers). Runtime QA
-	 *  passes its own 60-minute constant. The value is used verbatim in the
-	 *  timeout error message. */
+	 *  REVIEWER_TOTAL_TIMEOUT_MS default. Callers pass the configured budget
+	 *  (review.timeoutSeconds / qa.timeoutSeconds resolved to ms); QA falls
+	 *  back to its built-in 60-minute constant when the config lacks the
+	 *  field. The value is used verbatim in the timeout error message. */
 	totalTimeoutMs?: number;
 	/** Precomputed tool surface snapshot (Plan Review passes the same snapshot
 	 *  it hashed into the review basis). When omitted the runner reconstructs
@@ -1192,8 +1197,8 @@ export async function runIndependentReviewer(
 	});
 
 	// Total timeout + parent-signal linkage. The timeout defaults to the shared
-	// 30-minute reviewer budget; callers may pass their own total budget (QA
-	// uses 60 minutes).
+	// 30-minute reviewer budget; callers pass the configured budget resolved
+	// from review.timeoutSeconds / qa.timeoutSeconds.
 	const totalTimeoutMs = opts.totalTimeoutMs ?? REVIEWER_TOTAL_TIMEOUT_MS;
 	const controller = new AbortController();
 	const timer = setTimeout(
@@ -1406,6 +1411,7 @@ export async function runPlanReviewAgent(
 		onProgress: opts.onProgress,
 		progressLabel: "Plan review",
 		toolSurface: opts.toolSurface,
+		totalTimeoutMs: opts.totalTimeoutMs,
 	});
 
 	// Strict finalized-evidence semantics: cacheability (and an effective

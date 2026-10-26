@@ -46,9 +46,11 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
 	},
 	review: {
 		enabled: true,
+		timeoutSeconds: 1800,
 	},
 	qa: {
 		enabled: true,
+		timeoutSeconds: 3600,
 	},
 	codeReview: {
 		enabled: true,

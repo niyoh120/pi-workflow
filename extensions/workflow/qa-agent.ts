@@ -54,9 +54,9 @@ import type { PreviousQaRoundInput } from "./qa-history.js";
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-/** Single internal total timeout for one QA round: 60 minutes, distinct from
- *  the reviewers' 30-minute default. Passed explicitly to the shared runner
- *  (which keeps 30 minutes for both existing reviewers when omitted). */
+/** Built-in fallback total timeout for one QA round: 60 minutes. Used only
+ *  when qa.timeoutSeconds is absent from the effective config; the configured
+ *  value takes precedence. */
 export const QA_TOTAL_TIMEOUT_MS = 3_600_000;
 
 /** Scratch root the QA agent must keep all temporary scripts and artifacts
@@ -360,6 +360,9 @@ export interface RunQaAgentOptions {
 	/** Optional non-authoritative Work feedback on prior-round findings.
 	 *  Idempotently re-normalized in the runner. */
 	feedback?: string;
+	/** Total budget in ms resolved from qa.timeoutSeconds. Undefined falls
+	 *  back to the built-in 60-minute QA default. */
+	totalTimeoutMs?: number;
 	/** Streaming progress callback. */
 	onProgress?: (text: string) => void;
 }
@@ -421,9 +424,9 @@ export async function runQaAgent(opts: RunQaAgentOptions): Promise<QaResult> {
 		parentSignal: opts.parentSignal,
 		onProgress: opts.onProgress,
 		progressLabel: "QA",
-		// QA gets its own 60-minute total budget; both existing reviewers keep
-		// the shared runner's 30-minute default.
-		totalTimeoutMs: QA_TOTAL_TIMEOUT_MS,
+		// Configured qa.timeoutSeconds wins; this is the built-in fallback for
+		// legacy configs without the field.
+		totalTimeoutMs: opts.totalTimeoutMs ?? QA_TOTAL_TIMEOUT_MS,
 	});
 
 	// Shared repo-inspection judgment over STARTED calls — identical semantics

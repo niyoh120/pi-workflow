@@ -185,7 +185,9 @@ export function resolveConfigSources(
 		"workflow.autoEnter",
 		"planReview.enabled",
 		"review.enabled",
+		"review.timeoutSeconds",
 		"qa.enabled",
+		"qa.timeoutSeconds",
 		"codeReview.enabled",
 		...(["explore", "plan", "planReview", "review", "qa", "work", "commit"] as const).flatMap(
 			(role) => [
@@ -203,7 +205,6 @@ export function resolveConfigSources(
 
 	return { sources, projectSkipped, effective };
 }
-
 /** Find the highest-priority layer that defines a given dotted path. */
 function sourceOfPath(path: string, layers: ConfigLayers): ConfigSource {
 	const segs = path.split(".");
@@ -252,14 +253,29 @@ export function normalizeConfig(cfg: any): WorkflowConfig {
 		cfg.planReview = { enabled: !!cfg.planReview.enabled };
 	}
 
-	// Strip unknown review fields — only enabled is supported.
+	// Strip unknown review fields — only enabled/timeoutSeconds are supported.
+	// timeoutSeconds is preserved VERBATIM (including invalid values) so the
+	// settings/diagnostics layer can surface the stored value; validity is
+	// enforced at the consumption boundary (resolveReviewerTimeoutMs) with an
+	// explicit error — no clamping, no silent fallback.
 	if (cfg.review && typeof cfg.review === "object") {
-		cfg.review = { enabled: !!cfg.review.enabled };
+		cfg.review = {
+			enabled: !!cfg.review.enabled,
+			...("timeoutSeconds" in cfg.review
+				? { timeoutSeconds: cfg.review.timeoutSeconds }
+				: {}),
+		};
 	}
 
-	// Strip unknown qa fields — only enabled is supported.
+	// Strip unknown qa fields — only enabled/timeoutSeconds are supported
+	// (same verbatim-preservation contract as review.timeoutSeconds above).
 	if (cfg.qa && typeof cfg.qa === "object") {
-		cfg.qa = { enabled: !!cfg.qa.enabled };
+		cfg.qa = {
+			enabled: !!cfg.qa.enabled,
+			...("timeoutSeconds" in cfg.qa
+				? { timeoutSeconds: cfg.qa.timeoutSeconds }
+				: {}),
+		};
 	}
 
 	// Strip unknown codeReview fields — only enabled is supported.
@@ -298,6 +314,57 @@ export function normalizeConfig(cfg: any): WorkflowConfig {
 	}
 
 	return cfg as WorkflowConfig;
+}
+
+// ── Reviewer/QA total-budget resolution ───────────────────────────────────
+
+const MS_PER_SECOND = 1_000;
+
+/** Node setTimeout() only accepts delays fitting in a signed 32-bit int;
+ *  larger values are SILENTLY clamped to 1ms (immediate fire). Reject them
+ *  explicitly so the configured budget can never degrade into an instant
+ *  timeout. */
+export const MAX_TIMEOUT_MS = 2_147_483_647;
+
+/** Validate a configured total budget in seconds and convert to milliseconds.
+ *  Explicit error on invalid values (non-number, non-safe-integer, <= 0,
+ *  or overflowing Node's setTimeout 32-bit limit) — no clamping, no silent
+ *  fallback; the invalid value surfaces at the tool call that needs it,
+ *  matching the contextWindow validation contract. */
+function resolveTimeoutSecondsMs(value: unknown, configPath: string): number {
+	if (
+		typeof value !== "number" ||
+		!Number.isSafeInteger(value) ||
+		value <= 0
+	) {
+		throw new Error(
+			`${configPath} must be a positive integer number of seconds (got ${JSON.stringify(value) ?? String(value)}).`,
+		);
+	}
+	const ms = value * MS_PER_SECOND;
+	if (ms > MAX_TIMEOUT_MS) {
+		throw new Error(
+			`${configPath} must be at most ${Math.floor(MAX_TIMEOUT_MS / MS_PER_SECOND)} seconds (got ${value}).`,
+		);
+	}
+	return ms;
+}
+
+/** Total independent-Review budget in milliseconds from effective config.
+ *  Throws explicitly on an invalid `review.timeoutSeconds`. */
+export function resolveReviewerTimeoutMs(
+	review: WorkflowConfig["review"],
+): number {
+	return resolveTimeoutSecondsMs(
+		review.timeoutSeconds,
+		"review.timeoutSeconds",
+	);
+}
+
+/** Total runtime-QA budget in milliseconds from effective config. Throws
+ *  explicitly on an invalid `qa.timeoutSeconds`. */
+export function resolveQaTimeoutMs(qa: WorkflowConfig["qa"]): number {
+	return resolveTimeoutSecondsMs(qa.timeoutSeconds, "qa.timeoutSeconds");
 }
 
 // ── Raw config-layer IO (for /workflow:settings) ─────────────────────────────

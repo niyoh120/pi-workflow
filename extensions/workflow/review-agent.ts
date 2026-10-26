@@ -541,6 +541,9 @@ export interface RunReviewAgentOptions {
 	/** Optional non-authoritative Work feedback on a prior round's disputed
 	 *  findings. Idempotently re-normalized in the runner. */
 	feedback?: string;
+	/** Total budget in ms resolved from review.timeoutSeconds. Undefined uses
+	 *  the shared 30-minute reviewer default. */
+	totalTimeoutMs?: number;
 	/** Streaming progress callback. */
 	onProgress?: (text: string) => void;
 }
@@ -723,6 +726,7 @@ export async function runReviewAgent(
 		parentSignal: opts.parentSignal,
 		onProgress: opts.onProgress,
 		progressLabel: "Review",
+		totalTimeoutMs: opts.totalTimeoutMs,
 	});
 
 	// Mark whether the reviewer actually inspected the repository. A PASS from

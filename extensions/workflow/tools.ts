@@ -12,7 +12,7 @@ import {
 	readPlanTrimmed,
 	requirePlanMarkdown,
 } from "./state.js";
-import { loadConfigForContext } from "./config.js";
+import { loadConfigForContext, resolveReviewerTimeoutMs, resolveQaTimeoutMs } from "./config.js";
 import { todoDeltaText, todoSnapshotText, isWorkflowActive } from "./helpers.js";
 import {
 	createWorktree,
@@ -1172,6 +1172,10 @@ export function registerPlanReviewTool(
 					sectionDelta,
 					decisionsChanged,
 					feedback,
+					// Plan Review shares the unified Review budget
+					// (review.timeoutSeconds); resolution throws explicitly on an
+					// invalid configured value (no silent default).
+					totalTimeoutMs: resolveReviewerTimeoutMs(config.review),
 					parentSignal: signal,
 					onProgress: (text) => {
 						onUpdate?.({
@@ -1509,6 +1513,7 @@ export function registerReviewTool(
 								details: {},
 							});
 						},
+						totalTimeoutMs: resolveReviewerTimeoutMs(config.review),
 					});
 				} catch (err) {
 					// Reviewer/delegate run failure (CLI missing, delegate exec
@@ -1813,6 +1818,9 @@ export function registerQaTool(
 					primaryCwd,
 					previousRound,
 					feedback,
+					// Total budget from qa.timeoutSeconds; resolution throws
+					// explicitly on an invalid configured value (no silent default).
+					totalTimeoutMs: resolveQaTimeoutMs(config.qa),
 					parentSignal: signal,
 					onProgress: (text) => {
 						onUpdate?.({

@@ -302,9 +302,9 @@ console.log("\n=== Part 2: runner wiring + shared contracts ===");
 	assert(/opts\.totalTimeoutMs \?\? REVIEWER_TOTAL_TIMEOUT_MS/.test(planReviewAgentTs), "Runner falls back to the 30-minute default when omitted");
 	assert(/`\$\{progressLabel\} timed out after \$\{totalTimeoutMs\}ms`/.test(planReviewAgentTs), "Timeout error message uses the effective timeout value");
 	const runPlanReviewCall = planReviewAgentTs.slice(planReviewAgentTs.indexOf("export async function runPlanReviewAgent"));
-	assert(!runPlanReviewCall.includes("totalTimeoutMs"), "runPlanReviewAgent (Plan Review) keeps the 30-minute default (no totalTimeoutMs passed)");
-	assert(!reviewAgentTs.includes("totalTimeoutMs"), "runReviewAgent (Implementation Review) keeps the 30-minute default (no totalTimeoutMs passed)");
-	assert(/totalTimeoutMs: QA_TOTAL_TIMEOUT_MS/.test(qaAgentTs), "runQaAgent passes the 60-minute QA timeout explicitly");
+	assert(runPlanReviewCall.includes("opts.totalTimeoutMs"), "runPlanReviewAgent forwards the configured totalTimeoutMs (review.timeoutSeconds)");
+	assert(reviewAgentTs.includes("totalTimeoutMs: opts.totalTimeoutMs"), "runReviewAgent forwards the configured totalTimeoutMs (review.timeoutSeconds)");
+	assert(/totalTimeoutMs: opts\.totalTimeoutMs \?\? QA_TOTAL_TIMEOUT_MS/.test(qaAgentTs), "runQaAgent uses the configured qa.timeoutSeconds (falls back to the built-in 60-minute default)");
 	assert(/progressLabel: "QA"/.test(qaAgentTs), "runQaAgent labels progress/timeout messages QA");
 
 	// Shared repo-inspection judgment (no drifting private copy in QA).
@@ -544,9 +544,11 @@ console.log("\n=== Part 4: workflow_qa tool + flow wiring ===");
 
 	// Config surface.
 	assert(configTs.includes('"qa.enabled"'), "config.ts leafPaths includes qa.enabled");
+	assert(configTs.includes('"qa.timeoutSeconds"') && configTs.includes('"review.timeoutSeconds"'), "config.ts leafPaths includes the timeoutSeconds leaves");
+	assert(configTs.includes("resolveReviewerTimeoutMs") && configTs.includes("resolveQaTimeoutMs"), "config.ts exports reviewer/QA budget resolvers (timeoutSeconds → ms, explicit error)");
 	assert(/VALID_ROLES = new Set\([\s\S]*?"qa"/.test(configTs), "config.ts VALID_ROLES includes qa");
-	assert(/if \(cfg\.qa && typeof cfg\.qa === "object"\) \{\s*cfg\.qa = \{ enabled: !!cfg\.qa\.enabled \};/.test(configTs), "normalizeConfig strips unknown qa fields (legacy configs stay compatible)");
-	assert(defaultsTs.includes("qa: {") && /qa: \{\s*enabled: true,?\s*\}/.test(defaultsTs), "DEFAULT_CONFIG enables QA by default");
+	assert(/if \(cfg\.qa && typeof cfg\.qa === "object"\) \{\s*cfg\.qa = \{\s*enabled: !!cfg\.qa\.enabled,/.test(configTs), "normalizeConfig strips unknown qa fields (enabled + verbatim timeoutSeconds only)");
+	assert(defaultsTs.includes("qa: {") && /qa: \{\s*enabled: true,\s*timeoutSeconds: 3600,?\s*\}/.test(defaultsTs), "DEFAULT_CONFIG enables QA by default (60-minute timeoutSeconds)");
 	assert(/qa: \{[\s\S]*?provider: "openai"[\s\S]*?model: "gpt-5.1"[\s\S]*?thinking: "high"/.test(defaultsTs), "DEFAULT_CONFIG adds the qa role model (mirrors review)");
 	assert(typesTs.includes('| "qa"') && typesTs.includes("qa: {") && typesTs.includes("qa?: Partial<"), "types.ts adds the qa role, config section, and override key");
 	assert(settingsTs.includes('"qa",') || /"review", "qa", "work"/.test(settingsTs), "settings.ts ROLES includes qa");
