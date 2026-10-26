@@ -1288,12 +1288,45 @@ export async function runIndependentReviewer(
 
 	const elapsedMs = Date.now() - startedAt;
 
-	if (aborted) {
-		const reason = timedOut()
+	// Shared timeout/aborted label for both abort settle shapes (thrown
+	// AbortError and normal settle after our controller fired).
+	const abortOutcomeLabel = () =>
+		timedOut()
 			? `${progressLabel} timed out after ${totalTimeoutMs}ms`
 			: `${progressLabel} aborted`;
+
+	if (aborted) {
 		throw new Error(
-			`${reason} (model: ${reviewerLabel}, turns: ${turns}, tools: ${toolCalls}).`,
+			`${abortOutcomeLabel()} (model: ${reviewerLabel}, turns: ${turns}, tools: ${toolCalls}).`,
+		);
+	}
+
+	// Abort routing covers BOTH settle shapes: (a) prompt()/waitForIdle()
+	// threw AbortError (handled above via `aborted`), and (b) the SDK
+	// settled normally after our timeout/parent abort with stopReason
+	// "error" + abort-flavored errorMessage and no final text. Route (b)
+	// into the same timeout/aborted messages instead of the generic
+	// "produced no final text" diagnostics.
+	if (!text && controller.signal.aborted) {
+		const errSuffix = errorMessage ? ` (${errorMessage})` : "";
+		const diagnostics =
+			stopReason || errorMessage
+				? `; last assistant message: stopReason ${stopReason ?? "unknown"}${errSuffix}`
+				: "";
+		throw new Error(
+			`${abortOutcomeLabel()} (model: ${reviewerLabel}, turns: ${turns}, tools: ${toolCalls}${diagnostics}).`,
+		);
+	}
+
+	// Provider/transport-level abort: the request itself was interrupted
+	// while our budget controller never fired. Distinguish it explicitly
+	// from the workflow timeout so the operator knows the budget held.
+	if (
+		!text &&
+		(stopReason === "aborted" || /abort/i.test(errorMessage ?? ""))
+	) {
+		throw new Error(
+			`${progressLabel} request was aborted before producing final text (model: ${reviewerLabel}, elapsed ${Math.round(elapsedMs / 1000)}s of the ${totalTimeoutMs}ms budget, turns: ${turns}, tools: ${toolCalls}, stopReason: ${stopReason ?? "unknown"}${errorMessage ? `, error: ${errorMessage}` : ""}). Likely a provider/transport interruption; retry or check gateway connectivity.`,
 		);
 	}
 
