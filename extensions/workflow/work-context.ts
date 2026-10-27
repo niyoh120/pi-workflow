@@ -48,8 +48,27 @@ export interface DispatcherPorts {
 	getBranch(): BranchEntry[] | undefined;
 	isIdle(): boolean;
 	hasPendingMessages(): boolean;
+	/**
+	 * Read the shared disk cancellation marker for a work run. States:
+	 * absent / cancelled / error (fail-closed). Called immediately before
+	 * any send so a stale runtime holding an old branch still observes the
+	 * durable cancellation.
+	 */
+	readCancellation(workRunId: string): { state: "absent" } | { state: "cancelled" } | { state: "error"; error: string };
 	writeMarker(handoffBody: string, workRunId: string): void;
-	sendKickoff(workRunId: string): void;
+	/**
+	 * Actually send the kickoff. Implementations MUST perform the final
+	 * precondition check (reload state + read the shared marker + confirm
+	 * mode/run/pending, no await between check and send) and return whether
+	 * the kickoff was actually sent — a cancelled run reports false.
+	 */
+	sendKickoff(workRunId: string): boolean;
+	/**
+	 * Optional lifecycle abort (e.g. shutdown mid-dispatch): when true, the
+	 * decision executor skips ALL side effects (late snapshot, pending
+	 * clears) so a shutting-down session keeps state for later recovery.
+	 */
+	shouldAbort?: () => boolean;
 	clearPending(): void;
 	appendLateSnapshot(handoffBody: string, workRunId: string): void;
 }
@@ -152,24 +171,67 @@ export function computeDispatcherDecision(
 
 /**
  * Resolve the handoff body and workRunId from the approval journal.
- * Shared by write_marker_and_send and late_user_no_replay paths.
+ * Shared by write_marker_and_send and late_user_no_replay paths. When the
+ * journal is unrecoverable, still returns the workRunId with handoffBody
+ * undefined so the caller can clear the matching pending entry with an
+ * explicit error (never fabricate context).
  */
 function resolveHandoff(
 	ports: DispatcherPorts,
-): { handoffBody: string; workRunId: string } | undefined {
+): { handoffBody?: string; workRunId: string } | undefined {
 	const state = ports.loadState();
 	const branch = ports.getBranch();
 	if (!branch || !state.workRunId) return undefined;
 	const journalIdx = findApprovalJournalIndex(branch, state.workRunId);
-	if (journalIdx === -1) return undefined;
+	if (journalIdx === -1) return { workRunId: state.workRunId };
 	const data = branch[journalIdx].data as ApprovalJournalData | undefined;
-	if (!data?.handoffBody) return undefined;
+	if (!data?.handoffBody) return { workRunId: state.workRunId };
 	return { handoffBody: data.handoffBody, workRunId: state.workRunId };
 }
 
 /**
+ * Cancellation outcome for one dispatch pass.
+ *  - not-cancelled: proceed with the branch-evidence decision.
+ *  - cancelled: durable marker present; caller keeps the handoff and clears
+ *    only the matching pending entry.
+ *  - error: marker unreadable/mismatched — fail closed, suppress the send
+ *    and report; the pending entry stays for a subsequent pass.
+ */
+export type CancellationCheck =
+	| { status: "not-cancelled" }
+	| { status: "cancelled"; workRunId: string }
+	| { status: "error"; workRunId: string; error: string };
+
+/**
+ * Gate any kickoff-capable pass on the SHARED DISK marker. The branch is
+ * used only for handoff/approval evidence — cancellation is judged from the
+ * durable marker so stale runtimes with old in-memory branch indexes cannot
+ * miss a cancellation written by another instance.
+ */
+export function checkKickoffCancellation(ports: {
+	loadState(): { mode: string; workRunId?: string; pendingWorkKickoff?: string };
+	readCancellation(
+		workRunId: string,
+	): { state: "absent" } | { state: "cancelled" } | { state: "error"; error: string };
+}): CancellationCheck {
+	const state = ports.loadState();
+	const workRunId = state.workRunId;
+	if (!workRunId || state.mode !== "work" || state.pendingWorkKickoff !== workRunId) {
+		return { status: "not-cancelled" };
+	}
+	const c = ports.readCancellation(workRunId);
+	if (c.state === "absent") return { status: "not-cancelled" };
+	if (c.state === "cancelled") return { status: "cancelled", workRunId };
+	return { status: "error", workRunId, error: c.error };
+}
+
+/**
  * Execute the dispatcher decision through ports. Handles the side-effect
- * sequence for each decision branch.
+ * sequence for each decision branch. Every kickoff-capable path re-reads
+ * loadState + the cancellation marker immediately before the actual send
+ * (no await between the read and the send) and re-verifies mode/run/pending
+ * still match, closing the in-process race where a cancel lands during
+ * branch evidence gathering.
  */
 export function executeDispatcherDecision(
 	decision: DispatcherDecision,
@@ -179,27 +241,60 @@ export function executeDispatcherDecision(
 		case "skip":
 			return;
 		case "ack":
+			if (ports.shouldAbort?.()) return;
 			ports.clearPending();
 			return;
 		case "send_kickoff": {
 			const state = ports.loadState();
 			if (!state.workRunId) return;
-			ports.sendKickoff(state.workRunId);
-			ports.clearPending();
+			if (
+				state.mode !== "work" ||
+				state.pendingWorkKickoff !== state.workRunId ||
+				ports.readCancellation(state.workRunId).state !== "absent"
+			) {
+				return;
+			}
+			// sendKickoff performs the authoritative final check inside the
+			// send port; only clear pending when the kickoff actually went out.
+			if (ports.sendKickoff(state.workRunId) && !ports.shouldAbort?.()) {
+				ports.clearPending();
+			}
 			return;
 		}
 		case "write_marker_and_send": {
 			const resolved = resolveHandoff(ports);
 			if (!resolved) return;
+			if (!resolved.handoffBody) return;
+			const state = ports.loadState();
+			if (
+				!state.workRunId ||
+				state.workRunId !== resolved.workRunId ||
+				state.mode !== "work" ||
+				state.pendingWorkKickoff !== state.workRunId ||
+				ports.readCancellation(state.workRunId).state !== "absent"
+			) {
+				return;
+			}
+			if (ports.shouldAbort?.()) return;
 			ports.writeMarker(resolved.handoffBody, resolved.workRunId);
-			ports.sendKickoff(resolved.workRunId);
-			ports.clearPending();
+			// The send port re-checks state + marker with no await in between;
+			// a cancellation landing between the precheck above and the send
+			// suppresses the kickoff here.
+			if (ports.sendKickoff(resolved.workRunId) && !ports.shouldAbort?.()) {
+				ports.clearPending();
+			}
 			return;
 		}
 		case "late_user_no_replay": {
 			const resolved = resolveHandoff(ports);
 			if (!resolved) return;
-			ports.appendLateSnapshot(resolved.handoffBody, resolved.workRunId);
+			if (ports.shouldAbort?.()) return;
+			// Late user: never send. Missing handoff with an unrecoverable
+			// journal still clears the matching pending (caller reports) — the
+			// next user message walks the recovery-warning path.
+			if (resolved.handoffBody) {
+				ports.appendLateSnapshot(resolved.handoffBody, resolved.workRunId);
+			}
 			ports.clearPending();
 			return;
 		}

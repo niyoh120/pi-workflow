@@ -1,8 +1,8 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import { getSessionKey, loadState, saveState, acquireDispatcherLock, releaseDispatcherLock } from "./state.js";
-import { COMMON_PROMPT } from "./prompts.js";
+import { getSessionKey, loadState, saveState, acquireDispatcherLockWithRetry, releaseDispatcherLock } from "./state.js";
+import { COMMON_PROMPT, WORKFLOW_PROMPT_SECTION } from "./prompts.js";
 import {
 	isWorkflowDataPath,
 	isReadonlyMode,
@@ -10,6 +10,7 @@ import {
 	isAllowedInitTargetPath,
 	isInsideWorktree,
 } from "./guards.js";
+import type { BranchEntry } from "./work-context.js";
 import {
 	buildModeMessageBody,
 	buildModeReminderBody,
@@ -69,12 +70,12 @@ import {
 } from "./git-integration.js";
 
 /** Read the session branch. Returns undefined on failure (fail-open). */
-function getSessionBranch(ctx: unknown): any[] | undefined {
+function getSessionBranch(ctx: unknown): BranchEntry[] | undefined {
 	try {
 		return (
 			(ctx as {
 				sessionManager?: {
-					getBranch?: () => any[];
+					getBranch?: () => BranchEntry[];
 				};
 			}).sessionManager?.getBranch?.()
 		);
@@ -204,12 +205,31 @@ export function registerBeforeAgentStart(
 		}
 		await restoreModeRuntime(pi, ctx, state.mode, getAgentDir);
 
-		// Build stable system prompt: COMMON + Mode Prompt + worktree notice.
-		// No dynamic state (todos, run IDs) — those come from tool results.
+		// Build stable system prompt via 1.4 structured sections: the workflow
+		// rules live in a dedicated `workflow_mode` section keyed by a stable
+		// name, re-set every startup so COMMON + Mode Prompt + worktree notice
+		// always reflect the current mode. No dynamic state (todos, run IDs) —
+		// those come from tool results. When an earlier extension forced a
+		// complete prompt (forceSystemPrompt set), Pi renders the forced text
+		// verbatim and ignores sections — fall back to appending to the forced
+		// text so the rules survive; the plain path keeps Pi's own sections (and
+		// their provider-side caching) intact.
 		const modeBody = buildModeMessageBody(state.mode, state, resolveTodoToolName(pi));
-		const systemPrompt = modeBody
-			? event.systemPrompt + "\n\n" + COMMON_PROMPT + "\n\n" + modeBody
-			: event.systemPrompt + "\n\n" + COMMON_PROMPT;
+		const workflowSection = modeBody
+			? `${COMMON_PROMPT}\n\n${modeBody}`
+			: COMMON_PROMPT;
+		const forced = event.systemPromptOptions?.forceSystemPrompt;
+		let systemPrompt: string | undefined;
+		if (typeof forced === "string") {
+			// Forced-prompt composition boundary (recorded): a leading extension's
+			// whole-prompt override wins; we append our body to stay authoritative
+			// for the workflow rules.
+			systemPrompt = `${forced}\n\n${workflowSection}`;
+		} else if (event.systemPromptOptions?.sections) {
+			event.systemPromptOptions.sections[WORKFLOW_PROMPT_SECTION] = workflowSection;
+		} else {
+			systemPrompt = `${event.systemPrompt}\n\n${workflowSection}`;
+		}
 
 		// Per-user-turn mode reminder: a short hidden custom message appended
 		// right after the user message and persisted in the session. Tool-loop
@@ -221,7 +241,7 @@ export function registerBeforeAgentStart(
 		const reminderBody = buildModeReminderBody(state.mode);
 		if (reminderBody) {
 			return {
-				systemPrompt,
+				...(systemPrompt !== undefined ? { systemPrompt } : {}),
 				message: {
 					customType: WORKFLOW_MODE_REMINDER_CUSTOM_TYPE,
 					content: reminderBody,
@@ -230,7 +250,7 @@ export function registerBeforeAgentStart(
 			};
 		}
 
-		return { systemPrompt };
+		return systemPrompt !== undefined ? { systemPrompt } : {};
 	});
 }
 
@@ -337,25 +357,104 @@ export function registerWorkflowContextInjection(
 								// Pairing broken — fail-open below.
 							}
 						}
-						// Journal exists but no marker — pending dispatcher will
-						// handle. Use journal handoffBody as ephemeral head.
+						// Journal exists but no marker. Two cases:
+						//  - kickoff still pending (pre-dispatch): keep all history with
+						//    the journal handoff as ephemeral head (dispatch imminent).
+						//  - kickoff already dispatched/cancelled (pending cleared):
+						//    isolate from the LATE-SNAPSHOT head when one is visible in
+						//    the projection (the cancel repair emitted it); anything
+						//    pre-approval stays out. No visible head at all (compacted
+						//    away) → fail-open recovery warning instead of guessing.
 						const journalEntry = branch[journalIdx];
 						const journalData = (journalEntry as any).data as
 							| { handoffBody?: string }
 							| undefined;
 						if (journalData?.handoffBody) {
-							const candidate = [
-								{
-									role: "custom" as const,
-									customType: WORK_HANDOFF_CUSTOM_TYPE,
-									content: journalData.handoffBody,
-									display: false,
-									details: { workRunId: state.workRunId, boundary: false },
-									timestamp: Date.now(),
-								},
-								...messages,
-							];
-							return { messages: candidate };
+							const kickoffStillPending =
+								state.pendingWorkKickoff === state.workRunId;
+							let candidate;
+							if (kickoffStillPending) {
+								candidate = [
+									{
+										role: "custom" as const,
+										customType: WORK_HANDOFF_CUSTOM_TYPE,
+										content: journalData.handoffBody,
+										display: false,
+										details: { workRunId: state.workRunId, boundary: false },
+										timestamp: Date.now(),
+									},
+									...messages,
+								];
+							} else {
+								// Cancelled run: slice from the latest late-snapshot head
+								// visible in the projection (repair-emitted boundary).
+								let lateIdx = -1;
+								for (let i = 0; i < messages.length; i++) {
+									const m = messages[i];
+									if (
+										m &&
+										typeof m === "object" &&
+										"customType" in m &&
+										(m as { customType?: unknown }).customType ===
+											WORK_HANDOFF_CUSTOM_TYPE &&
+										(m as { details?: { workRunId?: string; boundary?: boolean } })
+											.details?.workRunId === state.workRunId &&
+										(m as { details?: { boundary?: boolean } }).details
+											?.boundary === false
+									) {
+										lateIdx = i;
+									}
+								}
+								if (lateIdx !== -1) {
+									// Late snapshot visible: this is the FAIL-OPEN recovery
+									// semantic (same as late_user_no_replay). Pre-approval
+									// history cannot be reliably separated from post-journal
+									// input (legacy-message filtering, summaries, and context
+									// edits break count alignment), so keep the full
+									// projection, prepend an explicit recovery notice, and let
+									// the model re-anchor against the handoff body + todos.
+									// Never silently guess a boundary.
+									const { validateToolPairing } = await import(
+										"./work-context.js"
+									);
+									if (!validateToolPairing(messages)) {
+										// Pairing broken → plain fail-open below.
+									} else {
+										const notice =
+											"# Cancelled Work Run — Context Restored (fail-open)\n\n" +
+											"The kickoff for this Approved-Plan Work run was cancelled; the canonical boundary marker is unavailable. " +
+											"The handoff snapshot below was restored from the approval journal (late snapshot). " +
+											"Earlier messages may predate plan approval — re-anchor on the Final Plan and the current workflow todos; " +
+											"if context looks inconsistent, stop and ask the user to run /workflow:plan.";
+										return {
+											messages: [
+												{
+													role: "user" as const,
+													content: notice,
+													display: false,
+													timestamp: Date.now(),
+												},
+												...messages,
+											],
+										};
+									}
+								} else {
+									// Late head compacted away: rebuild from the journal
+									// body as an ephemeral boundary and keep only messages
+									// AFTER the last pre-run user entry cannot be derived
+									// reliably — fail open with the recovery warning rather
+									// than risk leaking pre-approval history.
+									candidate = undefined;
+								}
+							}
+							if (candidate) {
+								const { validateToolPairing } = await import(
+									"./work-context.js"
+								);
+								if (validateToolPairing(candidate)) {
+									return { messages: candidate };
+								}
+							}
 						}
 					}
 				}
@@ -444,41 +543,308 @@ export function registerWorkflowContextInjection(
 const _dispatcherInFlight = new Set<string>();
 
 /**
+ * Session keys with a PENDING DRAIN: the mutex was busy (or the runtime was
+ * mid-turn) when the dispatcher last ran, so one bounded pass is scheduled
+ * after the current holder finishes. An aborted kickoff must get a chance
+ * to observe its cancellation even while a normal dispatch holds the mutex.
+ */
+const _dispatcherDrainPending = new Set<string>();
+
+/** Timers for scheduled drains, released on session_shutdown. */
+const _drainTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * Sessions whose runtime has shut down in THIS process. Any dispatcher pass
+ * started after shutdown (e.g. the fast-path cleanup's follow-up work) must
+ * abort its side effects; cleared on the next session_start.
+ */
+const _shutDownSessions = new Set<string>();
+
+/**
+ * Per-session drain generation. session_shutdown bumps the generation,
+ * which cancels drains already past their outer timer (mid-await waits
+ * check the generation after every await and before dispatching).
+ */
+const _drainGeneration = new Map<string, number>();
+
+/** Current drain generation for a session (0 when never scheduled). */
+function currentDrainGeneration(sessionKey: string): number {
+	return _drainGeneration.get(sessionKey) ?? 0;
+}
+
+/** Cancel any in-flight drain for this session: bump its generation. */
+function cancelDrains(sessionKey: string): void {
+	_drainGeneration.set(sessionKey, currentDrainGeneration(sessionKey) + 1);
+	const timer = _drainTimers.get(sessionKey);
+	if (timer) {
+		clearTimeout(timer);
+	}
+	_drainTimers.delete(sessionKey);
+	_dispatcherDrainPending.delete(sessionKey);
+}
+
+/**
+ * Session-local kickoff-suppression intents for the CURRENT process. Used
+ * only when persisting the cancellation marker FAILED: storage is broken,
+ * so a restart has no durable evidence either — the honest behavior is to
+ * block the kickoff here and say so, never to pretend it is cancelled.
+ */
+const _kickoffSuppressLocal = new Set<string>();
+
+/** Compose the suppression key for the local (non-durable) intent. */
+function suppressionKey(sessionKey: string, workRunId: string): string {
+	return `${sessionKey}\u0000${workRunId}`;
+}
+
+/**
  * Register the agent_settled handler that starts the new Work run after
- * Plan approval. Also exports a callable for the session_start resume path.
+ * Plan approval — and writes the durable cancellation marker first when the
+ * run ENDED ABORTED (user Escape/abort) while a kickoff was still pending.
+ * Also serves the session_start resume path via runPendingWorkDispatcher.
  */
 export function registerPendingWorkDispatcher(
 	pi: ExtensionAPI,
 	getAgentDir: () => string,
 ): void {
-	pi.on("agent_settled", async (_event, ctx) => {
+	pi.on("agent_settled", async (event, ctx) => {
+		const sessionKey = ctxSessionKey(ctx);
+		// A new run starting in this process means the runtime is active again.
+		_shutDownSessions.delete(sessionKey);
+		if (event?.aborted) {
+			await persistAbortedKickoffCancellation(ctx, sessionKey);
+		}
 		await runPendingWorkDispatcher(pi, ctx, getAgentDir);
 	});
+
+	// Release scheduled drain timers AND cancel drains already mid-await so a
+	// shutting-down session neither keeps the event loop alive nor dispatches
+	// after shutdown. The session flag also aborts dispatcher passes (and
+	// their cleanup repairs) that start after shutdown.
+	pi.on("session_shutdown", (_event, ctx) => {
+		const sessionKey = ctxSessionKey(ctx);
+		_shutDownSessions.add(sessionKey);
+		cancelDrains(sessionKey);
+	});
+}
+
+/**
+ * Minimal structural type for the dispatcher's runtime context. The full
+ * ExtensionContext is not needed; these are the only members the dispatcher
+ * (and its cancellation helpers) touch.
+ */
+interface DispatcherContext {
+	cwd: string;
+	sessionManager?: {
+		getSessionId?: () => string;
+		getSessionFile?: () => string | null | undefined;
+		getBranch?: () => import("./work-context.js").BranchEntry[];
+	};
+	isIdle?: () => boolean;
+	hasPendingMessages?: () => boolean;
+	isProjectTrusted?: () => boolean;
+	ui?: {
+		notify?: (message: string, type?: "error" | "warning" | "info") => void;
+		setStatus?: (key: string, value: string | undefined) => void;
+	};
+	model?: unknown;
+	modelRegistry?: { find?: (provider: string, model: string) => unknown };
+	mode?: string;
+}
+
+/**
+ * Handoff repair result for a cancelled kickoff.
+ *  - repaired: canonical marker appended (or already visible).
+ *  - journal-missing: approval journal unrecoverable; caller must report.
+ *  - no-op: marker already visible in the current branch.
+ */
+type HandoffRepairResult = "repaired" | "journal-missing" | "no-op";
+
+/**
+ * Repair the handoff evidence for a cancelled kickoff, using the SAME rules
+ * as the late-user path: append the canonical boundary marker from the
+ * journal's handoff body when the marker is not yet visible. The branch is
+ * only read for evidence — repair appends via pi.sendMessage so the entry
+ * lands in the session transcript for later turns/recovery.
+ */
+/**
+ * Handoff repair for a cancelled kickoff, using the SAME late-user rules as
+ * the dispatcher:
+ *  - canonical marker already visible → no-op.
+ *  - no user entry after the journal → append the CANONICAL boundary marker
+ *    (next projection isolates from it).
+ *  - user entries after the journal (late user) → append the LATE snapshot
+ *    (boundary:false) so the user's post-journal input stays in context.
+ * Journal missing/unrecoverable → journal-missing (caller reports; the next
+ * user message walks the fail-open recovery warning).
+ */
+async function repairHandoffForCancelledRun(
+	pi: ExtensionAPI,
+	ctx: DispatcherContext,
+	workRunId: string,
+	shouldAbort?: () => boolean,
+): Promise<HandoffRepairResult> {
+	const branch = getSessionBranch(ctx);
+	const { findApprovalJournalIndex, findCanonicalMarkerIndex, hasUserEntryAfter } =
+		await import("./work-context.js");
+	// Shutdown while awaiting the import: keep marker + pending for a later
+	// recovery instead of appending context into a dead session.
+	if (shouldAbort?.()) return "journal-missing";
+	if (!branch) return "journal-missing";
+	const journalIdx = findApprovalJournalIndex(branch, workRunId);
+	if (journalIdx === -1) return "journal-missing";
+
+	const markerIdx = findCanonicalMarkerIndex(branch, workRunId, journalIdx);
+	if (markerIdx !== -1) return "no-op";
+
+	const data = branch[journalIdx].data as
+		| { handoffBody?: string }
+		| undefined;
+	if (!data?.handoffBody) return "journal-missing";
+
+	const lateUser = hasUserEntryAfter(branch, journalIdx);
+	if (shouldAbort?.()) return "journal-missing";
+		pi.sendMessage(
+			{
+				customType: WORK_HANDOFF_CUSTOM_TYPE,
+				content: data.handoffBody,
+				display: false,
+				details: {
+					workRunId,
+					boundary: !lateUser,
+					...(lateUser ? { late: true } : {}),
+				},
+			},
+			{},
+		);
+		return "repaired";
+}
+
+/**
+ * Agent run aborted with a pending Approved-Plan kickoff for the CURRENT
+ * mode/workRunId: durably cancel the not-yet-dispatched kickoff BEFORE the
+ * dispatcher can pick it up. Approved artifacts (plan, todos, worktree,
+ * handoff journal) are all preserved — only the automatic start is blocked.
+ */
+async function persistAbortedKickoffCancellation(
+	ctx: DispatcherContext,
+	sessionKey: string,
+): Promise<void> {
+	const { writeKickoffCancellation, readKickoffCancellation } = await import(
+		"./kickoff-cancellation.js"
+	);
+	let state: WorkflowState;
+	try {
+		state = loadState(ctx.cwd, sessionKey);
+	} catch (e) {
+		console.error(
+			`[workflow] abort cancellation could not load state: ${e instanceof Error ? e.message : e}`,
+		);
+		return;
+	}
+	// Only a matching pending Approved-Plan kickoff is cancelled. A stale
+	// pending for a DIFFERENT run id is left untouched (no write, no noise).
+	if (
+		state.mode !== "work" ||
+		!state.pendingWorkKickoff ||
+		!state.workRunId ||
+		state.pendingWorkKickoff !== state.workRunId
+	) {
+		return;
+	}
+	const workRunId = state.workRunId;
+	const already = readKickoffCancellation(ctx.cwd, sessionKey, workRunId);
+	if (already.state === "cancelled") {
+		// Idempotent re-cancel: no duplicate write, no duplicate notice.
+		return;
+	}
+	const res = writeKickoffCancellation(ctx.cwd, sessionKey, workRunId);
+	if (res.ok) {
+		console.warn(
+			`[workflow] run aborted — pending Work kickoff for run ${workRunId.slice(-8)} cancelled. ` +
+				"批准成果（计划、todos、worktree、handoff）全部保留；不会自动开工。继续实现请直接发新消息。",
+		);
+		return;
+	}
+	// Durable persistence FAILED: block the kickoff for this process and say
+	// so. A restart has no evidence either — this is the honest degradation,
+	// never a silent "probably cancelled".
+	_kickoffSuppressLocal.add(suppressionKey(sessionKey, workRunId));
+	console.error(
+		`[workflow] run aborted — cancellation for run ${workRunId.slice(-8)} could NOT be persisted (${res.error}). ` +
+			"本进程内已阻止自动开工；存储故障下重启后无法保证，请检查 .pi/workflow 目录权限后手动处理。",
+	);
 }
 
 /**
  * Core dispatcher logic, callable from both agent_settled and session_start
  * resume. Implements the full locked-section protocol:
- * claim lock → reload state → reload branch → recheck idle/pending →
- * compute decision → side effect → release lock.
+ * mutex claim → cross-process lock (diagnosable, bounded busy retry) →
+ * reload state/branch → recheck idle/pending → durable cancellation gate →
+ * decision → send-precondition re-check (state + marker, no await between
+ * read and send) → side effect → release.
  */
 export async function runPendingWorkDispatcher(
 	pi: ExtensionAPI,
-	ctx: any,
+	ctx: DispatcherContext,
 	getAgentDir: () => string,
+	opts: { fromDrain?: boolean; shouldAbort?: () => boolean } = {},
 ): Promise<void> {
 	const sessionKey = ctxSessionKey(ctx);
+	// EVERY entry gets a lifecycle signal: the caller's callback (drain
+	// generation) merged with this process's shutdown flag for the session.
+	// An omitted shouldAbort (session_start resume) is therefore protected
+	// against shutdown-mid-pass side effects exactly like explicit callers.
+	const callerShouldAbort = opts.shouldAbort;
+	const shouldAbort = (): boolean =>
+		_shutDownSessions.has(sessionKey) || (callerShouldAbort?.() ?? false);
 
-	// Fast pre-check before acquiring lock.
-	if (!ctx.isIdle?.() || ctx.hasPendingMessages?.()) return;
+	// Fast pre-check before acquiring lock. A cancelled pending must be
+	// cleanable even while the runtime is busy: run the lock-free cancellation
+	// cleanup BEFORE the ordinary idle/pending-message fast return. A
+	// NON-cancelled pending schedules one drain pass so the kickoff dispatches
+	// when the runtime frees up (drains never re-schedule themselves).
+	if (!ctx.isIdle?.() || ctx.hasPendingMessages?.()) {
+		await cleanupCancelledPendingIfAny(pi, ctx, sessionKey, shouldAbort);
+		// The cleanup awaits file I/O; a shutdown during that await must also
+		// stop the follow-up drain (scheduleCancellationDrainIfNeeded would
+		// otherwise capture the bumped generation as a fresh, valid drain).
+		if (shouldAbort?.()) return;
+		scheduleCancellationDrainIfNeeded(pi, ctx, getAgentDir, sessionKey);
+		return;
+	}
 
-	// In-process mutex.
-	if (_dispatcherInFlight.has(sessionKey)) return;
+	// In-process mutex. Drains never re-schedule another drain (bounded);
+	// a non-drain caller schedules exactly one compensating pass.
+	if (_dispatcherInFlight.has(sessionKey)) {
+		if (!opts.fromDrain) {
+			scheduleCancellationDrainIfNeeded(pi, ctx, getAgentDir, sessionKey);
+		}
+		return;
+	}
 	_dispatcherInFlight.add(sessionKey);
 
 	try {
-		// Cross-process advisory lock.
-		if (!acquireDispatcherLock(ctx.cwd, sessionKey)) return;
+		// Lifecycle check on entry: a shutdown between the drain's last
+		// generation check and this pass stops it before any side effect. The
+		// post-await points (dynamic imports below, repair, send port) each
+		// re-check via shouldAbort/cancelled.
+		if (shouldAbort?.()) return;
+
+		// Cross-process advisory lock: diagnosable outcomes. busy retries are
+		// bounded; on error report and keep the marker/pending for a later pass.
+		const lock = acquireDispatcherLockWithRetry(ctx.cwd, sessionKey);
+		if (lock.outcome === "error") {
+			console.error(
+				`[workflow] pending work dispatcher: lock acquire failed (${lock.reason}); pending kickoff left untouched for a later pass.`,
+			);
+			return;
+		}
+		if (lock.outcome === "busy") {
+			console.warn(
+				`[workflow] pending work dispatcher: lock busy (${lock.reason}); the holder's cleanup-before-idle-gate pass handles the cancelled pending.`,
+			);
+			return;
+		}
 
 		try {
 			// Locked section: reload everything and recheck.
@@ -492,18 +858,91 @@ export async function runPendingWorkDispatcher(
 
 			const branch = getSessionBranch(ctx);
 
-			const { computeDispatcherDecision, executeDispatcherDecision } =
-				await import("./work-context.js");
+			const {
+				computeDispatcherDecision,
+				executeDispatcherDecision,
+				checkKickoffCancellation,
+			} = await import("./work-context.js");
+			const { readKickoffCancellation } = await import(
+				"./kickoff-cancellation.js"
+			);
+
+			// Durable cancellation gate FIRST: a cancelled run never reaches the
+			// send path. The pending entry is cleaned inside the lock (below).
+			const cancel = checkKickoffCancellation({
+				loadState: () => loadState(ctx.cwd, sessionKey),
+				readCancellation: (runId: string) =>
+					readKickoffCancellation(ctx.cwd, sessionKey, runId),
+			});
+
+			// Process-local suppression intent (only set when persisting the
+			// marker failed): suppress even though the disk marker is absent.
+			if (
+				cancel.status === "not-cancelled" &&
+				state.mode === "work" &&
+				state.pendingWorkKickoff &&
+				state.pendingWorkKickoff === state.workRunId &&
+				_kickoffSuppressLocal.has(suppressionKey(sessionKey, state.workRunId!))
+			) {
+				console.error(
+					`[workflow] pending work kickoff suppressed: cancellation for run ${state.workRunId?.slice(-8)} exists in-process but could not be persisted; storage failure reported earlier.`,
+				);
+				return;
+			}
+
+			if (cancel.status === "error") {
+				console.error(
+					`[workflow] pending work kickoff suppressed: cancellation marker unreadable for run ${cancel.workRunId.slice(-8)} (${cancel.error}); fail-closed.`,
+				);
+				return;
+			}
+
+			if (cancel.status === "cancelled") {
+				if (shouldAbort?.()) return;
+				// Cancelled: repair the handoff FIRST (same late-user rules as the
+				// dispatcher) so the next user message gets boundary-isolated
+				// context instead of the pre-approval history, THEN clear ONLY the
+				// matching pending. Approved artifacts all stay.
+				const repair = await repairHandoffForCancelledRun(
+					pi,
+					ctx,
+					cancel.workRunId,
+					shouldAbort,
+				);
+				if (shouldAbort?.()) return;
+				const s = loadState(ctx.cwd, sessionKey);
+				if (s.pendingWorkKickoff === cancel.workRunId) {
+					saveState(ctx.cwd, sessionKey, {
+						...s,
+						pendingWorkKickoff: undefined,
+					});
+				}
+				if (repair === "repaired") {
+					console.warn(
+						`[workflow] cancelled kickoff for run ${cancel.workRunId.slice(-8)}: handoff marker/snapshot repaired; pending cleared. 批准成果保留，继续实现请直接发新消息。`,
+					);
+				} else if (repair === "journal-missing") {
+					console.error(
+						`[workflow] cancelled kickoff for run ${cancel.workRunId.slice(-8)}: approval journal unrecoverable; pending cleared WITHOUT handoff repair. 下一条用户消息将走 recovery warning（fail-open）；禁止虚构上下文。`,
+					);
+				}
+				// repair === "no-op" (marker already visible): silent.
+				return;
+			}
 
 			const decision = computeDispatcherDecision(state, branch);
 			if (decision.action === "skip") return;
 
-			// Build ports bound to this session.
+			// Build ports bound to this session. Every kickoff-capable port path
+			// re-reads state + the shared marker immediately before sending.
 			const ports = {
+				shouldAbort: shouldAbort,
 				loadState: () => loadState(ctx.cwd, sessionKey),
 				getBranch: () => getSessionBranch(ctx),
 				isIdle: () => ctx.isIdle?.() ?? false,
 				hasPendingMessages: () => ctx.hasPendingMessages?.() ?? false,
+				readCancellation: (runId: string) =>
+					readKickoffCancellation(ctx.cwd, sessionKey, runId),
 				writeMarker: (handoffBody: string, workRunId: string) => {
 					pi.sendMessage(
 						{
@@ -515,11 +954,32 @@ export async function runPendingWorkDispatcher(
 						{},
 					);
 				},
-				sendKickoff: (workRunId: string) => {
+				sendKickoff: (workRunId: string): boolean => {
+					// Authoritative final check, synchronous, no await between the
+					// reads and the send: state + shared marker must still agree,
+					// otherwise the run was cancelled between the decision and here.
+					// A shutdown-mid-dispatch (shouldAbort) keeps the pending for a
+					// later recovery instead of kicking off into a dead session.
+					if (shouldAbort?.()) return false;
+					const s = loadState(ctx.cwd, sessionKey);
+					if (
+						s.mode !== "work" ||
+						s.workRunId !== workRunId ||
+						s.pendingWorkKickoff !== workRunId
+					) {
+						return false;
+					}
+					if (
+						_kickoffSuppressLocal.has(suppressionKey(sessionKey, workRunId)) ||
+						readKickoffCancellation(ctx.cwd, sessionKey, workRunId).state !== "absent"
+					) {
+						return false;
+					}
 					pi.sendUserMessage(
 						`<!-- workflow-work-kickoff:${workRunId} -->\n\n` +
 							`Plan approved — starting Approved-Plan Work. Drive execution via workflow_todo and the Final Plan.`,
 					);
+					return true;
 				},
 				clearPending: () => {
 					const s = loadState(ctx.cwd, sessionKey);
@@ -551,6 +1011,180 @@ export async function runPendingWorkDispatcher(
 	} finally {
 		_dispatcherInFlight.delete(sessionKey);
 	}
+}
+
+/**
+ * Lock-free cancellation cleanup: if the CURRENT pending matches a durable
+ * marker, repair the handoff and clear the matching pending WITHOUT taking
+ * the dispatcher mutex or the cross-process lock. Runs on the busy-runtime
+ * fast path (before the idle gate) so an aborted kickoff is cleaned even
+ * while the agent is mid-turn. Sends nothing. Errors are caught and
+ * reported — never propagated to the caller's event handler.
+ */
+async function cleanupCancelledPendingIfAny(
+	pi: ExtensionAPI,
+	ctx: DispatcherContext,
+	sessionKey: string,
+	shouldAbort?: () => boolean,
+): Promise<void> {
+	try {
+		const state = loadState(ctx.cwd, sessionKey);
+		if (
+			state.mode !== "work" ||
+			!state.pendingWorkKickoff ||
+			state.pendingWorkKickoff !== state.workRunId
+		) {
+			return;
+		}
+		const workRunId = state.workRunId!;
+		const { readKickoffCancellation } = await import("./kickoff-cancellation.js");
+		const marker = readKickoffCancellation(ctx.cwd, sessionKey, workRunId);
+		if (marker.state === "absent") return;
+		if (marker.state === "error") {
+			console.error(
+				`[workflow] cancellation cleanup skipped: marker unreadable for run ${workRunId.slice(-8)} (${marker.error}); pending kept for a later pass.`,
+			);
+			return;
+		}
+
+		// Repair + state write run INSIDE the shared serialization: the
+		// in-process mutex AND the cross-process advisory lock. Same-process
+		// dispatcher holds the mutex → it handles the cleanup itself. Another
+		// process holds the file lock → its cleanup path handles it. No lock →
+		// proceed under both (repair and saveState inside the locked section).
+		if (_dispatcherInFlight.has(sessionKey)) return;
+		_dispatcherInFlight.add(sessionKey);
+		try {
+			const lock = acquireDispatcherLockWithRetry(ctx.cwd, sessionKey, 1, 0);
+			if (lock.outcome !== "acquired") {
+				// Lock busy/error: leave marker+pending; the holder (or a later
+				// pass) performs the repair under the same serialization.
+				return;
+			}
+			try {
+				// Re-check under the lock (state may have changed while waiting).
+				const s = loadState(ctx.cwd, sessionKey);
+				if (
+					s.mode !== "work" ||
+					s.pendingWorkKickoff !== workRunId ||
+					s.workRunId !== workRunId
+				) {
+					return;
+				}
+				const repair = await repairHandoffForCancelledRun(
+					pi,
+					ctx,
+					workRunId,
+					shouldAbort,
+				);
+				if (shouldAbort?.()) {
+					// Shutdown mid-cleanup: keep BOTH marker and pending so the
+					// next real lifecycle event redoes the cleanup safely.
+					return;
+				}
+				const s2 = loadState(ctx.cwd, sessionKey);
+				if (s2.pendingWorkKickoff === workRunId) {
+					saveState(ctx.cwd, sessionKey, {
+						...s2,
+						pendingWorkKickoff: undefined,
+					});
+				}
+				if (repair === "repaired") {
+					console.warn(
+						`[workflow] cancelled kickoff for run ${workRunId.slice(-8)} cleaned (handoff repaired, pending cleared).`,
+					);
+				} else if (repair === "journal-missing") {
+					console.error(
+						`[workflow] cancelled kickoff for run ${workRunId.slice(-8)}: approval journal unrecoverable; pending cleared WITHOUT handoff repair. 下一条用户消息将走 recovery warning（fail-open）。`,
+					);
+				}
+			} finally {
+				releaseDispatcherLock(ctx.cwd, sessionKey);
+			}
+		} finally {
+			_dispatcherInFlight.delete(sessionKey);
+		}
+	} catch (err) {
+		console.error(
+			`[workflow] cancellation cleanup failed (pending kept for a later pass): ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+}
+
+/**
+ * Schedule ONE bounded, NON-recurring drain pass after the current mutex
+ * holder finishes. The holder's own busy-path return and its `finally` both
+ * route here; the timer is cleared on session_shutdown. The drain waits for
+ * the mutex ASYNC (setTimeout, never Atomics.wait on the shared thread) and
+ * swallows its own errors (report + keep marker/pending for the next real
+ * lifecycle event). Drains never re-schedule another drain.
+ */
+function scheduleCancellationDrainIfNeeded(
+	pi: ExtensionAPI,
+	ctx: DispatcherContext,
+	getAgentDir: () => string,
+	sessionKey: string,
+): void {
+	// Only schedule when this session has a pending kickoff for the work mode
+	// (cheap state read; absent → no drain needed).
+	let state: WorkflowState;
+	try {
+		state = loadState(ctx.cwd, sessionKey);
+	} catch {
+		return;
+	}
+	if (
+		state.mode !== "work" ||
+		!state.pendingWorkKickoff ||
+		state.pendingWorkKickoff !== state.workRunId
+	) {
+		return;
+	}
+	if (_dispatcherDrainPending.has(sessionKey)) return;
+	_dispatcherDrainPending.add(sessionKey);
+	const generation = currentDrainGeneration(sessionKey);
+	const cancelled = () => currentDrainGeneration(sessionKey) !== generation;
+	const timer = setTimeout(() => {
+		_drainTimers.delete(sessionKey);
+		void (async () => {
+			try {
+				// Wait for the mutex holder ASYNC — a busy-wait here would block
+				// the holder's own continuation on this thread. The generation
+				// check after each await cancels a shutdown-mid-wait drain.
+				let waited = 0;
+				while (_dispatcherInFlight.has(sessionKey) && waited < 5000) {
+					await new Promise((r) => setTimeout(r, 100));
+					if (cancelled()) return;
+					waited += 100;
+				}
+				if (cancelled() || _dispatcherInFlight.has(sessionKey)) {
+					// Shutdown-cancelled, or holder still running after the
+					// bound (the holder's busy-path fast return schedules
+					// exactly one more).
+					return;
+				}
+				// One full dispatcher pass: cleans a cancelled pending (marker
+				// gate before any send) or dispatches a still-valid kickoff.
+				// fromDrain prevents mutex-busy re-scheduling loops; shouldAbort
+				// threads the generation so shutdown mid-dispatch stops side
+				// effects before the send.
+				if (cancelled()) return;
+				await runPendingWorkDispatcher(pi, ctx, getAgentDir, {
+					fromDrain: true,
+					shouldAbort: cancelled,
+				});
+			} catch (err) {
+				console.error(
+					`[workflow] drain pass failed (marker/pending kept): ${err instanceof Error ? err.message : String(err)}`,
+				);
+			} finally {
+				if (currentDrainGeneration(sessionKey) === generation) {
+					_dispatcherDrainPending.delete(sessionKey);
+				}
+			}
+		})();
+	}, 150);
+	_drainTimers.set(sessionKey, timer);
 }
 
 export function registerToolCallGuard(

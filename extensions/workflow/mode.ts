@@ -7,6 +7,7 @@ import {
 	cloneModelWithContextWindow,
 	loadDiskCompactionSnapshot,
 	prepareModelWithContextWindow,
+	targetModelIdentity,
 } from "./model-context.js";
 import { assertNever, isWorkflowActive, modeLabel, modeStatusLabel } from "./helpers.js";
 import { isAliasOwned, isAliasRegistered, UPDATE_PLAN_TOOL_NAME } from "./todo-compat.js";
@@ -256,10 +257,13 @@ export async function setRole(
 		let modelToApply: Model<any> = model;
 		let compactionForError: Parameters<typeof buildContextWindowApplyError>[0]["compaction"];
 		if (spec.contextWindow !== undefined) {
+			// Resolve the compaction snapshot FOR the registry model that would
+			// carry the override — per-model compaction.modelOverrides apply.
 			const compactionRes = loadDiskCompactionSnapshot(
 				ctx.cwd,
 				getAgentDir(),
 				ctxProjectTrusted(ctx),
+				targetModelIdentity(spec.provider, model.id),
 			);
 			if (!compactionRes.ok) {
 				ctx.ui.notify(
@@ -558,6 +562,7 @@ async function reconcileContextWindow(
 			ctx.cwd,
 			getAgentDir(),
 			ctxProjectTrusted(ctx),
+			targetModelIdentity(spec.provider, registryModel.id),
 		);
 		if (!compactionRes.ok) {
 			ctx.ui.notify(

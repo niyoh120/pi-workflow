@@ -6,6 +6,15 @@ import { assertNever } from "./helpers.js";
 // density for most models); user-visible output language is pinned explicitly
 // inside the prompts. UI strings (ctx.ui.notify, settings, status) stay Chinese.
 
+/**
+ * Dedicated structured system-prompt section for the workflow rules (COMMON +
+ * Mode Prompt + worktree notice). Written by before_agent_start into
+ * `event.systemPromptOptions.sections` (Pi 1.4 structured prompt) so Pi's own
+ * sections keep their identity and provider-side caching; section names must
+ * match /^[a-z][a-z0-9_-]*$/.
+ */
+export const WORKFLOW_PROMPT_SECTION = "workflow_mode";
+
 export const EXPLORE_PROMPT = `
 # Explore Mode
 

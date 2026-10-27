@@ -2,6 +2,8 @@
 
 Lightweight software development workflow extension for pi-coding-agent: plan, optional independent plan-review agent, on-demand unified review (independent reviewer + optional delegated code review), runtime QA (an independent agent that actually runs the affected functionality), user-triggered branch integration (Merge Mode), and commit orchestration.
 
+**Verified baseline: Pi 1.4.0** (`@earendil-works/pi-*` 1.4.0, Node `>=22.19.0`). The host `peerDependencies` stay `*` for compatibility; the dev lock pins the local resolution to the 1.4 line. Pi-version-specific behavior in use: model-aware compaction settings (`SettingsManager.getCompactionSettings(model)`, `compaction.modelOverrides`), structured system-prompt sections (`before_agent_start` → `systemPromptOptions.sections`, with a documented fallback when an earlier extension forces a complete prompt), and the transcript-shaped system message (`content` + named `sections`) that providers fold into the request prompt.
+
 **Zero external Pi extension dependencies.** Plan review and the unified Review run as fresh, in-memory child AgentSessions that independently re-validate the saved plan and review the implementation. When delegated code review is enabled, the Review runs the local `ocr delegate` commands (zero LLM) to build a review spec — reviewable files plus resolved rules — and injects it into the reviewer task, which then produces the code-level findings itself. No `@tintinweb/pi-subagents` required.
 
 ## Installation
@@ -31,8 +33,9 @@ idle → explore → plan → work → [/workflow:review loop → /workflow:qa] 
 ```
 
 - **Tool ownership**: pi-workflow manages only its own `workflow_*` tools. Built-in tools and other extension tools preserve their active/inactive state across mode changes; mode permissions apply to every active tool through prompts and stable path guards. There is no special auto-activation of `ask_user_question`.
-- **Mode runtime**: workflow applies the configured model role only on explicit mode transitions (slash commands, `/workflow:enable` first entry, `idle→explore` promotion) and `/workflow:settings` saves. Session restore (`/reload`, `/resume`) and per-turn startup preserve Pi's active session model/thinking (chosen via `/model`, Ctrl+P, or Shift+Tab), so manual selections survive within the current workflow mode; only workflow tools and the status line are reconciled. `before_agent_start` appends the stable `COMMON_PROMPT` to the system prompt and only falls back to the role config when no active model is present.
+- **Mode runtime**: workflow applies the configured model role only on explicit mode transitions (slash commands, `/workflow:enable` first entry, `idle→explore` promotion) and `/workflow:settings` saves. Session restore (`/reload`, `/resume`) and per-turn startup preserve Pi's active session model/thinking (chosen via `/model`, Ctrl+P, or Shift+Tab), so manual selections survive within the current workflow mode; only workflow tools and the status line are reconciled. `before_agent_start` writes the stable `COMMON_PROMPT` + mode prompt into a dedicated structured system-prompt **section** (Pi ≥ 1.4 `systemPromptOptions.sections["workflow_mode"]`) and only falls back to the role config when no active model is present.
 - **Mode context**: the current mode prompt and worktree notice are injected into the stable system prompt (via `before_agent_start`), and the Approved-Plan Work handoff is isolated via a canonical marker so Plan→Work transitions within the same agent run always see the latest mode. Dynamic state (todos, run IDs) comes from tool results, not the system prompt. On top of that, every user turn gets a short hidden **mode reminder** (`workflow-mode-reminder` custom message) appended right after the user message, restating the current mode and its one-line boundary — earlier turns from other modes stay readable as context while the latest reminder and the system Mode Prompt define current permissions. Reminders are deterministic and append-only (one per user turn; tool-loop continuations reuse the same message, and the provider cache breakpoint keeps moving forward), so prefix caching is preserved; once workflow is disabled, the context projection strips them so stale mode constraints stop applying (the session transcript keeps the originals). Guard rejections name the effective mode plus a scope hint so a stale-mode tool attempt re-anchors instead of looping.
+- **Structured system prompt (Pi ≥ 1.4)**: the workflow rules live in their own named section (`workflow_mode`) inside Pi's sectioned system prompt, so Pi's own sections keep their identity and provider-side caching, and the renderer wraps each section in its tag. Section contents are re-set every turn start (COMMON + current mode + worktree notice), so mode switches take effect immediately. If an earlier extension returned a complete `systemPrompt` override (`forceSystemPrompt`), Pi ignores sections that turn; workflow detects this and appends its body to the forced text instead — recorded composition boundary: the forced prompt wins, workflow rules ride after it.
 - **Explore Mode**: Default landing after `/workflow:enable`. Read-only codebase exploration and Q&A (same permissions as Plan Mode). Explore exposes no workflow tools; a preserved plan is read in Plan Mode. Use `/workflow:plan` when ready to design.
 - **Plan Review** (optional): Model-initiated `workflow_plan_review` tool call — the plan agent may invoke it after saving a plan. Spawns a fresh, isolated in-memory AgentSession that inherits the parent Plan session's information-tool surface (minus workflow tools), independently explores the repository and active external tools, and returns structured Critical/Important/Minor/Summary findings grounded in repository evidence plus a transient PASS/FAIL evaluation signal submitted through the reviewer's own terminating `review_submit` tool call — the report and the submit call share the same final assistant message, and a missing submission resolves fail-closed to FAIL (never gates approval). Not a separate mode; runs within Plan Mode under a single 30-minute total timeout. Repeated calls reuse cached rounds for identical inputs and run incremental re-reviews focused on changed plan sections / new confirmed decisions; the planner may answer disputed findings via an optional UNTRUSTED `feedback` argument.
 - **Unified Review** (on-demand, configurable): `/workflow:review` (or a direct `workflow_review` call) in Work Mode launches a fresh, isolated in-memory AgentSession that independently reviews the implementation against the requirements and approved plan/todos (Approved Work) or current todos (Direct Work) by exploring the actual checkout/worktree itself — it does NOT receive the Work agent's execution summary, diffs, or test claims. The single explicit exception is an optional `feedback` argument the Work agent may pass to respond to a prior round's disputed findings — it is injected as a clearly-labeled UNTRUSTED section that the reviewer must independently verify against the repository before it carries any weight. When `codeReview.enabled` is true, the local `ocr delegate preview` + `ocr delegate rule` commands (zero LLM) run first and the resulting spec — reviewable files plus resolved rules — is injected into the reviewer task; the reviewer reads the diff and full-file context and reports each code-level defect it finds as an F-numbered Code Rule Findings item with file:line evidence. It emits a coverage matrix, correctness/verification findings, code rule findings, and submits the final verdict through its own terminating `review_submit` tool call (report and submit share the same final assistant message; a missing submission resolves fail-closed to FAIL). The verdict is **transient**: it only signals whether this on-demand review loop can end — it is never written to workflow state and never gates `/workflow:commit`. Disable via `review.enabled: false` to hide `/workflow:review` and the tool; set `codeReview.enabled: false` to review without the delegated code review spec.
@@ -162,8 +165,17 @@ Rules:
 - The value must be a decimal integer (JSON `number`) that is **strictly less
   than the Pi default window** for the role's model (equality is rejected) and
   **greater than the Pi compaction reserve** (`reserveTokens + keepRecentTokens`,
-  defaults `16384 + 20000`). The acceptable range is shown in
+  built-in defaults `16384 + 20000`). The acceptable range is shown in
   `/workflow:settings` and in the apply error message.
+- **Model-aware compaction resolution (Pi ≥ 1.4)**: the lower bound is resolved
+  FOR the target model, not globally. Every snapshot call passes the role's
+  effective `provider/id` to `SettingsManager.getCompactionSettings(model)`, so
+  Pi's `compaction.modelOverrides["provider/model"]` apply per field (override
+  → ordinary setting → built-in default, each field independent). A per-model
+  `reserveTokens`/`keepRecentTokens` override in Pi settings therefore moves
+  the workflow window lower bound for that model only, and any change to it
+  feeds the reviewer context basis (cache-invalidating). Illegal values in
+  Pi settings surface as explicit errors (never clamped).
 - Omitting the field (or clearing it in `/workflow:settings`) inherits the
   Pi model's own window. Invalid values are never silently clamped or dropped:
   they fail the role apply / settings save with an explicit error, and the
@@ -200,6 +212,10 @@ Rules:
   Changing any of them invalidates short-circuit reuse; an invalid configured
   window errors before any cached verdict is returned. Existing caches
   invalidate once on upgrade.
+- **Pi 1.4 summary semantics**: `compaction.reserveTokens` only controls WHEN
+  compaction starts; the summary output cap is Pi-managed (summaries use the
+  model's output limit), so a long reasoning turn never makes compaction fail
+  on its own. The workflow lower bound remains a floor, not a fit guarantee.
 
 `/workflow:status` shows `configured contextWindow`, the `pi baseline window`,
 the `active runtime contextWindow`, and the workflow window ownership state to
@@ -488,6 +504,25 @@ Runtime workflow state is scoped to the current Pi session:
 The session key is derived by hashing the Pi session ID or session file path — raw IDs are never used directly as path segments.
 
 This means two Pi processes in the same project directory can run independent workflow state machines without overwriting each other. Plan files remain in the shared `.pi/workflow/plan/` directory with randomized names.
+
+### Kickoff cancellation markers
+
+When an agent run ends ABORTED (Escape) while an Approved-Plan Work kickoff was still pending, the extension writes a durable sidecar marker before anything else:
+
+```
+.pi/workflow/sessions/<safeSessionKey>/kickoff-cancel-<sha256(workRunId)[:16]>.json
+```
+
+Properties:
+
+- **Shared-disk semantics**: every send path (agent_settled dispatcher, session_start resume) re-reads the marker directly from disk immediately before sending. A stale Pi instance holding an old in-memory session branch therefore observes a cancellation written by another instance — the branch index is used only for handoff/approval evidence.
+- **Write-once, idempotent**: cancelling the same run again is a no-op; markers are never deleted by the extension. New work runs use a fresh `workRunId` (fresh hash), so old markers never block new runs; `/workflow:reset` keeps them to protect surviving old instances.
+- **Fail-closed reads**: a corrupt marker, an unknown version, or an id mismatch suppresses the automatic kickoff with an explicit error — an unreadable suppression never degrades into "probably fine, send it".
+- **Explicit write failures**: if the marker cannot be persisted (permissions, disk), the current process blocks the kickoff via a session-local intent and reports that the cancellation is not durable — a restart has no evidence either.
+- **Approved artifacts preserved**: cancellation clears only the matching `pendingWorkKickoff` field; the plan file, approved todos, worktree, and handoff journal all stay. Resume does not auto-start; the user's next message continues through the normal recovery paths (canonical marker repair, or the fail-open recovery warning when the journal is unrecoverable).
+- **Known limits**: the atomic marker closes the long-lived stale-branch race; the tiny cross-process window between the final marker read and the actual send remains a non-exactly-once boundary, as before.
+
+The dispatcher's advisory lock (`state.json.dispatch.lock`) reports diagnosable outcomes: `busy` (live holder — bounded short retry, then one scheduled drain pass after the holder finishes) and `error` (permission/IO — reported; marker and pending stay intact for a later pass). Drain timers are released on `session_shutdown`.
 
 Config files (`.pi/workflow/config.json`, `~/.pi/agent/workflow/config.json`) are directory/global scoped and shared intentionally. Session-scoped config overrides (set via `/workflow:settings` Session scope) live inside the session `state.json` as a `sessionConfig` field and are never shared across sessions.
 

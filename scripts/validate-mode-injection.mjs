@@ -1263,6 +1263,11 @@ console.log("\n=== R2: context projections + provider payload ===");
 		provider: "anthropic",
 		id: "claude-test",
 		name: "claude-test",
+		// 1.4 public model contract: baseUrl feeds the request URL and `cost`
+		// feeds post-stream calculateCost (model.cost.tiers lookup); both are
+		// required for the captured request to complete a clean stream.
+		baseUrl: "https://api.anthropic.com",
+		cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
 		contextWindow: 200000,
 		maxTokens: 4096,
 		reasoning: false,
@@ -1291,17 +1296,23 @@ console.log("\n=== R2: context projections + provider payload ===");
 		],
 		tools: [],
 	};
+	const r2StreamErrors = [];
 	for (const c of [ctxA, ctxB]) {
 		try {
 			const events = stream(model, c, { apiKey: "test-key", fetch: fakeFetch, maxTokens: 64 });
 			for await (const ev of events) {
+				if (ev.type === "error") r2StreamErrors.push(JSON.stringify(ev).slice(0, 200));
 				if (ev.type === "done" || ev.type === "error") break;
 			}
-		} catch {
-			// payload already captured; stream errors must not fail the group
+		} catch (err) {
+			r2StreamErrors.push(err instanceof Error ? err.message : String(err));
 		}
 	}
 	assert(captured.length === 2, "two provider requests captured (zero network)");
+	assert(
+		r2StreamErrors.length === 0,
+		`R2 streams complete without errors${r2StreamErrors.length ? `: ${r2StreamErrors.join("; ")}` : ""}`,
+	);
 	if (captured.length === 2) {
 		const aMsgs = captured[0].body.messages;
 		const bMsgs = captured[1].body.messages;
@@ -1332,6 +1343,219 @@ console.log("\n=== R2: context projections + provider payload ===");
 				reminderBlockB &&
 				!reminderBlockB.cache_control,
 			"breakpoint moves forward off the reminder as the conversation grows",
+		);
+	}
+}
+
+// ── R2b: structured system prompt (Pi 1.4 sections) + provider payload ───
+console.log("\n=== R2b: structured prompt sections ===");
+{
+	const { buildSystemPromptSections } = await import(
+		// Direct file URL: the package root does not export the system-prompt
+		// builder; the render check pins to the installed 1.4 build.
+		(new URL("file://" + path.resolve(process.cwd(), "node_modules/@earendil-works/pi-coding-agent/dist/core/system-prompt.js"))).href
+	);
+	const cmdMod = await loadWorkflowModule("commands.ts");
+	const stateMod = await loadWorkflowModule("state.ts");
+	const defaultsMod = await loadWorkflowModule("defaults.ts");
+	const promptsMod = await loadWorkflowModule("prompts.ts");
+
+	const { cwd, agentDir } = makeTmpProject(".mode-injection-run2b-");
+	const pi = makeFakePi();
+	cmdMod.registerBeforeAgentStart(pi, () => agentDir);
+	const basHandler = pi.handlers.get("before_agent_start")[0];
+	const ctx = makeFakeCtx(cwd);
+	const sessionKey = stateMod.getSessionKey(ctx);
+	stateMod.saveState(cwd, sessionKey, {
+		...defaultsMod.DEFAULT_STATE,
+		workflowEnabled: true,
+		mode: "work",
+	});
+
+	// Plain path: handler writes ONLY its own section; Pi's sections survive.
+	const sections = { tools: "<tools>\n- read\n</tools>", rules: "<rules>\n- be brief\n</rules>" };
+	const res = await basHandler(
+		{ systemPrompt: "BASE", systemPromptOptions: { sections } },
+		ctx,
+	);
+	const sectionKeys = Object.keys(sections);
+	assert(
+		res.systemPrompt === undefined,
+		"plain path returns no systemPrompt override (sections carry the rules)",
+	);
+	assert(
+		sectionKeys.includes("workflow_mode") && sectionKeys.length === 3,
+		"handler adds exactly its own workflow_mode section, preserving other sections",
+	);
+	assert(
+		sections.workflow_mode.includes("Workflow Common Rules") &&
+			sections.workflow_mode.includes("Work Mode"),
+		"workflow_mode section carries COMMON + mode prompt",
+	);
+	assert(
+		sections.workflow_mode.startsWith(promptsMod.COMMON_PROMPT),
+		"workflow_mode section starts with COMMON_PROMPT verbatim",
+	);
+
+	// Rendered prompt: Pi's builder wraps each section in its tag; the workflow
+	// section reaches the model text exactly once, and other sections survive.
+	const rendered = buildSystemPromptSections({
+		cwd,
+		sections: { ...sections },
+	});
+	const wfTag = rendered["workflow_mode"];
+	assert(
+		typeof wfTag === "string" && wfTag.startsWith("<workflow_mode>") && wfTag.includes("Work Mode"),
+		"1.4 renderer wraps the workflow section in its tag",
+	);
+	assert(
+		(rendered["rules"] ?? "").includes("be brief") && (rendered["tools"] ?? "").includes("read"),
+		"other sections survive the render unchanged",
+	);
+	const wfCount = Object.values(rendered).join("\n").split("# Workflow Common Rules").length - 1;
+	assert(wfCount === 1, "workflow rules appear exactly once in the rendered prompt");
+
+	// Forced-prompt composition boundary: a leading extension's whole-prompt
+	// override wins; the handler appends its body to the forced text.
+	const forcedSections = {};
+	const resForced = await basHandler(
+		{
+			systemPrompt: "FORCED",
+			systemPromptOptions: { sections: forcedSections, forceSystemPrompt: "FORCED" },
+		},
+		ctx,
+	);
+	assert(
+		typeof resForced.systemPrompt === "string" &&
+			resForced.systemPrompt.startsWith("FORCED\n\n") &&
+			resForced.systemPrompt.includes("Workflow Common Rules"),
+		"forced prompt: handler appends the workflow body after the forced text",
+	);
+
+	// Provider payload: the rendered structured prompt is sent once as the
+	// system role and stays prefix-stable as the conversation grows.
+	const { stream } = await import("@earendil-works/pi-ai/api/anthropic-messages");
+	const sse = [
+		"event: message_start",
+		'data: {"type":"message_start","message":{"id":"msg_t","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}',
+		"",
+		"event: content_block_start",
+		'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+		"",
+		"event: content_block_delta",
+		'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}',
+		"",
+		"event: content_block_stop",
+		'data: {"type":"content_block_stop","index":0}',
+		"",
+		"event: message_delta",
+		'data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}',
+		"",
+		"event: message_stop",
+		'data: {"type":"message_stop"}',
+		"",
+	].join("\n");
+	const captured = [];
+	const fakeFetch = async (url, init) => {
+		let raw = "{}";
+		if (typeof init?.body === "string") raw = init.body;
+		else if (typeof init?.body?.text === "function") raw = await init.body.text();
+		captured.push({ url: String(url), body: JSON.parse(raw) });
+		return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+	};
+	const model = {
+		api: "anthropic-messages",
+		provider: "anthropic",
+		id: "claude-test",
+		name: "claude-test",
+		baseUrl: "https://api.anthropic.com",
+		cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+		contextWindow: 200000,
+		maxTokens: 4096,
+		reasoning: false,
+		input: ["text"],
+	};
+	const userMsg = { role: "user", content: [{ type: "text", text: "用户问题" }], timestamp: 1 };
+	// 1.4 transcript shape: the leading system message carries base content plus
+	// named sections; providers fold them via getSystemMessageText.
+	const wfSectionValue = sections.workflow_mode;
+	const leadingSys = () => ({
+		role: "system",
+		content: "BASE",
+		sections: { workflow_mode: wfSectionValue, tools: sections.tools, rules: sections.rules },
+		timestamp: 0,
+	});
+	const ctxA = { messages: [leadingSys(), userMsg], tools: [] };
+	const ctxB = {
+		messages: [
+			leadingSys(),
+			...ctxA.messages.slice(1),
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "t9", name: "read", arguments: { path: "a" } }],
+				timestamp: 3,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "t9",
+				toolName: "read",
+				content: [{ type: "text", text: "out" }],
+				isError: false,
+				timestamp: 4,
+			},
+		],
+		tools: [],
+	};
+	const streamErrors = [];
+	for (const c of [ctxA, ctxB]) {
+		try {
+			const events = stream(model, c, { apiKey: "test-key", fetch: fakeFetch, maxTokens: 64 });
+			for await (const ev of events) {
+				if (ev.type === "error") streamErrors.push(JSON.stringify(ev).slice(0, 200));
+				if (ev.type === "done" || ev.type === "error") break;
+			}
+		} catch (err) {
+			streamErrors.push(err instanceof Error ? err.message : String(err));
+		}
+	}
+	assert(captured.length === 2, "structured-prompt: two provider requests captured (zero network)");
+	assert(
+		streamErrors.length === 0,
+		`structured-prompt streams complete without errors${streamErrors.length ? `: ${streamErrors.join("; ")}` : ""}`,
+	);
+	if (captured.length === 2) {
+		// 1.4 sends the folded prompt as a system text-block array with the
+		// cache_control breakpoint on it.
+		const sysBlocks = captured[0].body.system;
+		const sysText = (b) => {
+			if (Array.isArray(b)) return b.map((x) => x?.text ?? "").join("\n");
+			if (typeof b === "string") return b;
+			return "";
+		};
+		assert(
+			Array.isArray(sysBlocks) && sysText(sysBlocks).includes("BASE") &&
+				sysText(sysBlocks).includes("Workflow Common Rules"),
+			"folded system text contains base prompt and the workflow section",
+		);
+		assert(
+			sysBlocks[sysBlocks.length - 1]?.cache_control?.type === "ephemeral",
+			"cache_control breakpoint sits on the system block",
+		);
+		assert(
+			JSON.stringify(captured[1].body.system) === JSON.stringify(sysBlocks),
+			"system prompt is byte-identical across turns (prefix cacheable)",
+		);
+		assert(
+			// Compare with SDK-managed breakpoint metadata normalized away — the
+			// cache_control breakpoint moves forward as the conversation grows
+			// (same normalization as the R2 payload group).
+			((ma, mb) =>
+				JSON.stringify(ma).replace(/,"cache_control":\{[^}]*\}/g, "") ===
+				JSON.stringify(mb.slice(0, ma.length)).replace(/,"cache_control":\{[^}]*\}/g, ""))(
+				captured[0].body.messages,
+				captured[1].body.messages,
+			),
+			"message prefix stays verbatim across turns (append-only)",
 		);
 	}
 }

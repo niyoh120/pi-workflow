@@ -786,6 +786,122 @@ console.log("\n=== 2e: pi-ai request maxTokens clamp ===");
 	assert(clampShrunk < clampFull, "clampMaxTokensToContext shrinks with the window (output-budget side effect)");
 }
 
+// ── Part 2b: model-aware compaction snapshot (Pi 1.4 modelOverrides) ────
+
+console.log("\n=== 2b: model-targeted compaction resolution ===");
+{
+	const { SettingsManager } = await import("@earendil-works/pi-coding-agent");
+	const mcMod = await loadWorkflowModule("model-context.ts");
+
+	// Field-independent inheritance: model override → ordinary setting → default,
+	// resolved per target model. Defaults here mirror Pi 1.4's built-ins
+	// (reserveTokens 16384, keepRecentTokens 20000).
+	const sm = SettingsManager.inMemory({
+		compaction: {
+			enabled: true,
+			reserveTokens: 36_384,
+			modelOverrides: {
+				"anthropic/claude-opus-4-5": { reserveTokens: 70_000 },
+				"openai/gpt-5.1": { keepRecentTokens: 5_000 },
+			},
+		},
+	});
+
+	const target = (provider, id) => mcMod.targetModelIdentity(provider, id);
+
+	// Identity is REQUIRED: the snapshot resolves per target model so per-model
+	// compaction.modelOverrides always apply. A model with no override gets the
+	// ordinary setting + built-in default.
+	const plainModel = mcMod.readCompactionSnapshot(sm, target("zai", "glm-no-override"));
+	assert(
+		plainModel.reserveTokens === 36_384 && plainModel.keepRecentTokens === 20_000,
+		"model without override: ordinary setting + built-in default",
+	);
+
+	const opus = mcMod.readCompactionSnapshot(sm, target("anthropic", "claude-opus-4-5"));
+	assert(
+		opus.reserveTokens === 70_000 && opus.keepRecentTokens === 20_000,
+		"model override field applies per field; the other field inherits the ordinary default",
+	);
+
+	const gpt = mcMod.readCompactionSnapshot(sm, target("openai", "gpt-5.1"));
+	assert(
+		gpt.reserveTokens === 36_384 && gpt.keepRecentTokens === 5_000,
+		"keepRecent override applies independently of the ordinary reserveTokens",
+	);
+
+	const other = mcMod.readCompactionSnapshot(sm, target("google", "gemini-test"));
+	assert(
+		other.reserveTokens === 36_384 && other.keepRecentTokens === 20_000,
+		"unrelated model identity ignores all modelOverrides (ordinary setting + default)",
+	);
+
+	// Illegal values surface as explicit errors (never clamped): bad ordinary
+	// setting and bad per-model override both throw from Pi's SettingsManager.
+	const badOrdinary = SettingsManager.inMemory({
+		compaction: { reserveTokens: -1 },
+	});
+	let ordinaryThrew = "";
+	try {
+		mcMod.readCompactionSnapshot(badOrdinary, target("anthropic", "claude-opus-4-5"));
+	} catch (e) {
+		ordinaryThrew = e instanceof Error ? e.message : String(e);
+	}
+	assert(
+		ordinaryThrew.includes("compaction.reserveTokens"),
+		"illegal ordinary reserveTokens throws the explicit Pi settings error",
+	);
+
+	const badOverride = SettingsManager.inMemory({
+		compaction: {
+			modelOverrides: { "anthropic/claude-opus-4-5": { keepRecentTokens: "x" } },
+		},
+	});
+	let overrideThrew = "";
+	try {
+		mcMod.readCompactionSnapshot(badOverride, target("anthropic", "claude-opus-4-5"));
+	} catch (e) {
+		overrideThrew = e instanceof Error ? e.message : String(e);
+	}
+	assert(
+		overrideThrew.includes('compaction.modelOverrides["anthropic/claude-opus-4-5"]'),
+		"illegal per-model override throws the explicit model-scoped error",
+	);
+
+	// Disk-snapshot path: loadDiskCompactionSnapshot forwards the identity.
+	writeFixtures({
+		cwd: path.join(harnessDir, "proj2b"),
+		agentDir: path.join(harnessDir, "agent2b"),
+		piGlobalSettings: {
+			compaction: {
+				enabled: true,
+				reserveTokens: 36_384,
+				modelOverrides: { "anthropic/claude-opus-4-5": { reserveTokens: 70_000 } },
+			},
+		},
+	});
+	const diskUntargeted = mcMod.loadDiskCompactionSnapshot(
+		path.join(harnessDir, "proj2b"),
+		path.join(harnessDir, "agent2b"),
+		true,
+		target("zai", "glm-no-override"),
+	);
+	const diskTargeted = mcMod.loadDiskCompactionSnapshot(
+		path.join(harnessDir, "proj2b"),
+		path.join(harnessDir, "agent2b"),
+		true,
+		target("anthropic", "claude-opus-4-5"),
+	);
+	assert(
+		diskUntargeted.ok && diskUntargeted.compaction.reserveTokens === 36_384,
+		"disk snapshot with an override-free model keeps ordinary defaults",
+	);
+	assert(
+		diskTargeted.ok && diskTargeted.compaction.reserveTokens === 70_000,
+		"disk snapshot forwards the target model identity (modelOverrides apply)",
+	);
+}
+
 // ── Part 3: reviewer preparation + trust-aligned SettingsManager ──────────
 
 console.log("\n=== 3: reviewer preparation + trust-aligned settings ===");

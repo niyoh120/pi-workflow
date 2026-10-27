@@ -317,55 +317,116 @@ export function saveState(
 // ── Session advisory lock ────────────────────────────────────────────────────
 
 /**
- * Acquire a per-session advisory lock for the pending-work dispatcher.
- * Uses atomic `openSync(lockPath, "wx")` to claim; writes pid for liveness
- * checks. Returns true if the lock was acquired, false if another live
- * process holds it.
- *
- * Stale locks (pid no longer alive) are cleaned up and retried once.
- * Permission/unknown errors are treated conservatively as "locked".
+ * Diagnostic result of an acquire attempt (see acquireDispatcherLockTry).
  */
-export function acquireDispatcherLock(
+export type DispatcherLockResult =
+	| { outcome: "acquired" }
+	| { outcome: "busy"; reason: string }
+	| { outcome: "error"; reason: string };
+
+/** Extract a readable message from an unknown throw value (errno-aware). */
+function errnoMessage(err: unknown): string {
+	if (err instanceof Error) return err.message;
+	if (typeof err === "object" && err !== null && "message" in err) {
+		return String((err as { message: unknown }).message);
+	}
+	return String(err);
+}
+
+/**
+ * Single acquire attempt for the per-session advisory lock guarding the
+ * pending-work dispatcher. Atomic `openSync(lockPath, "wx")` claim, pid
+ * liveness check for stale locks.
+ *
+ * Diagnosable outcomes (never silently collapsed into a boolean):
+ *  - acquired: this process holds the lock.
+ *  - busy: another LIVE process holds the lock (or an unreadable lock file
+ *    must be treated as live to be safe). Callers may retry briefly.
+ *  - error: permission/IO failure — retrying cannot help; the caller must
+ *    report and keep the cancellation marker / pending entry intact.
+ */
+export function acquireDispatcherLockTry(
 	cwd: string,
 	sessionKey: string,
-): boolean {
+): DispatcherLockResult {
 	const lockPath = sessionStatePath(cwd, sessionKey) + ".dispatch.lock";
 	const dir = path.dirname(lockPath);
-	fs.mkdirSync(dir, { recursive: true });
+	try {
+		fs.mkdirSync(dir, { recursive: true });
+	} catch (err: unknown) {
+		return { outcome: "error", reason: errnoMessage(err) };
+	}
 
-	const tryClaim = (): boolean => {
+	const claim = (): DispatcherLockResult => {
 		try {
 			const fd = fs.openSync(lockPath, "wx");
 			fs.writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
 			fs.closeSync(fd);
-			return true;
-		} catch (err: any) {
-			if (err?.code !== "EEXIST") return false; // permission/unknown → skip
+			return { outcome: "acquired" };
+		} catch (err: unknown) {
+			if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") {
+				return { outcome: "error", reason: errnoMessage(err) };
+			}
 			// Lock exists — check pid liveness.
+			let pid: number | undefined;
 			try {
 				const raw = fs.readFileSync(lockPath, "utf8");
-				const { pid } = JSON.parse(raw) as { pid?: number };
-				if (typeof pid === "number" && isPidAlive(pid)) {
-					return false; // live process holds lock
-				}
+				pid = (JSON.parse(raw) as { pid?: number }).pid;
 			} catch {
 				// Corrupt/unreadable lock — treat as live to be safe.
-				return false;
+				return { outcome: "busy", reason: "lock file unreadable; treated as live" };
+			}
+			if (typeof pid === "number" && isPidAlive(pid)) {
+				return { outcome: "busy", reason: `live process ${pid} holds the lock` };
 			}
 			// Dead pid — remove stale lock and retry once.
-			try { fs.unlinkSync(lockPath); } catch { return false; }
+			try {
+				fs.unlinkSync(lockPath);
+			} catch (err2: unknown) {
+				return { outcome: "error", reason: `stale lock unlink failed: ${errnoMessage(err2)}` };
+			}
 			try {
 				const fd = fs.openSync(lockPath, "wx");
 				fs.writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
 				fs.closeSync(fd);
-				return true;
-			} catch {
-				return false;
+				return { outcome: "acquired" };
+			} catch (err2: unknown) {
+				if ((err2 as NodeJS.ErrnoException)?.code === "EEXIST") {
+					return { outcome: "busy", reason: "stale lock reclaimed by another process" };
+				}
+				return { outcome: "error", reason: errnoMessage(err2) };
 			}
 		}
 	};
 
-	return tryClaim();
+	return claim();
+}
+
+/** Bounded retry for transient busy outcomes (default 3 tries, 50ms apart). */
+export function acquireDispatcherLockWithRetry(
+	cwd: string,
+	sessionKey: string,
+	tries = 3,
+	delayMs = 50,
+): DispatcherLockResult {
+	let last: DispatcherLockResult = { outcome: "error", reason: "not attempted" };
+	for (let i = 0; i < tries; i++) {
+		last = acquireDispatcherLockTry(cwd, sessionKey);
+		if (last.outcome !== "busy") return last;
+		if (i < tries - 1) {
+			const buf = new SharedArrayBuffer(4);
+			Atomics.wait(new Int32Array(buf), 0, 0, delayMs);
+		}
+	}
+	return last;
+}
+
+/**
+ * Legacy boolean contract for callers that only need claim/no-claim.
+ * Diagnosable failure detail is available via acquireDispatcherLockTry.
+ */
+export function acquireDispatcherLock(cwd: string, sessionKey: string): boolean {
+	return acquireDispatcherLockWithRetry(cwd, sessionKey).outcome === "acquired";
 }
 
 /** Release the per-session advisory lock. Best-effort; errors are swallowed. */

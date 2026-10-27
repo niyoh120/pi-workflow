@@ -798,7 +798,13 @@ export async function prepareReviewerModelPlan(opts: {
 	} catch {
 		settingsManager = SettingsManager.inMemory();
 	}
-	const compaction = readCompactionSnapshot(settingsManager);
+	// Resolve compaction tokens FOR the baseline model so Pi 1.4's
+	// compaction.modelOverrides["provider/model"] apply (per-field override →
+	// ordinary setting → default).
+	const compaction = readCompactionSnapshot(settingsManager, {
+		provider: baselineModel.provider,
+		id: baselineModel.id,
+	});
 
 	let model = baselineModel;
 	if (modelSpec.contextWindow !== undefined) {

@@ -10,6 +10,10 @@
  *    (strictly less than the baseline — equality is an error). The baseline
  *    comes from the raw registry/child-runtime model (including Pi's own
  *    models.json overrides), independent of any workflow-cloned active model.
+ *  - Compaction token settings are resolved FOR THE TARGET MODEL: every
+ *    snapshot call passes { provider, id } so Pi's
+ *    compaction.modelOverrides["provider/model"] apply per field, then
+ *    ordinary settings, then built-in defaults (Pi 1.4 SettingsManager).
  *  - The dynamic lower bound is a floor, not a guarantee: system prompt,
  *    summaries, or a single huge tool result may still exceed the budget.
  *  - Invalid configured values are NEVER silently dropped or clamped — they
@@ -26,6 +30,24 @@ import type { Model } from "@earendil-works/pi-ai";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { ReviewerContextBasis } from "./types.js";
 
+// ── Model identity ──────────────────────────────────────────────────────
+
+/**
+ * Minimal model identity for model-aware settings resolution. Single
+ * conversion point from a ModelSpec.model (or Model.id) to the
+ * `provider/id` key Pi's SettingsManager uses for
+ * `compaction.modelOverrides` lookups.
+ */
+export interface TargetModelIdentity {
+	provider: string;
+	id: string;
+}
+
+/** Convert a ModelSpec.model (or registry Model.id) into the identity key. */
+export function targetModelIdentity(provider: string, model: string): TargetModelIdentity {
+	return { provider, id: model };
+}
+
 // ── Compaction snapshot ────────────────────────────────────────────────────
 
 /** Pi compaction parameters relevant to the window lower bound. */
@@ -35,9 +57,15 @@ export interface CompactionSnapshot {
 	keepRecentTokens: number;
 }
 
-/** Read the compaction snapshot off a SettingsManager instance. */
-export function readCompactionSnapshot(sm: SettingsManager): CompactionSnapshot {
-	const s = sm.getCompactionSettings();
+/** Read the compaction snapshot off a SettingsManager instance, resolved
+ *  for the given target model (model-aware per Pi 1.4). The identity is
+ *  REQUIRED: every caller must resolve the snapshot for the model that will
+ *  carry the override, so per-model compaction.modelOverrides always apply. */
+export function readCompactionSnapshot(
+	sm: SettingsManager,
+	model: TargetModelIdentity,
+): CompactionSnapshot {
+	const s = sm.getCompactionSettings({ provider: model.provider, id: model.id });
 	return {
 		enabled: !!s.enabled,
 		reserveTokens: s.reserveTokens,
@@ -51,14 +79,16 @@ export type CompactionSnapshotResult =
 
 /**
  * Trust-aware DISK snapshot of Pi settings for the main session (Extension
- * exposes no live SettingsManager). Load errors are surfaced explicitly: a
- * broken settings.json must not silently degrade the window lower bound to
- * SDK defaults.
+ * exposes no live SettingsManager). Resolved FOR THE TARGET MODEL when
+ * identity is provided (Pi 1.4 compaction.modelOverrides apply per field).
+ * Load errors are surfaced explicitly: a broken settings.json must not
+ * silently degrade the window lower bound to SDK defaults.
  */
 export function loadDiskCompactionSnapshot(
 	cwd: string,
 	agentDir: string,
 	projectTrusted: boolean,
+	model: TargetModelIdentity,
 ): CompactionSnapshotResult {
 	try {
 		const sm = SettingsManager.create(cwd, agentDir, { projectTrusted });
@@ -72,7 +102,7 @@ export function loadDiskCompactionSnapshot(
 				error: `Pi settings could not be loaded from disk: ${detail}`,
 			};
 		}
-		return { ok: true, compaction: readCompactionSnapshot(sm) };
+		return { ok: true, compaction: readCompactionSnapshot(sm, model) };
 	} catch (e) {
 		return {
 			ok: false,

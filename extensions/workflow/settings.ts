@@ -64,8 +64,30 @@ import {
 	parseContextWindowInput,
 	validateContextWindowValue,
 	formatContextWindowRange,
+	targetModelIdentity,
 	type CompactionSnapshotResult,
+	type TargetModelIdentity,
 } from "./model-context.js";
+
+// ── Model-targeted compaction snapshots ─────────────────────────────
+
+/** Resolve the compaction lookup identity for a role: the role's effective
+ *  provider/model when present, falling back to DEFAULT_CONFIG's role model.
+ *  Mirrors what the settings UI displays as the inherited model. */
+function roleTargetIdentity(
+	effective: WorkflowConfig | undefined,
+	role: string,
+): TargetModelIdentity {
+	const spec = effective?.models[role as keyof typeof effective.models];
+	if (spec?.provider && spec?.model) {
+		return targetModelIdentity(spec.provider, spec.model);
+	}
+	const fallback = DEFAULT_CONFIG.models[role as keyof typeof DEFAULT_CONFIG.models];
+	return targetModelIdentity(
+		spec?.provider ?? fallback.provider,
+		spec?.model ?? fallback.model,
+	);
+}
 
 // ── Scopes ────────────────────────────────────────────────────────────────
 
@@ -398,6 +420,8 @@ export type ContextWindowCandidateCheck =
  * Validate a candidate role spec's contextWindow against the registry model
  * and a compaction snapshot. No configured window → OK regardless of
  * compaction/model availability (clearing and repairing stay possible).
+ * `compactionRes` MUST be resolved for the candidate's provider/model
+ * (targetModelIdentity) so per-model compaction.modelOverrides apply.
  * Shared by the TUI onChange path and the RPC wizard. Pure apart from the
  * registry lookup.
  */
@@ -438,6 +462,7 @@ export function validateRoleContextWindowCandidate(
  * Compute the acceptable-range hint for a role's contextWindow row: Pi
  * default window (registry) plus the dynamic range from the disk compaction
  * snapshot. Returns a short suffix string for the settings description.
+ * `compactionRes` MUST be resolved for the spec's provider/model.
  */
 function contextWindowRangeHint(
 	spec: ModelSpec | undefined,
@@ -1175,12 +1200,23 @@ export function registerWorkflowSettingsCommand(
 							sessionKey,
 							ctx,
 						);
-						// Disk compaction snapshot for the contextWindow range hint. The
-						// hint degrades to an explicit "unavailable" note on load errors.
-						const initialCompaction = loadDiskCompactionSnapshot(
-							cwd,
-							agentDir,
-							typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+						// Disk compaction snapshots for the contextWindow range hints,
+						// resolved per role's target model (modelOverrides apply).
+						const trusted =
+							typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted();
+						const initialCompactions = new Map<
+							string,
+							CompactionSnapshotResult
+						>(
+							ROLES.map((role) => [
+								role,
+								loadDiskCompactionSnapshot(
+									cwd,
+									agentDir,
+									trusted,
+									roleTargetIdentity(initialEffective, role),
+								),
+							]),
 						);
 						const describe = (
 							desc: SettingDescriptor,
@@ -1205,7 +1241,16 @@ export function registerWorkflowSettingsCommand(
 							const item: SettingItem = {
 								id: desc.id,
 								label: desc.label,
-								description: describe(desc, initialEffective, initialCompaction),
+								description: describe(
+									desc,
+									initialEffective,
+									desc.role
+										? (initialCompactions.get(desc.role) ?? {
+												ok: false,
+												error: "compaction snapshot unavailable",
+											})
+										: { ok: false as const, error: "no role" },
+								),
 								currentValue: currentDisplay(
 									desc,
 									scope,
@@ -1275,16 +1320,24 @@ export function registerWorkflowSettingsCommand(
 						const refreshItems = () => {
 							const layer = readLayer(scope, cwd, agentDir, sessionKey);
 							const effective = loadConfigForContext(cwd, agentDir, sessionKey, ctx);
-							const compactionRes = loadDiskCompactionSnapshot(
-								cwd,
-								agentDir,
-								typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
-							);
+							const trusted =
+								typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted();
 							for (const item of items) {
 								const desc = byId.get(item.id);
 								if (!desc) continue;
 								item.currentValue = currentDisplay(desc, scope, layer, effective);
-								item.description = describe(desc, effective, compactionRes);
+								item.description = describe(
+									desc,
+									effective,
+									desc.role
+										? loadDiskCompactionSnapshot(
+												cwd,
+												agentDir,
+												trusted,
+												roleTargetIdentity(effective, desc.role),
+											)
+										: { ok: false as const, error: "no role" },
+								);
 								if (desc.kind === "thinking" && desc.role) {
 									item.values = thinkingValuesFor(
 										desc,
@@ -1327,7 +1380,8 @@ export function registerWorkflowSettingsCommand(
 								// Model selection / clear re-checks any RETAINED contextWindow
 								// (this layer or below, merged up to the editing scope) against the
 								// candidate model — an illegal combination is rejected before the
-								// write so no layer can be saved into a broken state.
+								// write so no layer can be saved into a broken state. The compaction
+								// snapshot resolves FOR the candidate's provider/model.
 								const modelCandidate = buildCandidateConfigUpToScope(
 									scope,
 									JSON.parse(JSON.stringify(layer)),
@@ -1342,6 +1396,7 @@ export function registerWorkflowSettingsCommand(
 										cwd,
 										agentDir,
 										typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+										roleTargetIdentity(modelCandidate, desc.role),
 									),
 								);
 								if (!modelWindowCheck.ok) {
@@ -1381,6 +1436,7 @@ export function registerWorkflowSettingsCommand(
 											cwd,
 											agentDir,
 											typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+											roleTargetIdentity(candidate, desc.role),
 										),
 									);
 									if (!check.ok) {
@@ -1815,6 +1871,7 @@ async function editRpcSettingValue(
 					cwd,
 					agentDir,
 					typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+					roleTargetIdentity(candidate, desc.role),
 				),
 			);
 			if (!check.ok) {
@@ -1854,6 +1911,7 @@ async function editRpcSettingValue(
 				cwd,
 				agentDir,
 				typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+				roleTargetIdentity(candidate, desc.role),
 			),
 		);
 		if (!check.ok) {
@@ -1933,6 +1991,7 @@ async function editRpcSettingValue(
 				cwd,
 				agentDir,
 				typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+				roleTargetIdentity(effective, desc.role),
 			),
 		);
 		const value = await ctx.ui.input(
@@ -1968,6 +2027,7 @@ async function editRpcSettingValue(
 				cwd,
 				agentDir,
 				typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+				roleTargetIdentity(candidate, desc.role),
 			),
 		);
 		if (!check.ok) {
